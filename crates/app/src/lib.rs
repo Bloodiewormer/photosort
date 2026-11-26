@@ -1,4 +1,5 @@
 pub mod analysis_worker;
+pub mod bench;
 pub mod demo;
 pub mod export_flow;
 pub mod model;

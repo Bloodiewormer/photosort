@@ -1,3 +1,4 @@
+use app::bench;
 use app::demo::{self, DemoConfig};
 use app::model::{ChipMode, FilterState, GridLayout, Selection};
 use app::screenshot::{self, ScreenshotController};
@@ -17,6 +18,26 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 fn main() -> ExitCode {
+    match bench::parse_bench_args(std::env::args_os().skip(1)) {
+        Ok(Some(cfg)) => {
+            return match bench::run_bench(cfg) {
+                Ok(report) => {
+                    println!("{}", bench::format_report(&report));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("Error en benchmark: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let args = match screenshot::parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {
@@ -27,6 +48,7 @@ fn main() -> ExitCode {
 
     if args.help {
         println!("{}", screenshot::usage_text());
+        println!("     photosort --bench [--bench-count <N>]");
         return ExitCode::SUCCESS;
     }
 
