@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -26,11 +26,28 @@ impl DestPath {
     pub fn as_path(&self) -> &Path {
         &self.0
     }
+
+    /// A child of this path, only when `name` is a single plain file name (no separators, no `..`).
+    pub fn join_name(&self, name: &OsStr) -> Option<DestPath> {
+        let mut parts = Path::new(name).components();
+        match (parts.next(), parts.next()) {
+            (Some(Component::Normal(_)), None) => Some(DestPath(self.0.join(name))),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum GuardError {
-    InsideLibrary { path: PathBuf, root: PathBuf },
+    InsideLibrary {
+        path: PathBuf,
+        root: PathBuf,
+    },
+    /// The folder is a parent of a library: exporting there would mix copies with originals.
+    ContainsLibrary {
+        path: PathBuf,
+        root: PathBuf,
+    },
     ParentDirComponent(PathBuf),
     Io(io::Error),
 }
@@ -44,6 +61,14 @@ impl fmt::Display for GuardError {
                     "refusing to write inside library root {}: {}",
                     root.display(),
                     path.display()
+                )
+            }
+            Self::ContainsLibrary { path, root } => {
+                write!(
+                    f,
+                    "{} contains the library {}; choose a folder outside every library",
+                    path.display(),
+                    root.display()
                 )
             }
             Self::ParentDirComponent(path) => {
@@ -97,6 +122,22 @@ fn key(path: &Path) -> Vec<String> {
     path.components()
         .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
         .collect()
+}
+
+/// Like [`ensure_writable`], and also refuses a folder that contains a library, so copies are never
+/// mixed in with originals.
+pub fn ensure_export_dir(path: &Path, roots: &[LibraryRoot]) -> Result<DestPath, GuardError> {
+    let dest = ensure_writable(path, roots)?;
+    let dest_key = key(&dest.0);
+    for root in roots {
+        if key(&root.0).starts_with(&dest_key) {
+            return Err(GuardError::ContainsLibrary {
+                path: dest.0,
+                root: root.0.clone(),
+            });
+        }
+    }
+    Ok(dest)
 }
 
 /// Returns a [`DestPath`] only if `path` is neither a library root nor below one.
