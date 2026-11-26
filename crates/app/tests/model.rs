@@ -206,3 +206,87 @@ fn formatting_helpers_render_sizes_and_utc_dates() {
         "2023-11-14 22:13 UTC"
     );
 }
+
+#[test]
+fn spanish_pluralisation_helpers_handle_zero_one_and_many() {
+    use app::model::{count_phrase, plural_word, selected_phrase};
+
+    assert_eq!(plural_word(0, "imagen", "imágenes"), "imágenes");
+    assert_eq!(plural_word(1, "imagen", "imágenes"), "imagen");
+    assert_eq!(plural_word(2, "imagen", "imágenes"), "imágenes");
+
+    assert_eq!(count_phrase(0, "imagen", "imágenes"), "0 imágenes");
+    assert_eq!(count_phrase(1, "imagen", "imágenes"), "1 imagen");
+    assert_eq!(count_phrase(160, "imagen", "imágenes"), "160 imágenes");
+
+    assert_eq!(selected_phrase(0), "0 seleccionadas");
+    assert_eq!(selected_phrase(1), "1 seleccionada");
+    assert_eq!(selected_phrase(3), "3 seleccionadas");
+}
+
+#[test]
+fn chip_mode_info_maps_every_mode_to_explicit_text_prefix_and_tooltip() {
+    use app::model::{CHIP_FILTER_HELP, chip_mode_info, format_chip_label, format_chip_tooltip};
+
+    assert!(CHIP_FILTER_HELP.contains("Y"));
+    assert!(CHIP_FILTER_HELP.contains("O"));
+    assert!(CHIP_FILTER_HELP.contains("NO"));
+
+    let inactive = chip_mode_info(None);
+    let req = chip_mode_info(Some(ChipMode::Require));
+    let any = chip_mode_info(Some(ChipMode::Any));
+    let exc = chip_mode_info(Some(ChipMode::Exclude));
+
+    assert_eq!(inactive.prefix, "");
+    assert_eq!(req.prefix, "Y · ");
+    assert_eq!(any.prefix, "O · ");
+    assert_eq!(exc.prefix, "NO · ");
+
+    assert!(!inactive.tooltip.is_empty());
+    assert!(req.tooltip.contains("Y"));
+    assert!(any.tooltip.contains("O"));
+    assert!(exc.tooltip.contains("NO"));
+
+    assert_eq!(format_chip_label(None, "Manga", 12), "Manga (12)");
+    assert_eq!(
+        format_chip_label(Some(ChipMode::Require), "Manga", 12),
+        "Y · Manga (12)"
+    );
+    assert_eq!(
+        format_chip_label(Some(ChipMode::Any), "Manga", 12),
+        "O · Manga (12)"
+    );
+    assert_eq!(
+        format_chip_label(Some(ChipMode::Exclude), "Manga", 12),
+        "NO · Manga (12)"
+    );
+
+    let tip_one = format_chip_tooltip(Some(ChipMode::Require), "Manga", 1);
+    assert!(tip_one.contains("1 imagen"));
+    assert!(tip_one.contains(req.tooltip));
+}
+
+#[test]
+fn gallery_cell_and_sidebar_tooltip_helpers_format_full_name_and_folder() {
+    use app::model::{REVIEW_BADGE_TOOLTIP, gallery_cell_tooltip, library_display_name};
+    use std::path::Path;
+
+    assert_eq!(
+        REVIEW_BADGE_TOOLTIP,
+        "Tiene etiquetas sugeridas sin revisar"
+    );
+
+    let nested = Path::new(r"C:\demo\library\capturas\Screenshot_2024-01-02_muy_largo.png");
+    let tip = gallery_cell_tooltip(nested);
+    assert!(tip.contains("Screenshot_2024-01-02_muy_largo.png"));
+    assert!(tip.contains(r"C:\demo\library\capturas"));
+
+    let bare = Path::new("solo_archivo.png");
+    assert_eq!(gallery_cell_tooltip(bare), "solo_archivo.png");
+
+    assert_eq!(
+        library_display_name(Path::new(r"C:\demo\library")),
+        "library"
+    );
+    assert_eq!(library_display_name(Path::new(r"C:\")), r"C:\");
+}

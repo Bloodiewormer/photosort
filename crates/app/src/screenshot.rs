@@ -22,6 +22,15 @@ const MIN_WINDOW_HEIGHT: u32 = 240;
 const MAX_WINDOW_WIDTH: u32 = 7680;
 const MAX_WINDOW_HEIGHT: u32 = 4320;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaptureView {
+    #[default]
+    Gallery,
+    Review,
+    Duplicates,
+    Export,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliArgs {
     pub help: bool,
@@ -33,6 +42,7 @@ pub struct CliArgs {
     pub screenshot_delay_frames: u32,
     pub window_size: [u32; 2],
     pub theme: Option<Theme>,
+    pub view: CaptureView,
 }
 
 impl Default for CliArgs {
@@ -47,6 +57,7 @@ impl Default for CliArgs {
             screenshot_delay_frames: DEFAULT_SCREENSHOT_DELAY_FRAMES,
             window_size: DEFAULT_WINDOW_SIZE,
             theme: None,
+            view: CaptureView::Gallery,
         }
     }
 }
@@ -54,7 +65,8 @@ impl Default for CliArgs {
 pub fn usage_text() -> &'static str {
     "Uso: photosort [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
      [--screenshot <salida.png>] [--screenshot-delay-frames <N>] \
-     [--window-size <Ancho>x<Alto>] [--theme dark|light]"
+     [--window-size <Ancho>x<Alto>] [--theme dark|light] \
+     [--view gallery|review|duplicates|export]"
 }
 
 pub fn parse_window_size(raw: &str) -> Result<[u32; 2], String> {
@@ -91,6 +103,22 @@ pub fn parse_theme(raw: &str) -> Result<Theme, String> {
     } else {
         Err(format!(
             "Valor inválido para --theme: '{raw}' (usa 'dark' o 'light')"
+        ))
+    }
+}
+
+pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
+    if raw.eq_ignore_ascii_case("gallery") {
+        Ok(CaptureView::Gallery)
+    } else if raw.eq_ignore_ascii_case("review") {
+        Ok(CaptureView::Review)
+    } else if raw.eq_ignore_ascii_case("duplicates") {
+        Ok(CaptureView::Duplicates)
+    } else if raw.eq_ignore_ascii_case("export") {
+        Ok(CaptureView::Export)
+    } else {
+        Err(format!(
+            "Vista inválida para --view: '{raw}' (usa 'gallery', 'review', 'duplicates' o 'export')"
         ))
     }
 }
@@ -163,6 +191,13 @@ where
                 let text = val.to_string_lossy();
                 parsed.theme = Some(parse_theme(&text)?);
             }
+            "--view" => {
+                let val = iter
+                    .next()
+                    .ok_or_else(|| "Falta la vista después de --view".to_string())?;
+                let text = val.to_string_lossy();
+                parsed.view = parse_view(&text)?;
+            }
             other => {
                 return Err(format!("Argumento desconocido: {other}"));
             }
@@ -177,24 +212,35 @@ pub fn guard_screenshot_path(path: &Path, roots: &[LibraryRoot]) -> Result<DestP
     ensure_writable(path, roots)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameSignals {
     pub has_entries: bool,
     pub has_selection: bool,
     pub thumbs_ready: bool,
     pub preview_ready: bool,
+    pub export_open: bool,
+    pub export_ready: bool,
+    pub export_failed: bool,
     pub image_received: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureAction {
     SelectFirst,
+    OpenExport,
     WaitForWorkers,
     WaitFrame,
     RequestScreenshot,
     SaveAndClose,
     FailAndClose(String),
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStep {
+    None,
+    SelectFirst,
+    OpenExport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,20 +254,36 @@ enum Phase {
 /// Pure frame-based state machine driving automated viewport screenshots without sleeps.
 #[derive(Debug, Clone)]
 pub struct CaptureState {
+    view: CaptureView,
     delay_frames: u32,
     max_wait_frames: u32,
     max_capture_frames: u32,
-    selected_first: bool,
+    setup_triggered: bool,
     phase: Phase,
 }
 
 impl CaptureState {
     pub fn new(delay_frames: u32, max_wait_frames: u32, max_capture_frames: u32) -> Self {
+        Self::for_view(
+            CaptureView::Gallery,
+            delay_frames,
+            max_wait_frames,
+            max_capture_frames,
+        )
+    }
+
+    pub fn for_view(
+        view: CaptureView,
+        delay_frames: u32,
+        max_wait_frames: u32,
+        max_capture_frames: u32,
+    ) -> Self {
         Self {
+            view,
             delay_frames,
             max_wait_frames: max_wait_frames.max(1),
             max_capture_frames: max_capture_frames.max(1),
-            selected_first: false,
+            setup_triggered: false,
             phase: Phase::WaitingForReady { waited: 0 },
         }
     }
@@ -231,14 +293,37 @@ impl CaptureState {
             return CaptureAction::Done;
         }
 
-        if signals.has_entries && !signals.has_selection && !self.selected_first {
-            self.selected_first = true;
-            return CaptureAction::SelectFirst;
+        if !self.setup_triggered && signals.has_entries {
+            match self.view {
+                CaptureView::Gallery if !signals.has_selection => {
+                    self.setup_triggered = true;
+                    return CaptureAction::SelectFirst;
+                }
+                CaptureView::Export if !signals.export_open => {
+                    self.setup_triggered = true;
+                    return CaptureAction::OpenExport;
+                }
+                _ => {}
+            }
         }
 
         match self.phase {
             Phase::WaitingForReady { waited } => {
-                let ready = !signals.has_entries || (signals.thumbs_ready && signals.preview_ready);
+                if self.view == CaptureView::Export && signals.export_failed {
+                    self.phase = Phase::Done;
+                    return CaptureAction::FailAndClose(
+                        "No se pudo calcular la vista previa de exportación.".into(),
+                    );
+                }
+                let ready = match self.view {
+                    CaptureView::Gallery => {
+                        !signals.has_entries || (signals.thumbs_ready && signals.preview_ready)
+                    }
+                    CaptureView::Review | CaptureView::Duplicates => signals.thumbs_ready,
+                    CaptureView::Export => {
+                        !signals.has_entries || (signals.thumbs_ready && signals.export_ready)
+                    }
+                };
                 if ready {
                     if self.delay_frames == 0 {
                         self.phase = Phase::CaptureRequested { waited: 0 };
@@ -253,10 +338,24 @@ impl CaptureState {
                     let next_waited = waited.saturating_add(1);
                     if next_waited >= self.max_wait_frames {
                         self.phase = Phase::Done;
-                        CaptureAction::FailAndClose(
-                            "Tiempo de espera agotado esperando la carga de miniaturas y vista previa."
-                                .into(),
-                        )
+                        CaptureAction::FailAndClose(match self.view {
+                            CaptureView::Gallery => {
+                                "Tiempo de espera agotado esperando la carga de miniaturas y vista previa."
+                                    .into()
+                            }
+                            CaptureView::Review => {
+                                "Tiempo de espera agotado esperando las miniaturas de la pestaña Revisión."
+                                    .into()
+                            }
+                            CaptureView::Duplicates => {
+                                "Tiempo de espera agotado esperando las miniaturas de la pestaña Duplicados."
+                                    .into()
+                            }
+                            CaptureView::Export => {
+                                "Tiempo de espera agotado esperando la vista previa del asistente de exportación."
+                                    .into()
+                            }
+                        })
                     } else {
                         self.phase = Phase::WaitingForReady {
                             waited: next_waited,
@@ -398,6 +497,7 @@ impl ScreenshotController {
     pub fn new(
         dest: DestPath,
         roots: Vec<LibraryRoot>,
+        view: CaptureView,
         delay_frames: u32,
         target_size: [u32; 2],
     ) -> (Self, ScreenshotHandle) {
@@ -406,7 +506,8 @@ impl ScreenshotController {
             result: Arc::clone(&outcome),
         };
         let controller = Self {
-            state: CaptureState::new(
+            state: CaptureState::for_view(
+                view,
                 delay_frames,
                 DEFAULT_MAX_WAIT_FRAMES,
                 DEFAULT_MAX_CAPTURE_FRAMES,
@@ -421,41 +522,32 @@ impl ScreenshotController {
     }
 
     /// Advances the screenshot state machine for the current frame.
-    /// Returns `true` when the caller should select the first gallery entry to populate the inspector.
-    pub fn step(
-        &mut self,
-        ctx: &egui::Context,
-        has_entries: bool,
-        has_selection: bool,
-        thumbs_ready: bool,
-        preview_ready: bool,
-    ) -> bool {
-        let image_received = self
+    /// Returns a [`CaptureStep`] instructing the caller to perform any view-specific setup action.
+    pub fn step(&mut self, ctx: &egui::Context, mut signals: FrameSignals) -> CaptureStep {
+        signals.image_received = self
             .captured
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some();
 
-        let action = self.state.step(FrameSignals {
-            has_entries,
-            has_selection,
-            thumbs_ready,
-            preview_ready,
-            image_received,
-        });
+        let action = self.state.step(signals);
 
         match action {
             CaptureAction::SelectFirst => {
                 ctx.request_repaint();
-                true
+                CaptureStep::SelectFirst
+            }
+            CaptureAction::OpenExport => {
+                ctx.request_repaint();
+                CaptureStep::OpenExport
             }
             CaptureAction::WaitForWorkers => {
                 ctx.request_repaint_after(Duration::from_millis(25));
-                false
+                CaptureStep::None
             }
             CaptureAction::WaitFrame => {
                 ctx.request_repaint();
-                false
+                CaptureStep::None
             }
             CaptureAction::RequestScreenshot => {
                 let slot = Arc::clone(&self.captured);
@@ -466,7 +558,7 @@ impl ScreenshotController {
                 });
                 ctx.send_viewport_cmd(ViewportCommand::Screenshot(cb));
                 ctx.request_repaint();
-                false
+                CaptureStep::None
             }
             CaptureAction::SaveAndClose => {
                 let img = self
@@ -485,14 +577,14 @@ impl ScreenshotController {
                 };
                 *self.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(res);
                 ctx.send_viewport_cmd(ViewportCommand::Close);
-                false
+                CaptureStep::None
             }
             CaptureAction::FailAndClose(msg) => {
                 *self.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(msg));
                 ctx.send_viewport_cmd(ViewportCommand::Close);
-                false
+                CaptureStep::None
             }
-            CaptureAction::Done => false,
+            CaptureAction::Done => CaptureStep::None,
         }
     }
 }

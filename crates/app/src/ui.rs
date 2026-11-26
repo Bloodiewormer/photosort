@@ -1,6 +1,8 @@
 use crate::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use crate::model::{
-    ChipMode, FilterState, GridLayout, MoveDir, Selection, format_bytes, format_timestamp_utc,
+    CHIP_FILTER_HELP, ChipMode, FilterState, GridLayout, MoveDir, REVIEW_BADGE_TOOLTIP, Selection,
+    count_phrase, format_bytes, format_chip_label, format_chip_tooltip, format_timestamp_utc,
+    gallery_cell_tooltip, library_display_name, plural_word, selected_phrase,
 };
 use crate::review_flow::ReviewFlow;
 use crate::settings::{self, Settings, Theme};
@@ -71,6 +73,8 @@ pub struct PhotosortApp {
     new_label_text: String,
     focus_search_next_frame: bool,
     export_wizard: Option<crate::export_flow::ExportWizard>,
+    preset_export_dir: Option<PathBuf>,
+    export_open_failed: bool,
     screenshot: Option<crate::screenshot::ScreenshotController>,
     last_thumbs_ready: bool,
 }
@@ -144,6 +148,8 @@ impl PhotosortApp {
             new_label_text: String::new(),
             focus_search_next_frame: false,
             export_wizard: None,
+            preset_export_dir: None,
+            export_open_failed: false,
             screenshot: None,
             last_thumbs_ready: false,
         };
@@ -154,6 +160,22 @@ impl PhotosortApp {
     pub fn with_theme_override(mut self, ctx: &egui::Context, theme: Theme) -> Self {
         self.settings.theme = theme;
         theme::apply_theme_preference(ctx, theme);
+        self
+    }
+
+    pub fn with_initial_view(
+        mut self,
+        view: crate::screenshot::CaptureView,
+        preset_export_dir: Option<PathBuf>,
+    ) -> Self {
+        self.active_tab = match view {
+            crate::screenshot::CaptureView::Gallery | crate::screenshot::CaptureView::Export => {
+                ActiveTab::Gallery
+            }
+            crate::screenshot::CaptureView::Review => ActiveTab::Review,
+            crate::screenshot::CaptureView::Duplicates => ActiveTab::Duplicates,
+        };
+        self.preset_export_dir = preset_export_dir;
         self
     }
 
@@ -269,14 +291,25 @@ impl PhotosortApp {
                         needs_reload = true;
                         self.index_progress = None;
                         self.status_notice = Some(if stopped {
-                            format!("Indexación detenida: {new} nuevas, {changed} actualizadas.")
+                            format!(
+                                "Indexación detenida: {}, {}.",
+                                count_phrase(new, "nueva", "nuevas"),
+                                count_phrase(changed, "actualizada", "actualizadas"),
+                            )
                         } else if errors > 0 {
                             format!(
-                                "Indexación completa: {new} nuevas, {changed} actualizadas, {unchanged} sin cambios, {missing} ausentes, {errors} errores."
+                                "Indexación completa: {}, {}, {unchanged} sin cambios, {}, {}.",
+                                count_phrase(new, "nueva", "nuevas"),
+                                count_phrase(changed, "actualizada", "actualizadas"),
+                                count_phrase(missing, "ausente", "ausentes"),
+                                count_phrase(errors, "error", "errores"),
                             )
                         } else {
                             format!(
-                                "Indexación completa: {new} nuevas, {changed} actualizadas, {unchanged} sin cambios, {missing} ausentes."
+                                "Indexación completa: {}, {}, {unchanged} sin cambios, {}.",
+                                count_phrase(new, "nueva", "nuevas"),
+                                count_phrase(changed, "actualizada", "actualizadas"),
+                                count_phrase(missing, "ausente", "ausentes"),
                             )
                         });
                     }
@@ -306,15 +339,22 @@ impl PhotosortApp {
                         self.analysis_progress = None;
                         self.status_notice = Some(if stopped {
                             format!(
-                                "Análisis detenido: {analyzed} analizadas, {suggestions} sugerencias."
+                                "Análisis detenido: {}, {}.",
+                                count_phrase(analyzed, "analizada", "analizadas"),
+                                count_phrase(suggestions, "sugerencia", "sugerencias"),
                             )
                         } else if errors > 0 {
                             format!(
-                                "Análisis completo: {analyzed} analizadas, {suggestions} sugerencias, {errors} errores."
+                                "Análisis completo: {}, {}, {}.",
+                                count_phrase(analyzed, "analizada", "analizadas"),
+                                count_phrase(suggestions, "sugerencia", "sugerencias"),
+                                count_phrase(errors, "error", "errores"),
                             )
                         } else {
                             format!(
-                                "Análisis completo: {analyzed} analizadas, {suggestions} sugerencias."
+                                "Análisis completo: {}, {}.",
+                                count_phrase(analyzed, "analizada", "analizadas"),
+                                count_phrase(suggestions, "sugerencia", "sugerencias"),
                             )
                         });
                     }
@@ -590,7 +630,10 @@ impl PhotosortApp {
                         egui::TextEdit::singleline(&mut self.filter.search)
                             .id(search_id)
                             .desired_width(240.0)
-                            .hint_text("Buscar por ruta o nombre (/ o Ctrl+F)..."),
+                            .hint_text(theme::hint_text(
+                                palette,
+                                "Buscar por ruta o nombre (/ o Ctrl+F)...",
+                            )),
                     );
                     if self.focus_search_next_frame {
                         search_resp.request_focus();
@@ -808,16 +851,17 @@ impl PhotosortApp {
                     });
                     ui.add_space(theme::SPACE_XS);
                     for root in &self.settings.library_roots {
-                        let name = root
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| root.display().to_string());
+                        let name = library_display_name(root);
+                        let full_path = root.display().to_string();
                         ui.horizontal(|ui| {
-                            ui.label(&name).on_hover_text(root.display().to_string());
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("Quitar").clicked() {
                                     to_remove = Some(root.clone());
                                 }
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(egui::Label::new(&name).truncate())
+                                        .on_hover_text(&full_path);
+                                });
                             });
                         });
                     }
@@ -838,7 +882,7 @@ impl PhotosortApp {
                         }
                     });
                     ui.label(
-                        RichText::new("Clic para alternar: Y / O / NO")
+                        RichText::new(CHIP_FILTER_HELP)
                             .size(theme::FONT_SMALL)
                             .color(palette.text_secondary.color32()),
                     );
@@ -872,33 +916,44 @@ impl PhotosortApp {
                             ui.horizontal_wrapped(|ui| {
                                 for lc in group {
                                     let mode = self.filter.chip_mode(lc.label);
-                                    let (bg, fg, prefix) = match mode {
+                                    let count = lc.images.max(0) as usize;
+                                    let (bg, fg, stroke) = match mode {
                                         None => (
                                             palette.bg_card.color32(),
                                             palette.text_primary.color32(),
-                                            "",
+                                            Stroke::new(1.0, palette.border.color32()),
                                         ),
-                                        Some(ChipMode::Require) => (
-                                            palette.chip_require_bg.color32(),
-                                            palette.chip_require_fg.color32(),
-                                            "Y: ",
-                                        ),
-                                        Some(ChipMode::Any) => (
-                                            palette.chip_any_bg.color32(),
-                                            palette.chip_any_fg.color32(),
-                                            "O: ",
-                                        ),
-                                        Some(ChipMode::Exclude) => (
-                                            palette.chip_exclude_bg.color32(),
-                                            palette.chip_exclude_fg.color32(),
-                                            "NO: ",
-                                        ),
+                                        Some(ChipMode::Require) => {
+                                            let c = palette.chip_require_fg.color32();
+                                            (
+                                                palette.chip_require_bg.color32(),
+                                                c,
+                                                Stroke::new(1.5, c),
+                                            )
+                                        }
+                                        Some(ChipMode::Any) => {
+                                            let c = palette.chip_any_fg.color32();
+                                            (palette.chip_any_bg.color32(), c, Stroke::new(1.5, c))
+                                        }
+                                        Some(ChipMode::Exclude) => {
+                                            let c = palette.chip_exclude_fg.color32();
+                                            (
+                                                palette.chip_exclude_bg.color32(),
+                                                c,
+                                                Stroke::new(1.5, c),
+                                            )
+                                        }
                                     };
-                                    let text = format!("{prefix}{} ({})", lc.name, lc.images);
-                                    let btn = egui::Button::new(RichText::new(text).color(fg))
-                                        .fill(bg)
-                                        .stroke(Stroke::new(1.0, palette.border.color32()));
-                                    if ui.add(btn).clicked() {
+                                    let text = format_chip_label(mode, &lc.name, count);
+                                    let mut rt = RichText::new(text).color(fg);
+                                    if mode.is_some() {
+                                        rt = rt.strong();
+                                    }
+                                    let btn = egui::Button::new(rt).fill(bg).stroke(stroke);
+                                    let resp = ui
+                                        .add(btn)
+                                        .on_hover_text(format_chip_tooltip(mode, &lc.name, count));
+                                    if resp.clicked() {
                                         self.filter.cycle_chip(lc.label);
                                         filter_changed = true;
                                     }
@@ -912,12 +967,28 @@ impl PhotosortApp {
                     ui.add_space(theme::SPACE_SM);
                     ui.label(RichText::new("Resumen").strong());
                     ui.add_space(theme::SPACE_XS);
+                    let assets = self.counts.assets.max(0) as usize;
+                    let locations = self.counts.locations.max(0) as usize;
+                    let missing = self.counts.missing.max(0) as usize;
+                    let selected = self.selection.len();
                     let stats = [
-                        ("Imágenes únicas", self.counts.assets.to_string()),
-                        ("Ubicaciones", self.counts.locations.to_string()),
-                        ("Ausentes", self.counts.missing.to_string()),
+                        (
+                            plural_word(assets, "Imagen única", "Imágenes únicas"),
+                            assets.to_string(),
+                        ),
+                        (
+                            plural_word(locations, "Ubicación", "Ubicaciones"),
+                            locations.to_string(),
+                        ),
+                        (
+                            plural_word(missing, "Ausente", "Ausentes"),
+                            missing.to_string(),
+                        ),
                         ("En vista", self.entries.len().to_string()),
-                        ("Seleccionadas", self.selection.len().to_string()),
+                        (
+                            plural_word(selected, "Seleccionada", "Seleccionadas"),
+                            selected.to_string(),
+                        ),
                     ];
                     for (label, value) in stats {
                         ui.horizontal(|ui| {
@@ -958,9 +1029,9 @@ impl PhotosortApp {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!(
-                                "{} imágenes ({} seleccionadas)",
-                                self.entries.len(),
-                                self.selection.len()
+                                "{} ({})",
+                                count_phrase(self.entries.len(), "imagen", "imágenes"),
+                                selected_phrase(self.selection.len()),
                             ))
                             .color(palette.text_secondary.color32()),
                         );
@@ -1120,7 +1191,7 @@ impl PhotosortApp {
                                         );
                                     }
 
-                                    if pending_review {
+                                    let badge_rect = pending_review.then(|| {
                                         let badge_rect = egui::Rect::from_min_size(
                                             thumb_rect.min + Vec2::splat(theme::SPACE_XS),
                                             Vec2::new(66.0, 20.0),
@@ -1137,7 +1208,8 @@ impl PhotosortApp {
                                             egui::FontId::proportional(theme::FONT_SMALL),
                                             palette.review_badge_fg.color32(),
                                         );
-                                    }
+                                        badge_rect
+                                    });
 
                                     let filename = entry
                                         .path
@@ -1157,14 +1229,25 @@ impl PhotosortApp {
                                     let mut child_ui = ui.new_child(
                                         egui::UiBuilder::new().max_rect(label_rect),
                                     );
+                                    // Non-interactive label so hover and clicks pass through to the cell `resp`.
                                     child_ui.add(
                                         egui::Label::new(
                                             RichText::new(filename)
                                                 .size(theme::FONT_SMALL)
                                                 .color(palette.text_primary.color32()),
                                         )
-                                        .truncate(),
+                                        .truncate()
+                                        .sense(Sense::empty()),
                                     );
+
+                                    if badge_rect.is_some_and(|r| ui.rect_contains_pointer(r)) {
+                                        resp.on_hover_text(REVIEW_BADGE_TOOLTIP);
+                                    } else {
+                                        let entry_path = &entry.path;
+                                        resp.on_hover_ui(|ui| {
+                                            ui.label(gallery_cell_tooltip(entry_path));
+                                        });
+                                    }
                                 }
                             });
                         }
@@ -1392,7 +1475,7 @@ impl PhotosortApp {
                         let edit = ui.add(
                             egui::TextEdit::singleline(&mut self.new_label_text)
                                 .desired_width((ui.available_width() - 78.0).max(80.0))
-                                .hint_text("Nombre..."),
+                                .hint_text(theme::hint_text(palette, "Nombre...")),
                         );
                         let submit = ui.button("Añadir").clicked()
                             || (edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
@@ -1538,13 +1621,74 @@ impl PhotosortApp {
             None => true,
             Some(path) => matches!(&self.preview_loaded, Some((p, _)) if p == path),
         };
-        let select_first = self.screenshot.as_mut().is_some_and(|ctrl| {
-            ctrl.step(ctx, has_entries, has_selection, thumbs_ready, preview_ready)
+        let export_open = self.export_wizard.is_some();
+        let export_ready = self.export_wizard.as_ref().is_some_and(|w| {
+            matches!(
+                w.phase(),
+                crate::export_flow::ExportPhase::Preview(crate::export_flow::PreviewState::Ready(
+                    _
+                ))
+            )
         });
-        if select_first && has_entries {
-            self.selection.click(0, self.entries.len());
-            self.sync_inspector(false);
+        let export_failed = self.export_open_failed
+            || self.export_wizard.as_ref().is_some_and(|w| {
+                w.validation_error().is_some()
+                    || matches!(w.phase(), crate::export_flow::ExportPhase::Error(_))
+            });
+
+        let step = self
+            .screenshot
+            .as_mut()
+            .map_or(crate::screenshot::CaptureStep::None, |ctrl| {
+                ctrl.step(
+                    ctx,
+                    crate::screenshot::FrameSignals {
+                        has_entries,
+                        has_selection,
+                        thumbs_ready,
+                        preview_ready,
+                        export_open,
+                        export_ready,
+                        export_failed,
+                        image_received: false,
+                    },
+                )
+            });
+        match step {
+            crate::screenshot::CaptureStep::SelectFirst if has_entries => {
+                self.selection.click(0, self.entries.len());
+                self.sync_inspector(false);
+            }
+            crate::screenshot::CaptureStep::OpenExport if has_entries => {
+                self.open_export_for_capture(ctx);
+            }
+            _ => {}
         }
+    }
+
+    fn open_export_for_capture(&mut self, ctx: &egui::Context) {
+        let Some(cat) = self.catalog.as_ref() else {
+            self.export_open_failed = true;
+            return;
+        };
+        let dest = self
+            .preset_export_dir
+            .clone()
+            .or_else(|| self.settings.last_export_dir.clone());
+        // Pass an empty selection so ExportWizard includes all filtered demo images.
+        let mut wizard =
+            crate::export_flow::ExportWizard::open(cat, &self.entries, &Selection::default(), dest);
+        if matches!(wizard.phase(), crate::export_flow::ExportPhase::Error(_)) {
+            self.export_open_failed = true;
+        } else {
+            let roots = self.settings.valid_roots();
+            let ctx_clone = ctx.clone();
+            let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
+            if wizard.request_preview(&roots, Some(notify)).is_err() {
+                self.export_open_failed = true;
+            }
+        }
+        self.export_wizard = Some(wizard);
     }
 }
 
@@ -1577,6 +1721,7 @@ impl eframe::App for PhotosortApp {
                         &self.thumb_textures,
                         &self.thumb_failed,
                     );
+                    self.last_thumbs_ready = outcome.thumbs_ready;
                     if let Some(err) = outcome.error {
                         self.banner_error = Some(err);
                     }
@@ -1588,14 +1733,16 @@ impl eframe::App for PhotosortApp {
                     }
                 }
                 ActiveTab::Duplicates => {
-                    if let Some(err) = views::duplicates::draw(
+                    let outcome = views::duplicates::draw(
                         ui,
                         palette,
                         &self.duplicate_groups,
                         &self.thumb_pool,
                         &self.thumb_textures,
                         &self.thumb_failed,
-                    ) {
+                    );
+                    self.last_thumbs_ready = outcome.thumbs_ready;
+                    if let Some(err) = outcome.error {
                         self.banner_error = Some(err);
                     }
                 }

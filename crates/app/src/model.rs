@@ -1,7 +1,7 @@
 use catalog::{Entry, Filter, LabelId, Sort};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveDir {
@@ -249,6 +249,51 @@ pub enum ChipMode {
     Exclude,
 }
 
+pub const CHIP_FILTER_HELP: &str =
+    "Cada clic cambia el filtro: exigir (Y) → incluir alguna (O) → excluir (NO) → sin filtro.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChipModeInfo {
+    pub prefix: &'static str,
+    pub tooltip: &'static str,
+}
+
+/// Maps an optional chip filter mode to its explicit text prefix and explanatory Spanish tooltip.
+pub fn chip_mode_info(mode: Option<ChipMode>) -> ChipModeInfo {
+    match mode {
+        None => ChipModeInfo {
+            prefix: "",
+            tooltip: "Sin filtro. Clic para exigir esta etiqueta (Y).",
+        },
+        Some(ChipMode::Require) => ChipModeInfo {
+            prefix: "Y · ",
+            tooltip: "Modo Y (exigir): solo muestra imágenes con esta etiqueta. Clic para cambiar a O.",
+        },
+        Some(ChipMode::Any) => ChipModeInfo {
+            prefix: "O · ",
+            tooltip: "Modo O (alguna): muestra imágenes con al menos una etiqueta en O. Clic para cambiar a NO.",
+        },
+        Some(ChipMode::Exclude) => ChipModeInfo {
+            prefix: "NO · ",
+            tooltip: "Modo NO (excluir): oculta imágenes con esta etiqueta. Clic para quitar el filtro.",
+        },
+    }
+}
+
+/// Formats a filter chip's button text with explicit mode prefix when active.
+pub fn format_chip_label(mode: Option<ChipMode>, name: &str, count: usize) -> String {
+    format!("{}{name} ({count})", chip_mode_info(mode).prefix)
+}
+
+/// Formats a filter chip's hover tooltip with its image count and active mode explanation.
+pub fn format_chip_tooltip(mode: Option<ChipMode>, name: &str, count: usize) -> String {
+    format!(
+        "{name} ({})\n{}",
+        count_phrase(count, "imagen", "imágenes"),
+        chip_mode_info(mode).tooltip
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilterState {
     pub search: String,
@@ -355,4 +400,42 @@ pub fn format_timestamp_utc(ns: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
     format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
+}
+
+/// Returns `singular` when `n == 1`, otherwise `plural` (Spanish number agreement).
+pub fn plural_word<'a>(n: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if n == 1 { singular } else { plural }
+}
+
+/// Formats a Spanish count phrase such as `"1 imagen"` or `"3 imágenes"`.
+pub fn count_phrase(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", plural_word(n, singular, plural))
+}
+
+/// Formats the selected-image count in Spanish (`"1 seleccionada"`, `"0 seleccionadas"`, `"3 seleccionadas"`).
+pub fn selected_phrase(n: usize) -> String {
+    count_phrase(n, "seleccionada", "seleccionadas")
+}
+
+pub const REVIEW_BADGE_TOOLTIP: &str = "Tiene etiquetas sugeridas sin revisar";
+
+/// Formats a gallery cell's hover tooltip with its full file name and containing folder.
+pub fn gallery_cell_tooltip(path: &Path) -> String {
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            format!("{filename}\nCarpeta: {}", parent.display())
+        }
+        _ => filename,
+    }
+}
+
+/// Returns the short folder name shown in the sidebar library list, falling back to the full path.
+pub fn library_display_name(root: &Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string())
 }

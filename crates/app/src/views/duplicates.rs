@@ -1,4 +1,4 @@
-use crate::model::{format_bytes, format_timestamp_utc};
+use crate::model::{count_phrase, format_bytes, format_timestamp_utc};
 use crate::theme::{self, Palette};
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::DuplicateGroup;
@@ -62,28 +62,22 @@ pub fn sort_groups(groups: &mut [DuplicateGroup]) {
 }
 
 pub fn format_summary_line(summary: &DuplicatesSummary) -> String {
-    let groups_word = if summary.group_count == 1 {
-        "grupo"
-    } else {
-        "grupos"
-    };
-    let copies_word = if summary.redundant_copies == 1 {
-        "copia redundante"
-    } else {
-        "copias redundantes"
-    };
     format!(
-        "{} {groups_word} · {} {copies_word} · {} de espacio duplicado",
-        summary.group_count,
-        summary.redundant_copies,
+        "{} · {} · {} de espacio duplicado",
+        count_phrase(summary.group_count, "grupo", "grupos"),
+        count_phrase(
+            summary.redundant_copies,
+            "copia redundante",
+            "copias redundantes"
+        ),
         format_bytes(summary.wasted_bytes),
     )
 }
 
 pub fn format_group_heading(group: &DuplicateGroup) -> String {
     format!(
-        "{} copias · {} c/u · {} duplicados",
-        group.entries.len(),
+        "{} · {} c/u · {} duplicados",
+        count_phrase(group.entries.len(), "copia", "copias"),
         format_bytes(group.size),
         format_bytes(group_wasted_bytes(group)),
     )
@@ -101,7 +95,13 @@ pub fn reveal_in_explorer(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Renders the read-only duplicate review tab. Returns an error message if opening Explorer fails.
+#[derive(Debug, Default)]
+pub struct DuplicatesViewOutcome {
+    pub error: Option<String>,
+    pub thumbs_ready: bool,
+}
+
+/// Renders the read-only duplicate review tab. Reports Explorer launch errors and thumbnail readiness.
 pub fn draw(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -109,7 +109,7 @@ pub fn draw(
     thumb_pool: &ThumbPool,
     thumb_textures: &HashMap<String, TextureHandle>,
     thumb_failed: &HashSet<String>,
-) -> Option<String> {
+) -> DuplicatesViewOutcome {
     let summary = summarize(groups);
     let mut visible_hashes: HashSet<String> = HashSet::new();
     let mut to_request: Vec<ThumbRequest> = Vec::new();
@@ -282,12 +282,17 @@ pub fn draw(
                 });
         });
 
+    let thumbs_ready = groups.is_empty() || (!visible_hashes.is_empty() && to_request.is_empty());
+
     thumb_pool.set_visible(&visible_hashes);
     for req in to_request {
         thumb_pool.request(req);
     }
 
-    open_error
+    DuplicatesViewOutcome {
+        error: open_error,
+        thumbs_ready,
+    }
 }
 
 fn draw_thumb_box(
