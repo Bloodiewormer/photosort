@@ -7,6 +7,7 @@ edition.workspace = true
 fsguard = { path = "../fsguard" }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 scanner = { path = "../scanner" }
+unicode-normalization = "0.1.26"
 
 [dev-dependencies]
 dunce = "1.0.5"

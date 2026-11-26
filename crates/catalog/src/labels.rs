@@ -53,6 +53,9 @@ pub struct Filter {
     pub exclude: Vec<LabelId>,
     /// The path contains this text, ignoring case.
     pub path_contains: Option<String>,
+    /// The path contains this text (ignoring case) OR some searchable OCR line's normalized key
+    /// contains the normalized query.
+    pub search: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -154,6 +157,53 @@ pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, fi
     if let Some(text) = &filter.path_contains {
         sql.push_str(" AND instr(lower(l.path), lower(?)) > 0");
         args.push(Box::new(text.clone()));
+    }
+    if let Some(text) = &filter.search {
+        let key = crate::ocr::ocr_search_key(text);
+        if key.is_empty() {
+            sql.push_str(" AND instr(lower(l.path), lower(?)) > 0");
+            args.push(Box::new(text.clone()));
+        } else if key.chars().count() >= 3 {
+            let fts_query = format!("\"{}\"", key.replace('"', "\"\""));
+            sql.push_str(
+                " AND (instr(lower(l.path), lower(?)) > 0 \
+                   OR l.asset_id IN (SELECT o.asset_id \
+                                     FROM ocr_line_fts f \
+                                     JOIN ocr_line o ON o.id = f.rowid \
+                                     WHERE f.search_key MATCH ? \
+                                       AND instr(o.search_key, ?) > 0 \
+                                       AND (o.top_strip = 0 \
+                                            OR NOT EXISTS (SELECT 1 FROM asset_label al \
+                                                           JOIN label lb ON lb.id = al.label_id \
+                                                           WHERE al.asset_id = o.asset_id \
+                                                             AND al.status <> 'rejected' \
+                                                             AND lb.kind = 'category' \
+                                                             AND lb.name = ?))))",
+            );
+            args.push(Box::new(text.clone()));
+            args.push(Box::new(fts_query));
+            args.push(Box::new(key));
+            args.push(Box::new(crate::ocr::SCREENSHOT_CATEGORY.to_string()));
+        } else {
+            // shortcut: 1-2 character queries cannot use the FTS5 trigram index and fall back to
+            // a plain instr scan over ocr_line.search_key.
+            sql.push_str(
+                " AND (instr(lower(l.path), lower(?)) > 0 \
+                   OR EXISTS (SELECT 1 FROM ocr_line o \
+                              WHERE o.asset_id = l.asset_id \
+                                AND instr(o.search_key, ?) > 0 \
+                                AND (o.top_strip = 0 \
+                                     OR NOT EXISTS (SELECT 1 FROM asset_label al \
+                                                    JOIN label lb ON lb.id = al.label_id \
+                                                    WHERE al.asset_id = l.asset_id \
+                                                      AND al.status <> 'rejected' \
+                                                      AND lb.kind = 'category' \
+                                                      AND lb.name = ?))))",
+            );
+            args.push(Box::new(text.clone()));
+            args.push(Box::new(key));
+            args.push(Box::new(crate::ocr::SCREENSHOT_CATEGORY.to_string()));
+        }
     }
 }
 

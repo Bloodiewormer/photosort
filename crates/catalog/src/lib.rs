@@ -2,11 +2,16 @@ mod analysis;
 mod browse;
 mod dupes;
 mod labels;
+mod ocr;
 
 pub use analysis::Pending;
 pub use browse::{Entry, LabelCount, Sort};
 pub use dupes::DuplicateGroup;
 pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, Source, Status};
+pub use ocr::{
+    OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
+    ocr_search_key,
+};
 
 use fsguard::{DestPath, LibraryRoot};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -65,6 +70,40 @@ CREATE TABLE IF NOT EXISTS analysis (
     version  INTEGER NOT NULL,
     PRIMARY KEY (asset_id, stage)
 );
+CREATE TABLE IF NOT EXISTS ocr_line (
+    -- Explicit so that VACUUM keeps it: the FTS index refers to lines by this number.
+    id         INTEGER PRIMARY KEY,
+    asset_id   INTEGER NOT NULL REFERENCES asset(id),
+    line       INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    search_key TEXT NOT NULL,
+    score      REAL NOT NULL CHECK (score BETWEEN 0 AND 1),
+    recognizer TEXT NOT NULL CHECK (recognizer IN ('v6', 'korean')),
+    x0         REAL NOT NULL,
+    y0         REAL NOT NULL,
+    x1         REAL NOT NULL,
+    y1         REAL NOT NULL,
+    top_strip  INTEGER NOT NULL CHECK (top_strip IN (0, 1)),
+    UNIQUE (asset_id, line)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS ocr_line_fts USING fts5(
+    search_key,
+    content='ocr_line',
+    content_rowid='id',
+    tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS ocr_line_ai AFTER INSERT ON ocr_line BEGIN
+    INSERT INTO ocr_line_fts(rowid, search_key) VALUES (new.id, new.search_key);
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_line_ad AFTER DELETE ON ocr_line BEGIN
+    INSERT INTO ocr_line_fts(ocr_line_fts, rowid, search_key)
+    VALUES ('delete', old.id, old.search_key);
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_line_au AFTER UPDATE ON ocr_line BEGIN
+    INSERT INTO ocr_line_fts(ocr_line_fts, rowid, search_key)
+    VALUES ('delete', old.id, old.search_key);
+    INSERT INTO ocr_line_fts(rowid, search_key) VALUES (new.id, new.search_key);
+END;
 ";
 
 #[derive(Debug)]
