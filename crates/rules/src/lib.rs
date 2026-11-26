@@ -1,4 +1,13 @@
-use catalog::LabelKind;
+use catalog::{Catalog, CatalogError, LabelKind, Source};
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{self, BufReader};
+use std::path::{Path, PathBuf};
+
+pub const STAGE: &str = "rules";
+pub const VERSION: u32 = 1;
+
+const BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts {
@@ -14,6 +23,95 @@ pub struct Suggestion {
     pub kind: LabelKind,
     pub name: &'static str,
     pub confidence: f64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RunReport {
+    pub analyzed: usize,
+    pub suggestions: usize,
+    pub errors: Vec<(PathBuf, String)>,
+}
+
+/// Reads ONLY header/metadata: image dimensions via `image::image_dimensions` (no full decode)
+/// and camera Make/Model presence via `exif`. Read-only.
+pub fn read_facts(path: &Path) -> io::Result<Facts> {
+    let (width, height) = image::image_dimensions(path).map_err(|e| match e {
+        image::ImageError::IoError(io_err) => io_err,
+        other => io::Error::new(io::ErrorKind::InvalidData, other),
+    })?;
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let has_camera_exif = exif::Reader::new()
+        .read_from_container(&mut reader)
+        .map(|data| {
+            has_non_empty_tag(&data, exif::Tag::Make) || has_non_empty_tag(&data, exif::Tag::Model)
+        })
+        .unwrap_or(false);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    Ok(Facts {
+        file_name,
+        extension,
+        width,
+        height,
+        has_camera_exif,
+    })
+}
+
+fn has_non_empty_tag(data: &exif::Exif, tag: exif::Tag) -> bool {
+    data.get_field(tag, exif::In::PRIMARY)
+        .is_some_and(|field| match &field.value {
+            exif::Value::Ascii(values) => values
+                .iter()
+                .any(|s| s.iter().any(|&b| b != 0 && !b.is_ascii_whitespace())),
+            _ => !field.display_value().to_string().trim().is_empty(),
+        })
+}
+
+/// Processes `catalog.pending(STAGE, VERSION, ..)` in batches until none is left: `read_facts`,
+/// `suggest`, then `catalog.label(kind, name)` + `catalog.suggest(asset, label, Source::Rules, confidence)`
+/// for each, then `mark_done`. An unreadable file is reported in `errors` and NOT marked done
+/// (it is retried next run). Never touches user decisions. Safe to run repeatedly.
+pub fn run(catalog: &Catalog) -> Result<RunReport, CatalogError> {
+    let mut report = RunReport::default();
+    let mut failed: HashSet<i64> = HashSet::new();
+
+    loop {
+        let batch = catalog.pending(STAGE, VERSION, BATCH_SIZE.saturating_add(failed.len()))?;
+        let mut progressed = false;
+        for item in batch {
+            if failed.contains(&item.asset.0) {
+                continue;
+            }
+            progressed = true;
+            let facts = match read_facts(&item.path) {
+                Ok(facts) => facts,
+                Err(e) => {
+                    report.errors.push((item.path, e.to_string()));
+                    failed.insert(item.asset.0);
+                    continue;
+                }
+            };
+            for s in suggest(&facts) {
+                let label = catalog.label(s.kind, s.name)?;
+                catalog.suggest(item.asset, label, Source::Rules, s.confidence)?;
+                report.suggestions += 1;
+            }
+            catalog.mark_done(item.asset, STAGE, VERSION)?;
+            report.analyzed += 1;
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    Ok(report)
 }
 
 struct Rule {
