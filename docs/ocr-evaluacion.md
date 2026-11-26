@@ -312,6 +312,31 @@ Casi todas las lecturas inventadas son de uno o dos caracteres y puntuación baj
 - **Indra OCR no se descargó ni se midió:** descargar sus pesos implica aceptar su licencia, y eso solo puede hacerlo el propietario.
 - Tampoco se usaron SigLIP, WD Tagger ni CUDA.
 
+## Filtro por puntuación mínima
+
+Una lectura con puntuación inferior a **0,65** (`select::MIN_SCORE`) se considera texto inventado. El valor se eligió en el conjunto de ajuste: es el más bajo de los probados que deja el mínimo de texto inventado en imágenes sin texto, sin cambiar el CER ni los títulos.
+
+| Imágenes sin texto con texto inventado | Sin filtro | Mínimo 0,65 |
+|---|---|---|
+| Ajuste | 7/20 | 1/20 |
+| Reservado | 8/20 | 0/20 |
+
+CER medio y títulos no cambian en ninguno de los dos (0,48 % y 74/78; 0,47 % y 78/78). Medido con DirectML. El texto sintético es limpio y puntúa alto (tampoco se pierde nada con 0,9), así que en fotos reales el filtro podría descartar texto correcto: **sin medir**. El subcomando `eval` imprime las dos tablas completas.
+
+## Piloto con fotos reales (herramienta `ocr_pilot`)
+
+Toma una muestra aleatoria (como máximo 200 imágenes, repartidas por igual entre las carpetas dadas), la lee en solo lectura y escribe `report.html` y `thumbs/` en una carpeta nueva fuera de ellas.
+
+```powershell
+cargo run --release -p ocr --example ocr_pilot -- --folder <carpeta> --folder <otra> `
+  --out <carpeta nueva> --models $m --count 150 --seed 1
+```
+
+- La consola solo muestra cantidades y tiempos: ni texto leído, ni nombres, ni rutas, tampoco en los errores.
+- El informe contiene texto e imágenes privados y no se comparte. Bloquea todo acceso a la red.
+- En el informe se marca cada línea (correcta, parcial, incorrecta o inventada). El botón «Generar resumen» produce solo cantidades, por reconocedor, por puntuación y a cada lado del filtro. El filtro no oculta líneas: las atenúa, para medir qué descartaría.
+- Tras leer cada original se comprueban su SHA-256, tamaño y fechas de modificación y creación. La fecha de **último acceso** no se comprueba: Windows puede actualizarla al leer un archivo, según `fsutil behavior query disablelastaccess`.
+
 ## Reproducción independiente
 
 Segunda ejecución completa en el mismo equipo, en otra sesión (`eval` con CPU y DirectML, y `matrix` con 48 procesos).

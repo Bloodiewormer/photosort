@@ -369,6 +369,52 @@ fn failures(readings: &Readings, strategy: Strategy) {
     println!("\nTexto inventado (ejemplos): {}", examples.join(", "));
 }
 
+/// What a minimum score on the kept reading removes: invented text against real lines.
+fn min_score_table(title: &str, readings: &Readings, strategy: Strategy) {
+    println!("\n### Puntuación mínima — {title}");
+    let rows = [0.0, 0.3, 0.4, 0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+        .into_iter()
+        .map(|min| {
+            let kept: Vec<ImageRead> = readings
+                .images
+                .iter()
+                .map(|image| ImageRead {
+                    category: image.category,
+                    truth: image.truth,
+                    lines: image
+                        .lines
+                        .iter()
+                        .filter(|l| chosen(strategy, l).score >= min)
+                        .cloned()
+                        .collect(),
+                })
+                .collect();
+            let s = score(&kept, strategy);
+            let found: usize = s.titles.values().map(|t| t.found).sum();
+            let total: usize = s.titles.values().map(|t| t.total).sum();
+            vec![
+                format!("{min}"),
+                format!("{:.2} %", 100.0 * s.mean_cer()),
+                format!("{found}/{total}"),
+                format!("{}/{}", s.no_text.images_with_text, s.no_text.images),
+                s.no_text.readings.to_string(),
+                s.stray.to_string(),
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "Mínimo",
+            "CER medio",
+            "Títulos",
+            "Sin texto: imágenes con texto inventado",
+            "Lecturas inventadas",
+            "Lecturas sueltas",
+        ],
+        rows,
+    );
+}
+
 pub fn run(models: &Path, provider: Provider, limit_side_len: u32) -> Result<(), String> {
     let fonts = Fonts::load()?;
     let (tuning, held_out) = (
@@ -455,6 +501,8 @@ pub fn run(models: &Path, provider: Provider, limit_side_len: u32) -> Result<(),
             result.badges.total
         );
     }
+    min_score_table("ajuste", &tune_readings, recommended);
+    min_score_table("reservado", &held_readings, recommended);
     failures(&held_readings, recommended);
     Ok(())
 }
