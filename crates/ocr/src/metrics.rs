@@ -145,6 +145,17 @@ fn ratio(part: usize, whole: usize) -> f64 {
     }
 }
 
+/// Nearest-rank percentile, `p` from 0 to 100; 0 for no values.
+pub fn percentile(values: &[f64], p: f64) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = (p / 100.0 * sorted.len() as f64).ceil() as usize;
+    sorted
+        .get(rank.saturating_sub(1))
+        .copied()
+        .unwrap_or_default()
+}
+
 /// A promo-page title is found when its lines, joined, are at least this similar to what was read.
 pub const TITLE_SIMILARITY: f64 = 0.85;
 
@@ -223,6 +234,15 @@ mod tests {
         assert_eq!((folded.edits, folded.exact), (0, 1));
         assert_eq!(Tally::default().cer(), 0.0);
         assert_eq!(Tally::default().exact_rate(), 0.0);
+    }
+
+    #[test]
+    fn percentile_takes_the_nearest_rank() {
+        let values = [4.0, 1.0, 3.0, 2.0, 5.0];
+        assert_eq!(percentile(&values, 50.0), 3.0);
+        assert_eq!(percentile(&values, 95.0), 5.0);
+        assert_eq!(percentile(&values, 0.0), 1.0);
+        assert_eq!(percentile(&[], 50.0), 0.0);
     }
 
     #[test]

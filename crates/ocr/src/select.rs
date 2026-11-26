@@ -33,6 +33,14 @@ pub enum Strategy {
     Cascade(Thresholds),
 }
 
+/// The recommended thresholds, for [`Strategy::Both`]: H and M from the middle of the range that
+/// ties on the tuning set. T is the cascade's best there; see `docs/ocr-evaluacion.md`.
+pub const RECOMMENDED: Thresholds = Thresholds {
+    hangul_share: 0.5,
+    margin: 0.1,
+    cascade_below: 0.98,
+};
+
 pub fn is_hangul(c: char) -> bool {
     matches!(c, '\u{AC00}'..='\u{D7A3}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}'
         | '\u{A960}'..='\u{A97F}' | '\u{D7B0}'..='\u{D7FF}')

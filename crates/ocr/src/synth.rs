@@ -8,7 +8,7 @@ use crate::metrics::Rect;
 use ab_glyph::{Font, FontVec};
 use image::{Rgb, RgbImage};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Lang {
     Latin,
     Japanese,
@@ -16,7 +16,7 @@ pub enum Lang {
     Korean,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Category {
     Latin,
     Japanese,
@@ -532,6 +532,84 @@ fn no_text_image(number: usize, rng: &mut Rng) -> Sample {
     }
 }
 
+/// Input regimes for the speed benchmark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Regime {
+    /// One image size and six short lines each, so every tensor has the same shape.
+    Fixed,
+    /// A different size, line count and line width in every image, as in a real library.
+    Variable,
+}
+
+pub const BENCH_IMAGES: usize = 24;
+
+pub fn bench_set(regime: Regime, fonts: &Fonts) -> Vec<Sample> {
+    let rng = &mut Rng(3003);
+    let langs = [Lang::Latin, Lang::Japanese, Lang::Chinese, Lang::Korean];
+    let pools = langs.map(|lang| words::phrases(Split::HeldOut, lang));
+    (0..BENCH_IMAGES)
+        .map(|number| {
+            let (size, count) = match regime {
+                Regime::Fixed => ((960, 960), 6),
+                // The step keeps every width different.
+                Regime::Variable => {
+                    let width = 480 + 48 * number as u32 + rng.below(40) as u32;
+                    let height = rng.between(420, 1400) as u32;
+                    let rows = i64::from(height) / 70;
+                    ((width, height), rng.between(1, rows.min(14)) as usize)
+                }
+            };
+            let mut image = gradient(size, rng.color(215, 255), rng.color(215, 255));
+            let (width, row) = (i64::from(size.0), i64::from(size.1) / count as i64);
+            let lines = (0..count)
+                .map(|i| {
+                    let which = (number + i) % 4;
+                    let (lang, pool) = (langs[which], &pools[which]);
+                    let (text, cap) = match regime {
+                        // The last 12 phrases are single short parts; the Latin ones kept here
+                        // are the romanised words.
+                        Regime::Fixed => {
+                            let short: Vec<&String> = if lang == Lang::Latin {
+                                pool[pool.len() - 18..]
+                                    .iter()
+                                    .filter(|t| t.chars().count() <= 10)
+                                    .collect()
+                            } else {
+                                pool[36..].iter().collect()
+                            };
+                            (short[rng.below(short.len())].clone(), 34.0)
+                        }
+                        Regime::Variable => {
+                            let parts: Vec<&str> = (0..rng.between(1, 3))
+                                .map(|_| pool[rng.below(pool.len())].as_str())
+                                .collect();
+                            (parts.join(" "), rng.between(16, 28) as f32)
+                        }
+                    };
+                    let font = fonts.pick(lang, &text, rng);
+                    let mut cap = cap;
+                    let mask = loop {
+                        let mask = render::run(font, &text, render::scale_for(font, cap)).cropped();
+                        if mask.w as i64 <= width - 32 && mask.h as i64 <= row - 12 {
+                            break mask;
+                        }
+                        cap *= 0.93;
+                    };
+                    let x = rng.between(16, width - 16 - mask.w as i64);
+                    let y = i as i64 * row + (row - mask.h as i64) / 2;
+                    let rect = render::stamp(&mut image, &mask, (x, y), rng.color(0, 60), None);
+                    body(text, rect, lang)
+                })
+                .collect();
+            Sample {
+                category: Category::Latin,
+                image,
+                lines,
+            }
+        })
+        .collect()
+}
+
 /// The whole test set of one split, always the same for the same fonts.
 pub fn generate(split: Split, fonts: &Fonts) -> Vec<Sample> {
     let rng = &mut Rng(match split {
@@ -718,6 +796,28 @@ mod tests {
         for badge in ["MANGA", "MANHUA", "MANHWA", "ONE SHOT"] {
             assert!(badges.contains(badge), "{badge}");
         }
+    }
+
+    #[test]
+    fn benchmark_images_are_either_one_size_or_all_different() {
+        let fonts = Fonts::load().expect("Windows system fonts");
+        let fixed = bench_set(Regime::Fixed, &fonts);
+        assert_eq!(fixed.len(), BENCH_IMAGES);
+        for sample in &fixed {
+            assert_eq!(sample.image.dimensions(), (960, 960));
+            assert_eq!(sample.lines.len(), 6);
+        }
+        let variable = bench_set(Regime::Variable, &fonts);
+        let sizes: HashSet<_> = variable.iter().map(|s| s.image.dimensions()).collect();
+        assert_eq!((variable.len(), sizes.len()), (BENCH_IMAGES, BENCH_IMAGES));
+        let counts: HashSet<_> = variable.iter().map(|s| s.lines.len()).collect();
+        assert!(counts.len() >= 5, "{counts:?}");
+        let widest = variable
+            .iter()
+            .flat_map(|s| &s.lines)
+            .map(|l| (l.rect[2] - l.rect[0]) / (l.rect[3] - l.rect[1]))
+            .fold(0.0, f32::max);
+        assert!(widest > 15.0, "{widest}");
     }
 
     #[test]
