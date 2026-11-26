@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 catalog = { path = "../catalog" }
 eframe = "0.37.0"
+export = { version = "0.1.0", path = "../export" }
 fsguard = { path = "../fsguard" }
 image = "0.25.10"
 rfd = "0.18.0"
