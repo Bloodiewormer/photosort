@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+# `auto-download` (model fetching) and every GPU backend other than DirectML stay disabled.
+oar-ocr = { version = "=0.11.0", default-features = false, features = ["download-binaries", "simd", "directml"] }
+ort = "=2.0.0-rc.15"
 scanner = { path = "../scanner" }
 unicode-normalization = "0.1.26"
 
