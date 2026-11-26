@@ -1,3 +1,4 @@
+pub mod demo;
 pub mod model;
 pub mod settings;
 pub mod theme;
