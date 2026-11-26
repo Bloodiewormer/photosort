@@ -223,6 +223,8 @@ pub fn draw(
                                                 .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                                 .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                                 .show(ui, |ui| {
+                                                    // the row lays out left to right; a card must stack its content
+                                                    ui.vertical(|ui| {
                                                     ui.set_width(DUP_CARD_WIDTH);
                                                     let (thumb_rect, _) = ui.allocate_exact_size(
                                                         Vec2::new(DUP_CARD_WIDTH, DUP_THUMB_HEIGHT),
@@ -295,6 +297,7 @@ pub fn draw(
                                                             "No se pudo abrir el Explorador: {e}"
                                                         ));
                                                     }
+                                                    });
                                                 });
                                         }
                                     },
