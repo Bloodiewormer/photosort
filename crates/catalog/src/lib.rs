@@ -3,6 +3,7 @@ mod browse;
 mod dupes;
 mod labels;
 mod ocr;
+mod vision;
 mod works;
 
 pub use analysis::Pending;
@@ -12,6 +13,14 @@ pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, So
 pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
     ocr_search_key,
+};
+pub use vision::{
+    CompiledRule, CompiledVisionRules, DEFAULT_CUSTOM_THRESHOLD, DEFAULT_PERSON_THRESHOLD,
+    DEFAULT_TYPE_THRESHOLD, DetectedFace, EMBEDDING_BYTES, EMBEDDING_DIM, RankedAsset, RuleId,
+    RuleMode, SIGLIP2_MODEL_ID, TAG_PERSON, TYPE_DOCUMENT, TYPE_ILLUSTRATION, TYPE_MANGA,
+    TYPE_MEME, TYPE_PHOTO, VISION_STAGE, VISION_VERSION, VisionRule, VisionSuggestion,
+    YUNET_FACE_SCORE_THRESHOLD, decode_embedding_array, encode_embedding,
+    independent_ordering_confidence,
 };
 pub use works::{
     AssetWorkMatches, PROMO_CATEGORY, WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal,
@@ -116,6 +125,47 @@ CREATE TABLE IF NOT EXISTS work_alias (
     UNIQUE (label_id, key)
 );
 CREATE INDEX IF NOT EXISTS work_alias_label ON work_alias(label_id);
+CREATE TABLE IF NOT EXISTS catalog_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS asset_embedding (
+    asset_id INTEGER PRIMARY KEY REFERENCES asset(id),
+    model    TEXT NOT NULL,
+    vector   BLOB NOT NULL CHECK (length(vector) = 3072)
+);
+CREATE INDEX IF NOT EXISTS asset_embedding_model ON asset_embedding(model, asset_id);
+CREATE TABLE IF NOT EXISTS asset_face (
+    id       INTEGER PRIMARY KEY,
+    asset_id INTEGER NOT NULL REFERENCES asset(id),
+    face_idx INTEGER NOT NULL,
+    x1       REAL NOT NULL,
+    y1       REAL NOT NULL,
+    x2       REAL NOT NULL,
+    y2       REAL NOT NULL,
+    score    REAL NOT NULL CHECK (score BETWEEN 0 AND 1),
+    UNIQUE (asset_id, face_idx)
+);
+CREATE INDEX IF NOT EXISTS asset_face_asset ON asset_face(asset_id);
+CREATE TABLE IF NOT EXISTS vision_rule (
+    id          INTEGER PRIMARY KEY,
+    label_id    INTEGER NOT NULL UNIQUE REFERENCES label(id),
+    mode        TEXT NOT NULL CHECK (mode IN ('type', 'independent')),
+    threshold   REAL NOT NULL,
+    enabled     INTEGER NOT NULL CHECK (enabled IN (0, 1)) DEFAULT 1,
+    positives   TEXT NOT NULL,
+    negatives   TEXT NOT NULL DEFAULT '',
+    builtin_key TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS vision_managed_label (
+    label_id INTEGER PRIMARY KEY REFERENCES label(id)
+);
+CREATE TABLE IF NOT EXISTS text_embedding_cache (
+    model  TEXT NOT NULL,
+    text   TEXT NOT NULL,
+    vector BLOB NOT NULL CHECK (length(vector) = 3072),
+    PRIMARY KEY (model, text)
+);
 ";
 
 #[derive(Debug)]
@@ -192,7 +242,9 @@ impl Catalog {
         // wait briefly when another connection (e.g. the indexing thread) is committing in WAL mode
         conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        let mut cat = Self { conn };
+        cat.seed_builtin_vision_rules()?;
+        Ok(cat)
     }
 
     /// Adds new and changed images and flags the ones that disappeared. A file is only read again when
