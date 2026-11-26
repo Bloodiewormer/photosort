@@ -19,7 +19,7 @@ impl LibraryRoot {
 }
 
 /// A path proven to lie outside every library root. The only way to get one is [`ensure_writable`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DestPath(PathBuf);
 
 impl DestPath {

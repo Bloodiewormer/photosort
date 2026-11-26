@@ -1,4 +1,4 @@
-use fsguard::{DestPath, ensure_writable};
+use fsguard::DestPath;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
@@ -70,12 +70,8 @@ impl Thumbs {
             )));
         }
         create_cache_dir(cache_dir)?;
-        // `DestPath` is not `Clone`, and the caller already proved `cache_dir` lies outside every
-        // library root; re-wrapping its canonical path yields an owned `DestPath` for `join_name`.
-        let owned = ensure_writable(cache_dir.as_path(), &[])
-            .map_err(|e| ThumbError::Io(io::Error::other(e)))?;
         Ok(Thumbs {
-            cache_dir: owned,
+            cache_dir: cache_dir.clone(),
             max_px,
             commit_lock: Mutex::new(()),
         })
