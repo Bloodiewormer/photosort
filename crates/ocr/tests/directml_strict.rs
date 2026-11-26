@@ -4,10 +4,9 @@ mod common;
 use ocr::engine::{Engine, Options, Provider};
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn a_directml_device_that_cannot_register_is_an_error_not_a_cpu_fallback() {
-    let Some(models) = common::models_dir() else {
-        return;
-    };
+    let models = common::models_dir();
     let options = Options {
         provider: Provider::DirectMl { device: 99 },
         ..Options::default()

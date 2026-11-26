@@ -4,11 +4,10 @@ use ocr::engine::{Engine, Options};
 use ocr::manifest::{PINNED, REC_KOREAN};
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 #[allow(clippy::disallowed_methods)] // copies the models into a temporary folder to tamper with them
 fn refuses_to_load_a_tampered_or_incomplete_model_folder() {
-    let Some(models) = common::models_dir() else {
-        return;
-    };
+    let models = common::models_dir();
     let dir = tempfile::tempdir().unwrap();
     for file in &PINNED {
         std::fs::copy(models.join(file.name), dir.path().join(file.name)).unwrap();

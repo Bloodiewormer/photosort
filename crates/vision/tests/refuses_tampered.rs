@@ -4,11 +4,10 @@ use vision::manifest::{SIGLIP2_CONFIG, YUNET_MODEL};
 use vision::{SessionOptions, SigLip2Vision, YuNet};
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 #[allow(clippy::disallowed_methods)] // copies a small model into a temporary folder to tamper with it
 fn refuses_tampered_and_missing_models() {
-    let Some(models) = common::vision_models_dir() else {
-        return;
-    };
+    let models = common::vision_models_dir();
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("yunet")).unwrap();
     let target = dir.path().join(YUNET_MODEL);

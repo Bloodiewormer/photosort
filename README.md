@@ -70,7 +70,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Las pruebas usan solo datos sintéticos. Las que necesitan modelos se saltan, salvo que definas `PHOTOSORT_OCR_MODELS` y `PHOTOSORT_VISION_MODELS`. GitHub ejecuta las comprobaciones en cada PR. Antes de contribuir, lee [CONTRIBUTING.md](CONTRIBUTING.md).
+Las pruebas usan solo datos sintéticos. Las que necesitan modelos quedan como **omitidas** y GitHub no las ejecuta; las instrucciones para ejecutarlas están en [CONTRIBUTING.md](CONTRIBUTING.md). GitHub ejecuta el resto en cada PR. Antes de contribuir, lee [CONTRIBUTING.md](CONTRIBUTING.md).
 
 | Carpeta | Contenido |
 |---|---|

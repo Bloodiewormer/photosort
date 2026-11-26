@@ -5,11 +5,9 @@ mod common;
 use vision::{Provider, SessionOptions, YuNet};
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn ocr_then_vision_shares_runtime_and_rejects_provider_switch() {
-    let (Some(ocr_dir), Some(vision_dir)) = (common::ocr_models_dir(), common::vision_models_dir())
-    else {
-        return;
-    };
+    let (ocr_dir, vision_dir) = (common::ocr_models_dir(), common::vision_models_dir());
 
     let _ocr = ocr::engine::Engine::load(&ocr_dir, &ocr::engine::Options::default())
         .expect("OCR load on CPU must succeed");

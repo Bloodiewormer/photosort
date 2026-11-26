@@ -48,13 +48,11 @@ fn snapshot(root: &Path) -> Snapshot {
 }
 
 /// End-to-end test using the real ONNX OCR engine on synthetic images.
-/// Skips cleanly when `PHOTOSORT_OCR_MODELS` is not set.
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn real_engine_reads_synthetic_images_and_makes_them_searchable() {
-    let Some(models_dir) = std::env::var_os("PHOTOSORT_OCR_MODELS").map(PathBuf::from) else {
-        eprintln!("skipping real_engine_reads_synthetic_images: PHOTOSORT_OCR_MODELS not set");
-        return;
-    };
+    let models_dir =
+        PathBuf::from(std::env::var_os("PHOTOSORT_OCR_MODELS").expect("set PHOTOSORT_OCR_MODELS"));
 
     let fonts = Fonts::load().unwrap();
     let samples = generate(Split::Tune, &fonts);

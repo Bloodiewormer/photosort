@@ -35,8 +35,21 @@ Este proyecto trabaja junto a una biblioteca personal de fotos irreemplazable. P
 4. GitHub ejecuta en cada PR:
    - el control de mensajes, con la misma regla que el hook local, sobre commits, título y descripción;
    - formato, análisis estático y pruebas en Windows.
-   Las pruebas que necesitan modelos se saltan allí: **hay que ejecutarlas en local** cuando se toque el OCR o el reconocimiento.
+   Las pruebas que necesitan modelos aparecen allí como omitidas: **hay que ejecutarlas en local** cuando se toque el OCR o el reconocimiento.
 5. Se fusiona cuando todo está en verde.
+
+## Pruebas con modelos
+
+Están marcadas con `#[ignore]`. Si las pides sin definir las carpetas, fallan: nunca se aprueban sin hacer nada.
+
+```powershell
+$env:PHOTOSORT_OCR_MODELS = "<carpeta de modelos OCR>"
+$env:PHOTOSORT_VISION_MODELS = "<carpeta que contiene siglip2 y yunet>"
+cargo test -p ocr -p vision -- --include-ignored
+cargo test -p app --test ocr_e2e --test works_e2e --test vision_e2e -- --include-ignored
+```
+
+Las mediciones de rendimiento también están marcadas con `#[ignore]` y se ejecutan una a una con `--release`.
 
 ## Activar los hooks (una vez por clon)
 

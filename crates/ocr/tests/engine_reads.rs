@@ -9,10 +9,9 @@ use std::collections::HashSet;
 
 /// A character the recognizer cannot output would count as an error no model could avoid.
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn every_synthetic_character_is_in_the_dictionary_of_its_recognizer() {
-    let Some(models) = common::models_dir() else {
-        return;
-    };
+    let models = common::models_dir();
     let dictionary = |name: &str| -> HashSet<char> {
         let text = std::fs::read_to_string(models.join(name)).unwrap();
         text.lines().flat_map(str::chars).collect()
@@ -41,10 +40,9 @@ fn every_synthetic_character_is_in_the_dictionary_of_its_recognizer() {
 }
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn clean_latin_and_korean_lines_are_read_by_the_matching_recognizer() {
-    let Some(models) = common::models_dir() else {
-        return;
-    };
+    let models = common::models_dir();
     let engine = Engine::load(&models, &Options::default()).unwrap();
     let samples = generate(Split::Tune, &Fonts::load().unwrap());
     for category in [Category::Latin, Category::Korean] {

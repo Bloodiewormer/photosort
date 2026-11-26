@@ -5,3 +5,14 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# Unoptimized, drawing the synthetic test images and hashing the model files takes most of the
+# test time. These few packages are optimized in debug builds too.
+[profile.dev.package.ocr]
+opt-level = 2
+[profile.dev.package.ab_glyph]
+opt-level = 2
+[profile.dev.package.ab_glyph_rasterizer]
+opt-level = 2
+[profile.dev.package.sha2]
+opt-level = 2

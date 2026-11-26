@@ -112,11 +112,9 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<(String, u64, SystemTime, S
 }
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn a_whole_run_reads_synthetic_images_without_touching_them_or_printing_their_text() {
-    let Some(models) = std::env::var_os("PHOTOSORT_OCR_MODELS") else {
-        eprintln!("skipped: PHOTOSORT_OCR_MODELS is not set");
-        return;
-    };
+    let models = std::env::var_os("PHOTOSORT_OCR_MODELS").expect("set PHOTOSORT_OCR_MODELS");
     let temp = tempfile::tempdir().unwrap();
     let library = temp.path().join("biblioteca-secreta");
     make_folder(&library);

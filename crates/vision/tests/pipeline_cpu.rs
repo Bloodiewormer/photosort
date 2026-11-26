@@ -5,10 +5,9 @@ use vision::synth::{Group, verification_set};
 use vision::{SessionOptions, SigLip2, YuNet, YuNetConfig, cosine_similarity};
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn tokenizer_lowercases_appends_eos_pads_and_truncates() {
-    let Some(models) = common::vision_models_dir() else {
-        return;
-    };
+    let models = common::vision_models_dir();
     let text = vision::SigLip2Text::load(&models, &SessionOptions::default()).unwrap();
 
     let lower = text.tokenize("a red circle on a white background").unwrap();
@@ -39,10 +38,9 @@ fn tokenizer_lowercases_appends_eos_pads_and_truncates() {
 }
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn siglip2_synthetic_shape_color_retrieval_and_yunet_smoke() {
-    let Some(models) = common::vision_models_dir() else {
-        return;
-    };
+    let models = common::vision_models_dir();
     let opts = SessionOptions::default();
     let mut siglip = SigLip2::load(&models, &opts).unwrap();
     let items = verification_set();
