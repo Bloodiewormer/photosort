@@ -3,9 +3,9 @@
 
 use app::demo::{DEFAULT_DEMO_COUNT, MAX_DEMO_COUNT};
 use app::screenshot::{
-    CaptureAction, CaptureState, CliArgs, DEFAULT_SCREENSHOT_DELAY_FRAMES, DEFAULT_WINDOW_SIZE,
-    FrameSignals, guard_screenshot_path, parse_args, parse_theme, parse_window_size, usage_text,
-    write_screenshot_png,
+    CaptureAction, CaptureState, CaptureView, CliArgs, DEFAULT_SCREENSHOT_DELAY_FRAMES,
+    DEFAULT_WINDOW_SIZE, FrameSignals, guard_screenshot_path, parse_args, parse_theme, parse_view,
+    parse_window_size, usage_text, write_screenshot_png,
 };
 use app::settings::Theme;
 use eframe::egui::{Color32, ColorImage};
@@ -24,6 +24,7 @@ fn parse_args_defaults_and_all_flags() {
         defaults.screenshot_delay_frames,
         DEFAULT_SCREENSHOT_DELAY_FRAMES
     );
+    assert_eq!(defaults.view, CaptureView::Gallery);
 
     let full = parse_args([
         "--demo",
@@ -39,6 +40,8 @@ fn parse_args_defaults_and_all_flags() {
         "1024x768",
         "--theme",
         "light",
+        "--view",
+        "export",
     ])
     .unwrap();
     assert!(full.demo);
@@ -48,6 +51,7 @@ fn parse_args_defaults_and_all_flags() {
     assert_eq!(full.screenshot_delay_frames, 5);
     assert_eq!(full.window_size, [1024, 768]);
     assert_eq!(full.theme, Some(Theme::Light));
+    assert_eq!(full.view, CaptureView::Export);
     assert!(!full.self_test);
     assert!(!full.help);
 
@@ -55,6 +59,7 @@ fn parse_args_defaults_and_all_flags() {
     assert!(help.help);
     assert!(usage_text().contains("--demo"));
     assert!(usage_text().contains("--screenshot"));
+    assert!(usage_text().contains("--view"));
 }
 
 #[test]
@@ -71,10 +76,24 @@ fn parse_args_rejects_invalid_values_and_unknown_flags() {
     assert!(parse_args(["--window-size", "100x100"]).is_err());
     assert!(parse_args(["--theme", "sepia"]).is_err());
     assert!(parse_args(["--data-dir"]).is_err());
+    assert!(parse_args(["--view"]).is_err());
+
+    let bad_view = parse_args(["--view", "ajustes"]).unwrap_err();
+    assert!(
+        bad_view.contains("ajustes") && bad_view.contains("--view"),
+        "expected Spanish error mentioning invalid view and flag, got: {bad_view}"
+    );
 
     assert_eq!(parse_window_size("1280X820").unwrap(), [1280, 820]);
     assert_eq!(parse_theme("DARK").unwrap(), Theme::Dark);
     assert_eq!(parse_theme("Light").unwrap(), Theme::Light);
+
+    assert_eq!(parse_view("gallery").unwrap(), CaptureView::Gallery);
+    assert_eq!(parse_view("REVIEW").unwrap(), CaptureView::Review);
+    assert_eq!(parse_view("Duplicates").unwrap(), CaptureView::Duplicates);
+    assert_eq!(parse_view("export").unwrap(), CaptureView::Export);
+    let err = parse_view("mapa").unwrap_err();
+    assert!(err.contains("Vista") && err.contains("mapa"), "{err}");
 }
 
 #[test]
@@ -118,10 +137,7 @@ fn capture_state_selects_first_waits_for_readiness_delays_then_captures() {
     // 1. Entries exist, nothing selected yet -> SelectFirst.
     let a = state.step(FrameSignals {
         has_entries: true,
-        has_selection: false,
-        thumbs_ready: false,
-        preview_ready: false,
-        image_received: false,
+        ..Default::default()
     });
     assert_eq!(a, CaptureAction::SelectFirst);
 
@@ -130,9 +146,7 @@ fn capture_state_selects_first_waits_for_readiness_delays_then_captures() {
         let a = state.step(FrameSignals {
             has_entries: true,
             has_selection: true,
-            thumbs_ready: false,
-            preview_ready: false,
-            image_received: false,
+            ..Default::default()
         });
         assert_eq!(a, CaptureAction::WaitForWorkers);
     }
@@ -143,8 +157,7 @@ fn capture_state_selects_first_waits_for_readiness_delays_then_captures() {
             has_entries: true,
             has_selection: true,
             thumbs_ready: true,
-            preview_ready: false,
-            image_received: false,
+            ..Default::default()
         }),
         CaptureAction::WaitForWorkers
     );
@@ -155,7 +168,7 @@ fn capture_state_selects_first_waits_for_readiness_delays_then_captures() {
         has_selection: true,
         thumbs_ready: true,
         preview_ready: true,
-        image_received: false,
+        ..Default::default()
     };
     assert_eq!(state.step(ready), CaptureAction::WaitFrame);
     assert_eq!(state.step(ready), CaptureAction::WaitFrame);
@@ -176,14 +189,135 @@ fn capture_state_selects_first_waits_for_readiness_delays_then_captures() {
 }
 
 #[test]
+fn capture_state_review_and_duplicates_wait_for_thumbs_without_selecting_first() {
+    for view in [CaptureView::Review, CaptureView::Duplicates] {
+        let mut state = CaptureState::for_view(view, 1, 10, 5);
+
+        // Does not emit SelectFirst or OpenExport; waits while thumbs are loading.
+        assert_eq!(
+            state.step(FrameSignals {
+                has_entries: true,
+                has_selection: false,
+                thumbs_ready: false,
+                preview_ready: false,
+                ..Default::default()
+            }),
+            CaptureAction::WaitForWorkers
+        );
+
+        // Once thumbs are ready (even without selection/preview), settles then captures.
+        let ready = FrameSignals {
+            has_entries: true,
+            thumbs_ready: true,
+            ..Default::default()
+        };
+        assert_eq!(state.step(ready), CaptureAction::WaitFrame);
+        assert_eq!(state.step(ready), CaptureAction::RequestScreenshot);
+        assert_eq!(
+            state.step(FrameSignals {
+                image_received: true,
+                ..ready
+            }),
+            CaptureAction::SaveAndClose
+        );
+        assert_eq!(state.step(ready), CaptureAction::Done);
+    }
+}
+
+#[test]
+fn capture_state_export_opens_wizard_and_waits_for_preview_ready() {
+    let mut state = CaptureState::for_view(CaptureView::Export, 1, 10, 5);
+
+    // 1. Entries exist, wizard not yet open -> OpenExport (not SelectFirst).
+    assert_eq!(
+        state.step(FrameSignals {
+            has_entries: true,
+            export_open: false,
+            ..Default::default()
+        }),
+        CaptureAction::OpenExport
+    );
+
+    // 2. Wizard open and thumbs ready, but export preview still computing -> WaitForWorkers.
+    assert_eq!(
+        state.step(FrameSignals {
+            has_entries: true,
+            thumbs_ready: true,
+            export_open: true,
+            export_ready: false,
+            ..Default::default()
+        }),
+        CaptureAction::WaitForWorkers
+    );
+
+    // 3. Export preview ready, but gallery thumbs behind modal still loading -> WaitForWorkers.
+    assert_eq!(
+        state.step(FrameSignals {
+            has_entries: true,
+            thumbs_ready: false,
+            export_open: true,
+            export_ready: true,
+            ..Default::default()
+        }),
+        CaptureAction::WaitForWorkers
+    );
+
+    // 4. Both ready -> settle 1 frame, then RequestScreenshot -> SaveAndClose.
+    let ready = FrameSignals {
+        has_entries: true,
+        thumbs_ready: true,
+        export_open: true,
+        export_ready: true,
+        ..Default::default()
+    };
+    assert_eq!(state.step(ready), CaptureAction::WaitFrame);
+    assert_eq!(state.step(ready), CaptureAction::RequestScreenshot);
+    assert_eq!(
+        state.step(FrameSignals {
+            image_received: true,
+            ..ready
+        }),
+        CaptureAction::SaveAndClose
+    );
+    assert_eq!(state.step(ready), CaptureAction::Done);
+}
+
+#[test]
+fn capture_state_export_fails_fast_when_preview_errors() {
+    let mut state = CaptureState::for_view(CaptureView::Export, 1, 10, 5);
+    assert_eq!(
+        state.step(FrameSignals {
+            has_entries: true,
+            export_open: false,
+            ..Default::default()
+        }),
+        CaptureAction::OpenExport
+    );
+    let action = state.step(FrameSignals {
+        has_entries: true,
+        export_open: true,
+        export_failed: true,
+        ..Default::default()
+    });
+    assert!(matches!(action, CaptureAction::FailAndClose(_)));
+    assert_eq!(
+        state.step(FrameSignals {
+            has_entries: true,
+            export_open: true,
+            export_failed: true,
+            ..Default::default()
+        }),
+        CaptureAction::Done
+    );
+}
+
+#[test]
 fn capture_state_times_out_when_workers_or_capture_stall() {
     let mut stuck_thumbs = CaptureState::new(1, 3, 5);
     let not_ready = FrameSignals {
         has_entries: true,
         has_selection: true,
-        thumbs_ready: false,
-        preview_ready: false,
-        image_received: false,
+        ..Default::default()
     };
     assert_eq!(stuck_thumbs.step(not_ready), CaptureAction::WaitForWorkers);
     assert_eq!(stuck_thumbs.step(not_ready), CaptureAction::WaitForWorkers);
@@ -199,7 +333,7 @@ fn capture_state_times_out_when_workers_or_capture_stall() {
         has_selection: true,
         thumbs_ready: true,
         preview_ready: true,
-        image_received: false,
+        ..Default::default()
     };
     assert_eq!(stuck_capture.step(ready), CaptureAction::RequestScreenshot);
     assert_eq!(stuck_capture.step(ready), CaptureAction::WaitFrame);

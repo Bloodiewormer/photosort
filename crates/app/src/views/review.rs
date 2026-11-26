@@ -17,6 +17,7 @@ pub struct ReviewViewOutcome {
     pub catalog_mutated: bool,
     pub status_notice: Option<String>,
     pub error: Option<String>,
+    pub thumbs_ready: bool,
 }
 
 /// Renders the review queue tab: confidence threshold slider, label groups with counts,
@@ -454,6 +455,10 @@ pub fn draw(
     if undo_clicked && let Some(cat) = catalog {
         apply_undo(flow, cat, &mut outcome);
     }
+
+    outcome.thumbs_ready = flow.active_group().is_none_or(|g| {
+        g.items.is_empty() || (!visible_hashes.is_empty() && to_request.is_empty())
+    });
 
     thumb_pool.set_visible(&visible_hashes);
     for req in to_request {

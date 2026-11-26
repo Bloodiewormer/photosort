@@ -1,6 +1,6 @@
 use crate::settings::{self, Settings, Theme};
 use catalog::{Catalog, LabelKind, Source};
-use fsguard::{DestPath, ensure_writable};
+use fsguard::{DestPath, GuardError, LibraryRoot, ensure_export_dir, ensure_writable};
 use image::codecs::gif::GifEncoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType as PngFilterType, PngEncoder};
@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_DEMO_COUNT: usize = 160;
 pub const MAX_DEMO_COUNT: usize = 2000;
 pub const DEFAULT_SEED: u64 = 0x5048_4F54_4F53_4F52;
+pub const DEMO_EXPORT_SUBDIR: &str = "export-out";
+
+/// Returns a validated export destination inside `base_dir` and outside every registered library
+/// root (used by `--demo --view export`).
+pub fn demo_export_dir(base_dir: &Path, roots: &[LibraryRoot]) -> Result<DestPath, GuardError> {
+    ensure_export_dir(&base_dir.join(DEMO_EXPORT_SUBDIR), roots)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DemoFormat {

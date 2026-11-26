@@ -2,9 +2,9 @@
 #![allow(clippy::disallowed_methods)]
 
 use app::demo::{
-    DEFAULT_DEMO_COUNT, DEFAULT_SEED, DemoConfig, DemoFormat, MAX_DEMO_COUNT, PatternKind,
-    SeedDecision, plan_demo_images, plan_label_seeds, prepare_demo, render_demo_image,
-    validate_count,
+    DEFAULT_DEMO_COUNT, DEFAULT_SEED, DEMO_EXPORT_SUBDIR, DemoConfig, DemoFormat, MAX_DEMO_COUNT,
+    PatternKind, SeedDecision, demo_export_dir, plan_demo_images, plan_label_seeds, prepare_demo,
+    render_demo_image, validate_count,
 };
 use app::settings::{self, Theme};
 use catalog::{Catalog, Filter, LabelKind, Sort, Source, Status};
@@ -348,4 +348,47 @@ fn prepare_demo_leaves_no_files_outside_its_base_dir() {
         temp_base.display()
     );
     drop(setup);
+}
+
+#[test]
+fn demo_export_dir_is_inside_base_dir_and_outside_library_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("demo_export_test");
+    let setup = prepare_demo(
+        Some(&base),
+        DemoConfig {
+            count: 12,
+            seed: DEFAULT_SEED,
+        },
+        None,
+    )
+    .unwrap();
+
+    let loaded = settings::load(&setup.data_dir);
+    let roots = loaded.settings.valid_roots();
+    assert_eq!(roots.len(), 1);
+
+    let dest = demo_export_dir(&setup.base_dir, &roots).unwrap();
+    let canonical_base = fs::canonicalize(&setup.base_dir).unwrap();
+    let canonical_lib = fs::canonicalize(&setup.library_dir).unwrap();
+    let canonical_parent = fs::canonicalize(dest.as_path().parent().unwrap()).unwrap();
+    assert_eq!(
+        canonical_parent,
+        canonical_base,
+        "export dir {} must be directly inside demo base {}",
+        dest.as_path().display(),
+        canonical_base.display()
+    );
+    assert!(
+        !canonical_parent.starts_with(&canonical_lib),
+        "export dir {} must stay outside library {}",
+        dest.as_path().display(),
+        canonical_lib.display()
+    );
+    assert_eq!(
+        dest.as_path().file_name().and_then(|n| n.to_str()),
+        Some(DEMO_EXPORT_SUBDIR)
+    );
+    // Rejects a base_dir inside the library root.
+    assert!(demo_export_dir(&setup.library_dir, &roots).is_err());
 }

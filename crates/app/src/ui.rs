@@ -73,6 +73,8 @@ pub struct PhotosortApp {
     new_label_text: String,
     focus_search_next_frame: bool,
     export_wizard: Option<crate::export_flow::ExportWizard>,
+    preset_export_dir: Option<PathBuf>,
+    export_open_failed: bool,
     screenshot: Option<crate::screenshot::ScreenshotController>,
     last_thumbs_ready: bool,
 }
@@ -146,6 +148,8 @@ impl PhotosortApp {
             new_label_text: String::new(),
             focus_search_next_frame: false,
             export_wizard: None,
+            preset_export_dir: None,
+            export_open_failed: false,
             screenshot: None,
             last_thumbs_ready: false,
         };
@@ -156,6 +160,22 @@ impl PhotosortApp {
     pub fn with_theme_override(mut self, ctx: &egui::Context, theme: Theme) -> Self {
         self.settings.theme = theme;
         theme::apply_theme_preference(ctx, theme);
+        self
+    }
+
+    pub fn with_initial_view(
+        mut self,
+        view: crate::screenshot::CaptureView,
+        preset_export_dir: Option<PathBuf>,
+    ) -> Self {
+        self.active_tab = match view {
+            crate::screenshot::CaptureView::Gallery | crate::screenshot::CaptureView::Export => {
+                ActiveTab::Gallery
+            }
+            crate::screenshot::CaptureView::Review => ActiveTab::Review,
+            crate::screenshot::CaptureView::Duplicates => ActiveTab::Duplicates,
+        };
+        self.preset_export_dir = preset_export_dir;
         self
     }
 
@@ -1601,13 +1621,74 @@ impl PhotosortApp {
             None => true,
             Some(path) => matches!(&self.preview_loaded, Some((p, _)) if p == path),
         };
-        let select_first = self.screenshot.as_mut().is_some_and(|ctrl| {
-            ctrl.step(ctx, has_entries, has_selection, thumbs_ready, preview_ready)
+        let export_open = self.export_wizard.is_some();
+        let export_ready = self.export_wizard.as_ref().is_some_and(|w| {
+            matches!(
+                w.phase(),
+                crate::export_flow::ExportPhase::Preview(crate::export_flow::PreviewState::Ready(
+                    _
+                ))
+            )
         });
-        if select_first && has_entries {
-            self.selection.click(0, self.entries.len());
-            self.sync_inspector(false);
+        let export_failed = self.export_open_failed
+            || self.export_wizard.as_ref().is_some_and(|w| {
+                w.validation_error().is_some()
+                    || matches!(w.phase(), crate::export_flow::ExportPhase::Error(_))
+            });
+
+        let step = self
+            .screenshot
+            .as_mut()
+            .map_or(crate::screenshot::CaptureStep::None, |ctrl| {
+                ctrl.step(
+                    ctx,
+                    crate::screenshot::FrameSignals {
+                        has_entries,
+                        has_selection,
+                        thumbs_ready,
+                        preview_ready,
+                        export_open,
+                        export_ready,
+                        export_failed,
+                        image_received: false,
+                    },
+                )
+            });
+        match step {
+            crate::screenshot::CaptureStep::SelectFirst if has_entries => {
+                self.selection.click(0, self.entries.len());
+                self.sync_inspector(false);
+            }
+            crate::screenshot::CaptureStep::OpenExport if has_entries => {
+                self.open_export_for_capture(ctx);
+            }
+            _ => {}
         }
+    }
+
+    fn open_export_for_capture(&mut self, ctx: &egui::Context) {
+        let Some(cat) = self.catalog.as_ref() else {
+            self.export_open_failed = true;
+            return;
+        };
+        let dest = self
+            .preset_export_dir
+            .clone()
+            .or_else(|| self.settings.last_export_dir.clone());
+        // Pass an empty selection so ExportWizard includes all filtered demo images.
+        let mut wizard =
+            crate::export_flow::ExportWizard::open(cat, &self.entries, &Selection::default(), dest);
+        if matches!(wizard.phase(), crate::export_flow::ExportPhase::Error(_)) {
+            self.export_open_failed = true;
+        } else {
+            let roots = self.settings.valid_roots();
+            let ctx_clone = ctx.clone();
+            let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
+            if wizard.request_preview(&roots, Some(notify)).is_err() {
+                self.export_open_failed = true;
+            }
+        }
+        self.export_wizard = Some(wizard);
     }
 }
 
@@ -1640,6 +1721,7 @@ impl eframe::App for PhotosortApp {
                         &self.thumb_textures,
                         &self.thumb_failed,
                     );
+                    self.last_thumbs_ready = outcome.thumbs_ready;
                     if let Some(err) = outcome.error {
                         self.banner_error = Some(err);
                     }
@@ -1651,14 +1733,16 @@ impl eframe::App for PhotosortApp {
                     }
                 }
                 ActiveTab::Duplicates => {
-                    if let Some(err) = views::duplicates::draw(
+                    let outcome = views::duplicates::draw(
                         ui,
                         palette,
                         &self.duplicate_groups,
                         &self.thumb_pool,
                         &self.thumb_textures,
                         &self.thumb_failed,
-                    ) {
+                    );
+                    self.last_thumbs_ready = outcome.thumbs_ready;
+                    if let Some(err) = outcome.error {
                         self.banner_error = Some(err);
                     }
                 }

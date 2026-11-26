@@ -39,7 +39,7 @@ fn main() -> ExitCode {
     }
 
     let _demo_guard;
-    let data_dir = if args.demo {
+    let (data_dir, demo_base_dir) = if args.demo {
         match demo::prepare_demo(
             args.data_dir.as_deref(),
             DemoConfig {
@@ -50,8 +50,9 @@ fn main() -> ExitCode {
         ) {
             Ok(setup) => {
                 let dir = setup.data_dir.clone();
+                let base = setup.base_dir.clone();
                 _demo_guard = Some(setup);
-                dir
+                (dir, Some(base))
             }
             Err(e) => {
                 eprintln!("No se pudo preparar el modo demo: {e}");
@@ -60,11 +61,25 @@ fn main() -> ExitCode {
         }
     } else {
         _demo_guard = None;
-        settings::resolve_data_dir(args.data_dir.as_deref())
+        (settings::resolve_data_dir(args.data_dir.as_deref()), None)
+    };
+
+    let roots = settings::load(&data_dir).settings.valid_roots();
+    let preset_export_dir = if args.view == screenshot::CaptureView::Export
+        && let Some(base) = &demo_base_dir
+    {
+        match demo::demo_export_dir(base, &roots) {
+            Ok(dest) => Some(dest.as_path().to_path_buf()),
+            Err(e) => {
+                eprintln!("Ruta de exportación demo rechazada: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
     };
 
     let (screenshot_ctrl, screenshot_handle) = if let Some(out_path) = &args.screenshot {
-        let roots = settings::load(&data_dir).settings.valid_roots();
         let dest = match screenshot::guard_screenshot_path(out_path, &roots) {
             Ok(d) => d,
             Err(e) => {
@@ -72,8 +87,13 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let (ctrl, handle) =
-            ScreenshotController::new(dest, roots, args.screenshot_delay_frames, args.window_size);
+        let (ctrl, handle) = ScreenshotController::new(
+            dest,
+            roots,
+            args.view,
+            args.screenshot_delay_frames,
+            args.window_size,
+        );
         (Some(ctrl), Some(handle))
     } else {
         (None, None)
@@ -81,6 +101,7 @@ fn main() -> ExitCode {
 
     let [win_w, win_h] = args.window_size;
     let theme_override = args.theme;
+    let initial_view = args.view;
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("photosort")
@@ -94,7 +115,8 @@ fn main() -> ExitCode {
         native_options,
         Box::new(move |cc| {
             let mut photosort =
-                PhotosortApp::new(cc, data_dir, app::thumb_provider::open_thumbnails);
+                PhotosortApp::new(cc, data_dir, app::thumb_provider::open_thumbnails)
+                    .with_initial_view(initial_view, preset_export_dir);
             if let Some(theme) = theme_override {
                 photosort = photosort.with_theme_override(&cc.egui_ctx, theme);
             }
