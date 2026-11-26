@@ -52,6 +52,7 @@ pub struct PhotosortApp {
     new_label_kind: LabelKind,
     new_label_text: String,
     focus_search_next_frame: bool,
+    export_wizard: Option<crate::export_flow::ExportWizard>,
 }
 
 impl PhotosortApp {
@@ -117,6 +118,7 @@ impl PhotosortApp {
             new_label_kind: LabelKind::Tag,
             new_label_text: String::new(),
             focus_search_next_frame: false,
+            export_wizard: None,
         };
         app.reload_catalog();
         app
@@ -493,6 +495,20 @@ impl PhotosortApp {
                         {
                             self.start_indexing(ui.ctx());
                         }
+                    }
+
+                    let can_export = !self.entries.is_empty() && self.catalog.is_some();
+                    if ui
+                        .add_enabled(can_export, egui::Button::new("Exportar…"))
+                        .clicked()
+                        && let Some(cat) = &self.catalog
+                    {
+                        self.export_wizard = Some(crate::export_flow::ExportWizard::open(
+                            cat,
+                            &self.entries,
+                            &self.selection,
+                            self.settings.last_export_dir.clone(),
+                        ));
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1365,6 +1381,14 @@ impl eframe::App for PhotosortApp {
             self.draw_gallery(ui, palette);
             self.draw_viewer_overlay(&ctx, palette);
         }
+        crate::views::export::draw_window(
+            &ctx,
+            palette,
+            &mut self.export_wizard,
+            &self.data_dir,
+            &mut self.settings,
+            &mut self.banner_error,
+        );
     }
 }
 
