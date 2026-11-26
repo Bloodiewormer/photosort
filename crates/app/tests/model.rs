@@ -265,3 +265,28 @@ fn chip_mode_info_maps_every_mode_to_explicit_text_prefix_and_tooltip() {
     assert!(tip_one.contains("1 imagen"));
     assert!(tip_one.contains(req.tooltip));
 }
+
+#[test]
+fn gallery_cell_and_sidebar_tooltip_helpers_format_full_name_and_folder() {
+    use app::model::{REVIEW_BADGE_TOOLTIP, gallery_cell_tooltip, library_display_name};
+    use std::path::Path;
+
+    assert_eq!(
+        REVIEW_BADGE_TOOLTIP,
+        "Tiene etiquetas sugeridas sin revisar"
+    );
+
+    let nested = Path::new(r"C:\demo\library\capturas\Screenshot_2024-01-02_muy_largo.png");
+    let tip = gallery_cell_tooltip(nested);
+    assert!(tip.contains("Screenshot_2024-01-02_muy_largo.png"));
+    assert!(tip.contains(r"C:\demo\library\capturas"));
+
+    let bare = Path::new("solo_archivo.png");
+    assert_eq!(gallery_cell_tooltip(bare), "solo_archivo.png");
+
+    assert_eq!(
+        library_display_name(Path::new(r"C:\demo\library")),
+        "library"
+    );
+    assert_eq!(library_display_name(Path::new(r"C:\")), r"C:\");
+}

@@ -1,8 +1,8 @@
 use crate::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use crate::model::{
-    CHIP_FILTER_HELP, ChipMode, FilterState, GridLayout, MoveDir, Selection, count_phrase,
-    format_bytes, format_chip_label, format_chip_tooltip, format_timestamp_utc, plural_word,
-    selected_phrase,
+    CHIP_FILTER_HELP, ChipMode, FilterState, GridLayout, MoveDir, REVIEW_BADGE_TOOLTIP, Selection,
+    count_phrase, format_bytes, format_chip_label, format_chip_tooltip, format_timestamp_utc,
+    gallery_cell_tooltip, library_display_name, plural_word, selected_phrase,
 };
 use crate::review_flow::ReviewFlow;
 use crate::settings::{self, Settings, Theme};
@@ -831,16 +831,17 @@ impl PhotosortApp {
                     });
                     ui.add_space(theme::SPACE_XS);
                     for root in &self.settings.library_roots {
-                        let name = root
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| root.display().to_string());
+                        let name = library_display_name(root);
+                        let full_path = root.display().to_string();
                         ui.horizontal(|ui| {
-                            ui.label(&name).on_hover_text(root.display().to_string());
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("Quitar").clicked() {
                                     to_remove = Some(root.clone());
                                 }
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(egui::Label::new(&name).truncate())
+                                        .on_hover_text(&full_path);
+                                });
                             });
                         });
                     }
@@ -1170,7 +1171,7 @@ impl PhotosortApp {
                                         );
                                     }
 
-                                    if pending_review {
+                                    let badge_rect = pending_review.then(|| {
                                         let badge_rect = egui::Rect::from_min_size(
                                             thumb_rect.min + Vec2::splat(theme::SPACE_XS),
                                             Vec2::new(66.0, 20.0),
@@ -1187,7 +1188,8 @@ impl PhotosortApp {
                                             egui::FontId::proportional(theme::FONT_SMALL),
                                             palette.review_badge_fg.color32(),
                                         );
-                                    }
+                                        badge_rect
+                                    });
 
                                     let filename = entry
                                         .path
@@ -1207,14 +1209,25 @@ impl PhotosortApp {
                                     let mut child_ui = ui.new_child(
                                         egui::UiBuilder::new().max_rect(label_rect),
                                     );
+                                    // Non-interactive label so hover and clicks pass through to the cell `resp`.
                                     child_ui.add(
                                         egui::Label::new(
                                             RichText::new(filename)
                                                 .size(theme::FONT_SMALL)
                                                 .color(palette.text_primary.color32()),
                                         )
-                                        .truncate(),
+                                        .truncate()
+                                        .sense(Sense::empty()),
                                     );
+
+                                    if badge_rect.is_some_and(|r| ui.rect_contains_pointer(r)) {
+                                        resp.on_hover_text(REVIEW_BADGE_TOOLTIP);
+                                    } else {
+                                        let entry_path = &entry.path;
+                                        resp.on_hover_ui(|ui| {
+                                            ui.label(gallery_cell_tooltip(entry_path));
+                                        });
+                                    }
                                 }
                             });
                         }

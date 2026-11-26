@@ -1,7 +1,7 @@
 use catalog::{Entry, Filter, LabelId, Sort};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveDir {
@@ -415,4 +415,27 @@ pub fn count_phrase(n: usize, singular: &str, plural: &str) -> String {
 /// Formats the selected-image count in Spanish (`"1 seleccionada"`, `"0 seleccionadas"`, `"3 seleccionadas"`).
 pub fn selected_phrase(n: usize) -> String {
     count_phrase(n, "seleccionada", "seleccionadas")
+}
+
+pub const REVIEW_BADGE_TOOLTIP: &str = "Tiene etiquetas sugeridas sin revisar";
+
+/// Formats a gallery cell's hover tooltip with its full file name and containing folder.
+pub fn gallery_cell_tooltip(path: &Path) -> String {
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            format!("{filename}\nCarpeta: {}", parent.display())
+        }
+        _ => filename,
+    }
+}
+
+/// Returns the short folder name shown in the sidebar library list, falling back to the full path.
+pub fn library_display_name(root: &Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string())
 }
