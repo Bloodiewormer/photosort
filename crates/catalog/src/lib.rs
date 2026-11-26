@@ -1,5 +1,7 @@
+mod browse;
 mod labels;
 
+pub use browse::{Entry, LabelCount, Sort};
 pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, Source, Status};
 
 use fsguard::{DestPath, LibraryRoot};
@@ -83,6 +85,19 @@ pub struct IndexReport {
     /// Files whose bytes were actually read to compute a hash.
     pub hashed: usize,
     pub errors: Vec<(PathBuf, String)>,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    pub done: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Continue,
+    Stop,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -102,6 +117,8 @@ impl Catalog {
     /// The database path must be a [`DestPath`], so it can never be created inside a library.
     pub fn open(db: &DestPath) -> Result<Self, CatalogError> {
         let conn = Connection::open(db.as_path())?;
+        // wait briefly when another connection (e.g. the indexing thread) is committing in WAL mode
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
@@ -112,8 +129,20 @@ impl Catalog {
     // shortcut: a file edited in place keeping the same size and modified time is not noticed; upgrade
     // to an explicit "rehash everything" command if that ever matters.
     pub fn index(&mut self, root: &LibraryRoot) -> Result<IndexReport, CatalogError> {
+        self.index_with(root, &mut |_| Control::Continue)
+    }
+
+    /// Like [`index`](Self::index), reporting progress after each file and stopping early when the
+    /// callback returns [`Control::Stop`]. Work already committed is kept and nothing is flagged missing
+    /// when stopped early.
+    pub fn index_with(
+        &mut self,
+        root: &LibraryRoot,
+        progress: &mut dyn FnMut(&Progress) -> Control,
+    ) -> Result<IndexReport, CatalogError> {
         let root_key = root.as_path().to_string_lossy().into_owned();
         let scanned = scanner::scan(root.as_path())?;
+        let total = scanned.files.len();
         let run: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(seen_run), 0) + 1 FROM location",
             [],
@@ -124,7 +153,12 @@ impl Catalog {
             ..Default::default()
         };
 
-        for file in scanned.files {
+        if progress(&Progress { done: 0, total }) == Control::Stop {
+            report.stopped = true;
+            return Ok(report);
+        }
+
+        for (idx, file) in scanned.files.into_iter().enumerate() {
             let path = file.path.to_string_lossy().into_owned();
             let mtime = file
                 .modified
@@ -149,44 +183,51 @@ impl Catalog {
                     params![run, path],
                 )?;
                 report.unchanged += 1;
-                continue;
+            } else {
+                match scanner::sha256_file(&file.path) {
+                    Ok(sha) => {
+                        report.hashed += 1;
+                        let tx = self.conn.transaction()?;
+                        tx.execute(
+                            "INSERT OR IGNORE INTO asset (sha256, size) VALUES (?1, ?2)",
+                            params![sha, file.size as i64],
+                        )?;
+                        let asset_id: i64 =
+                            tx.query_row("SELECT id FROM asset WHERE sha256 = ?1", [&sha], |r| {
+                                r.get(0)
+                            })?;
+                        tx.execute(
+                            "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+                             ON CONFLICT(path) DO UPDATE SET asset_id = ?1, root = ?2, size = ?4,
+                                 mtime_ns = ?5, seen_run = ?6, missing = 0",
+                            params![asset_id, root_key, path, file.size as i64, mtime, run],
+                        )?;
+                        tx.commit()?;
+                        if known.is_some() {
+                            report.changed += 1;
+                        } else {
+                            report.new += 1;
+                        }
+                    }
+                    Err(e) => {
+                        // still on disk, so it must not be flagged missing
+                        self.conn.execute(
+                            "UPDATE location SET seen_run = ?1 WHERE path = ?2",
+                            params![run, path],
+                        )?;
+                        report.errors.push((file.path, e.to_string()));
+                    }
+                }
             }
 
-            let sha = match scanner::sha256_file(&file.path) {
-                Ok(sha) => sha,
-                Err(e) => {
-                    // still on disk, so it must not be flagged missing
-                    self.conn.execute(
-                        "UPDATE location SET seen_run = ?1 WHERE path = ?2",
-                        params![run, path],
-                    )?;
-                    report.errors.push((file.path, e.to_string()));
-                    continue;
-                }
-            };
-            report.hashed += 1;
-
-            let tx = self.conn.transaction()?;
-            tx.execute(
-                "INSERT OR IGNORE INTO asset (sha256, size) VALUES (?1, ?2)",
-                params![sha, file.size as i64],
-            )?;
-            let asset_id: i64 =
-                tx.query_row("SELECT id FROM asset WHERE sha256 = ?1", [&sha], |r| {
-                    r.get(0)
-                })?;
-            tx.execute(
-                "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
-                 ON CONFLICT(path) DO UPDATE SET asset_id = ?1, root = ?2, size = ?4,
-                     mtime_ns = ?5, seen_run = ?6, missing = 0",
-                params![asset_id, root_key, path, file.size as i64, mtime, run],
-            )?;
-            tx.commit()?;
-            if known.is_some() {
-                report.changed += 1;
-            } else {
-                report.new += 1;
+            if progress(&Progress {
+                done: idx + 1,
+                total,
+            }) == Control::Stop
+            {
+                report.stopped = true;
+                return Ok(report);
             }
         }
 
