@@ -29,8 +29,10 @@ pub enum CaptureView {
     Review,
     Duplicates,
     Works,
+    Tags,
     Export,
     Ocr,
+    Vision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +70,7 @@ pub fn usage_text() -> &'static str {
     "Uso: photosort [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
      [--screenshot <salida.png>] [--screenshot-delay-frames <N>] \
      [--window-size <Ancho>x<Alto>] [--theme dark|light] \
-     [--view gallery|review|duplicates|works|export|ocr]"
+     [--view gallery|review|duplicates|works|tags|export|ocr|vision]"
 }
 
 pub fn parse_window_size(raw: &str) -> Result<[u32; 2], String> {
@@ -118,13 +120,17 @@ pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
         Ok(CaptureView::Duplicates)
     } else if raw.eq_ignore_ascii_case("works") {
         Ok(CaptureView::Works)
+    } else if raw.eq_ignore_ascii_case("tags") {
+        Ok(CaptureView::Tags)
     } else if raw.eq_ignore_ascii_case("export") {
         Ok(CaptureView::Export)
     } else if raw.eq_ignore_ascii_case("ocr") {
         Ok(CaptureView::Ocr)
+    } else if raw.eq_ignore_ascii_case("vision") {
+        Ok(CaptureView::Vision)
     } else {
         Err(format!(
-            "Vista inválida para --view: '{raw}' (usa 'gallery', 'review', 'duplicates', 'works', 'export' u 'ocr')"
+            "Vista inválida para --view: '{raw}' (usa 'gallery', 'review', 'duplicates', 'works', 'tags', 'export', 'ocr' o 'vision')"
         ))
     }
 }
@@ -228,6 +234,7 @@ pub struct FrameSignals {
     pub export_ready: bool,
     pub export_failed: bool,
     pub ocr_open: bool,
+    pub vision_open: bool,
     pub image_received: bool,
 }
 
@@ -236,6 +243,7 @@ pub enum CaptureAction {
     SelectFirst,
     OpenExport,
     OpenOcr,
+    OpenVision,
     WaitForWorkers,
     WaitFrame,
     RequestScreenshot,
@@ -250,6 +258,7 @@ pub enum CaptureStep {
     SelectFirst,
     OpenExport,
     OpenOcr,
+    OpenVision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +325,10 @@ impl CaptureState {
                     self.setup_triggered = true;
                     return CaptureAction::OpenOcr;
                 }
+                CaptureView::Vision if !signals.vision_open => {
+                    self.setup_triggered = true;
+                    return CaptureAction::OpenVision;
+                }
                 _ => {}
             }
         }
@@ -333,12 +346,15 @@ impl CaptureState {
                         !signals.has_entries || (signals.thumbs_ready && signals.preview_ready)
                     }
                     CaptureView::Review | CaptureView::Duplicates => signals.thumbs_ready,
-                    CaptureView::Works => true,
+                    CaptureView::Works | CaptureView::Tags => true,
                     CaptureView::Export => {
                         !signals.has_entries || (signals.thumbs_ready && signals.export_ready)
                     }
                     CaptureView::Ocr => {
                         !signals.has_entries || (signals.thumbs_ready && signals.ocr_open)
+                    }
+                    CaptureView::Vision => {
+                        !signals.has_entries || (signals.thumbs_ready && signals.vision_open)
                     }
                 };
                 if ready {
@@ -371,12 +387,19 @@ impl CaptureState {
                             CaptureView::Works => {
                                 "Tiempo de espera agotado esperando la pestaña Obras.".into()
                             }
+                            CaptureView::Tags => {
+                                "Tiempo de espera agotado esperando la pestaña Etiquetas.".into()
+                            }
                             CaptureView::Export => {
                                 "Tiempo de espera agotado esperando la vista previa del asistente de exportación."
                                     .into()
                             }
                             CaptureView::Ocr => {
                                 "Tiempo de espera agotado esperando la ventana de lectura OCR."
+                                    .into()
+                            }
+                            CaptureView::Vision => {
+                                "Tiempo de espera agotado esperando la ventana de reconocimiento de imágenes."
                                     .into()
                             }
                         })
@@ -568,6 +591,10 @@ impl ScreenshotController {
             CaptureAction::OpenOcr => {
                 ctx.request_repaint();
                 CaptureStep::OpenOcr
+            }
+            CaptureAction::OpenVision => {
+                ctx.request_repaint();
+                CaptureStep::OpenVision
             }
             CaptureAction::WaitForWorkers => {
                 ctx.request_repaint_after(Duration::from_millis(25));

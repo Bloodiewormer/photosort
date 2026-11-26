@@ -1,5 +1,8 @@
 use crate::settings::{self, Settings, Theme};
-use catalog::{Catalog, LabelKind, OcrLine, OcrRecognizer, Source};
+use catalog::{
+    Catalog, DetectedFace, EMBEDDING_DIM, LabelKind, OcrLine, OcrRecognizer, RuleMode,
+    SIGLIP2_MODEL_ID, Source,
+};
 use fsguard::{DestPath, GuardError, LibraryRoot, ensure_export_dir, ensure_writable};
 use image::codecs::gif::GifEncoder;
 use image::codecs::jpeg::JpegEncoder;
@@ -981,6 +984,7 @@ pub fn prepare_demo(
     // Demo mode never loads ONNX models.
     seed_demo_ocr(&mut cat, canonical_root, &specs)?;
     seed_demo_works(&mut cat)?;
+    seed_demo_vision(&mut cat, canonical_root, &specs)?;
 
     Ok(DemoSetup {
         base_dir: resolved_base,
@@ -1148,5 +1152,143 @@ fn seed_demo_works(cat: &mut Catalog) -> Result<(), String> {
         cat.apply_work_matches(asset, &matcher)
             .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+fn l2_norm(v: &mut [f32]) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+fn synth_unit_vec(primary_dim: usize, secondary_dim: Option<usize>, salt: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; EMBEDDING_DIM];
+    v[primary_dim % EMBEDDING_DIM] = 0.22;
+    if let Some(sec) = secondary_dim {
+        v[sec % EMBEDDING_DIM] = 0.16;
+    }
+    // Spread small deterministic energy across remaining dimensions so cosines stay in ~0.04..0.22.
+    let mut rng = Rng::new(0x5649_5349_4F4E ^ (salt as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    for slot in v.iter_mut().skip(16) {
+        let r = ((rng.next_u64() & 0xFFFF) as f32 / 65535.0) - 0.5;
+        *slot = r * 0.06;
+    }
+    l2_norm(&mut v);
+    v
+}
+
+/// Seeds synthetic vision embeddings, detected faces, and cached text embeddings for built-in
+/// rules on a subset of demo images (leaving most pending for the recognition window).
+/// Demo mode never loads ONNX models.
+fn seed_demo_vision(
+    cat: &mut Catalog,
+    canonical_root: &Path,
+    specs: &[ImageSpec],
+) -> Result<(), String> {
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    let rules = cat.list_vision_rules().map_err(|e| e.to_string())?;
+    let mut cached_pairs: Vec<(String, Vec<f32>)> = Vec::new();
+    for (rule_idx, rule) in rules.iter().enumerate() {
+        let dim = match rule.builtin_key.as_deref() {
+            Some("type_manga") => 0,
+            Some("type_illustration") => 1,
+            Some("type_photo") => 2,
+            Some("type_screenshot") => 3,
+            Some("type_meme") => 4,
+            Some("type_document") => 5,
+            Some("tag_person") => 6,
+            _ => 8 + (rule_idx % 8),
+        };
+        for (i, text) in rule.positives.iter().enumerate() {
+            let mut v = vec![0.0f32; EMBEDDING_DIM];
+            v[dim] = 1.0;
+            v[16 + (rule_idx * 7 + i) % 64] = 0.08;
+            l2_norm(&mut v);
+            cached_pairs.push((text.clone(), v));
+        }
+        for (i, text) in rule.negatives.iter().enumerate() {
+            let mut v = vec![0.0f32; EMBEDDING_DIM];
+            v[if rule.mode == RuleMode::Independent {
+                0
+            } else {
+                7
+            }] = 1.0;
+            v[80 + (rule_idx * 5 + i) % 64] = 0.08;
+            l2_norm(&mut v);
+            cached_pairs.push((text.clone(), v));
+        }
+    }
+    let refs: Vec<(&str, &[f32])> = cached_pairs
+        .iter()
+        .map(|(t, v)| (t.as_str(), v.as_slice()))
+        .collect();
+    cat.save_text_embeddings(SIGLIP2_MODEL_ID, &refs)
+        .map_err(|e| e.to_string())?;
+
+    let mut analyzed_assets = Vec::new();
+    for (i, spec) in specs.iter().enumerate().take(36) {
+        if spec.duplicate_of.is_some() {
+            continue;
+        }
+        let Some(asset) = cat
+            .asset_of(&canonical_root.join(&spec.rel_path))
+            .map_err(|e| e.to_string())?
+        else {
+            continue;
+        };
+        let folder = spec
+            .rel_path
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let (primary_dim, secondary_dim, faces) = match folder.as_str() {
+            "manga" => (0, None, Vec::new()),
+            "personas" => (
+                2,
+                Some(6),
+                vec![DetectedFace {
+                    bbox: [60.0, 40.0, 160.0, 150.0],
+                    score: 0.91,
+                }],
+            ),
+            "capturas" => (3, None, Vec::new()),
+            "memes" => (4, None, Vec::new()),
+            "documentos" => (5, None, Vec::new()),
+            _ => (1, None, Vec::new()),
+        };
+        let emb = synth_unit_vec(primary_dim, secondary_dim, i + 1);
+        cat.save_vision_result(asset, SIGLIP2_MODEL_ID, &emb, &faces)
+            .map_err(|e| e.to_string())?;
+        analyzed_assets.push(asset);
+    }
+
+    let (compiled, _) = cat
+        .compile_vision_rules(SIGLIP2_MODEL_ID)
+        .map_err(|e| e.to_string())?;
+    cat.apply_vision_rules_batch(&analyzed_assets, &compiled)
+        .map_err(|e| e.to_string())?;
+
+    // Accept and reject a small subset of AI suggestions so the Etiquetas tab shows live accuracy
+    // counters out of the box in --demo mode.
+    for (idx, &asset) in analyzed_assets.iter().enumerate() {
+        let assigns = cat.labels_of(asset).map_err(|e| e.to_string())?;
+        for assign in assigns {
+            if assign.source == Source::Ai && assign.status == catalog::Status::Suggested {
+                if idx % 3 == 0 {
+                    cat.accept(asset, assign.label).map_err(|e| e.to_string())?;
+                } else if idx % 7 == 0 {
+                    cat.reject(asset, assign.label).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }

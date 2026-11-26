@@ -43,6 +43,8 @@ pub struct Settings {
     #[serde(default)]
     pub ocr_models_dir: Option<PathBuf>,
     #[serde(default)]
+    pub vision_models_dir: Option<PathBuf>,
+    #[serde(default)]
     pub ocr_device: OcrDevice,
 }
 
@@ -54,6 +56,7 @@ impl Default for Settings {
             theme: Theme::default(),
             auto_analyze: default_auto_analyze(),
             ocr_models_dir: None,
+            vision_models_dir: None,
             ocr_device: OcrDevice::default(),
         }
     }
