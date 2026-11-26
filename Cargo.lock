@@ -3402,12 +3402,15 @@ name = "ocr"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "fsguard",
  "image",
  "oar-ocr",
  "ort",
  "scanner",
+ "serde_json",
  "tempfile",
  "unicode-normalization",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
