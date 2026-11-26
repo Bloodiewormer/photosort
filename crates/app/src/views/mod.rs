@@ -1,7 +1,10 @@
+pub mod context_menu;
 pub mod duplicates;
 pub mod export;
-pub mod ocr;
+pub mod gallery;
+pub mod inspector;
 pub mod review;
+pub mod settings;
+pub mod shell;
 pub mod tags;
-pub mod vision;
 pub mod works;

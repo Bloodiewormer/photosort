@@ -1,5 +1,5 @@
 pub use catalog::Control;
-use catalog::{Catalog, CatalogError, LabelKind, Source};
+use catalog::{AssetId, Catalog, CatalogError, LabelKind, Pending, Source};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufReader};
@@ -80,6 +80,72 @@ fn has_non_empty_tag(data: &exif::Exif, tag: exif::Tag) -> bool {
                 .any(|s| s.iter().any(|&b| b != 0 && !b.is_ascii_whitespace())),
             _ => !field.display_value().to_string().trim().is_empty(),
         })
+}
+
+/// Runs rules on a single pending asset: reads header facts, records rule suggestions, and
+/// marks `STAGE` at `VERSION` done. Returns `Ok(Ok(suggestion_count))` on success,
+/// `Ok(Err(reason))` if the image could not be read (leaving it pending), or `Err(db_err)` on
+/// catalog failure.
+pub fn analyze_pending_item(
+    catalog: &Catalog,
+    item: &Pending,
+) -> Result<Result<usize, String>, CatalogError> {
+    match read_facts(&item.path) {
+        Ok(facts) => {
+            let mut suggestions = 0usize;
+            for s in suggest(&facts) {
+                let label = catalog.label(s.kind, s.name)?;
+                catalog.suggest(item.asset, label, Source::Rules, s.confidence)?;
+                suggestions += 1;
+            }
+            catalog.mark_done(item.asset, STAGE, VERSION)?;
+            Ok(Ok(suggestions))
+        }
+        Err(e) => Ok(Err(e.to_string())),
+    }
+}
+
+/// Runs rule-based analysis scoped to the given `assets` (only those still pending for `STAGE`),
+/// reporting progress and stopping early on [`Control::Stop`].
+pub fn run_for_assets_with(
+    catalog: &Catalog,
+    assets: &[AssetId],
+    progress: &mut dyn FnMut(&RunProgress) -> Control,
+) -> Result<RunReport, CatalogError> {
+    let mut report = RunReport::default();
+    let batch = catalog.pending_in_assets(STAGE, VERSION, assets, usize::MAX)?;
+    let total = batch.len();
+    if progress(&RunProgress {
+        analyzed: 0,
+        pending: total,
+    }) == Control::Stop
+    {
+        report.stopped = true;
+        return Ok(report);
+    }
+    let mut failed = 0usize;
+    for item in batch {
+        match analyze_pending_item(catalog, &item)? {
+            Ok(suggestions) => {
+                report.suggestions += suggestions;
+                report.analyzed += 1;
+            }
+            Err(reason) => {
+                report.errors.push((item.path, reason));
+                failed += 1;
+            }
+        }
+        let pending = total.saturating_sub(report.analyzed + failed);
+        if progress(&RunProgress {
+            analyzed: report.analyzed,
+            pending,
+        }) == Control::Stop
+        {
+            report.stopped = true;
+            return Ok(report);
+        }
+    }
+    Ok(report)
 }
 
 /// Processes `catalog.pending(STAGE, VERSION, ..)` in batches until none is left: `read_facts`,

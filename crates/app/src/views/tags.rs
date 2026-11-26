@@ -344,11 +344,11 @@ pub fn draw(
                     if ui
                         .add_enabled(can_test, egui::Button::new("Probar en la galería"))
                         .on_disabled_hover_text(if analyzed_count == 0 {
-                            "Primero analiza imágenes en «Reconocer imágenes…»."
+                            "Activa «Reconocer imágenes» en Configuración primero"
                         } else if rank_loading {
                             "Calculando similitud…"
                         } else {
-                            "Añade al menos una descripción positiva."
+                            "Añade al menos una descripción positiva"
                         })
                         .clicked()
                     {
@@ -428,7 +428,7 @@ pub fn draw(
                     let tip = if let Some(task) = other_heavy_task {
                         format!("Espera a que termine {task}.")
                     } else if analyzed_count == 0 {
-                        "Primero analiza imágenes con «Reconocer imágenes…».".into()
+                        "Activa «Reconocer imágenes» en Configuración primero".into()
                     } else {
                         "Recalcula sugerencias usando los vectores guardados sin leer archivos de imagen.".into()
                     };
@@ -674,12 +674,12 @@ pub fn draw(
                     for (heading, subtitle, group) in [
                         (
                             "Tipo de imagen (exclusivo)",
-                            "Como máximo una categoría por imagen; las más ambiguas aparecen primero en Revisión.",
+                            "Como máximo una categoría por imagen; las más ambiguas aparecen primero en Sugerencias",
                             type_rules,
                         ),
                         (
                             "Etiquetas independientes",
-                            "Se evalúan por separado. «persona» también se activa con rostros YuNet ≥ 0,80 en Foto, Meme o Capturas de pantalla.",
+                            "Se evalúan por separado. «persona» también se activa con rostros YuNet ≥ 0,80 en Foto, Meme o Capturas de pantalla",
                             ind_rules,
                         ),
                     ] {

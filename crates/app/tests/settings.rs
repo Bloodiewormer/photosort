@@ -158,3 +158,23 @@ fn old_settings_without_auto_analyze_loads_with_default_true_and_roundtrips_fals
     assert!(reloaded.warning.is_none());
     assert!(!reloaded.settings.auto_analyze);
 }
+
+#[test]
+fn old_settings_without_background_review_fields_loads_with_safe_defaults() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+
+    fs::write(
+        data.join("settings.json"),
+        br#"{"library_roots":[],"last_export_dir":null,"theme":"Dark","auto_analyze":true}"#,
+    )
+    .unwrap();
+
+    let loaded = load(&data);
+    assert!(loaded.warning.is_none(), "{:?}", loaded.warning);
+    assert!(!loaded.settings.background_review);
+    assert!(loaded.settings.stage_rules);
+    assert!(!loaded.settings.stage_vision);
+    assert!(!loaded.settings.stage_ocr);
+}

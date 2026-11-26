@@ -186,7 +186,7 @@ pub fn draw(
                     ui.set_width(ui.available_width());
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            RichText::new("Cola de revisión")
+                            RichText::new("Sugerencias")
                                 .size(theme::FONT_HEADING)
                                 .strong(),
                         );
@@ -228,7 +228,7 @@ pub fn draw(
                     ui.add_space(theme::SPACE_XL * 2.0);
                     ui.label(
                         RichText::new(
-                            "No hay sugerencias por debajo del umbral actual. Sube el umbral o pulsa \"Analizar\" para evaluar nuevas imágenes.",
+                            "No hay sugerencias por debajo del umbral actual. Sube el umbral o activa la revisión en Configuración",
                         )
                         .size(theme::FONT_BODY)
                         .color(palette.text_secondary.color32()),

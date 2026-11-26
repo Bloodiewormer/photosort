@@ -116,6 +116,47 @@ impl Catalog {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Active label counts restricted to present assets under `roots`.
+    pub fn labels_in_use_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<LabelCount>, CatalogError> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT lb.id, lb.kind, lb.name, c.images
+             FROM (
+                 SELECT al.label_id, COUNT(*) AS images
+                 FROM asset_label al
+                 WHERE al.status <> 'rejected'
+                   AND EXISTS (SELECT 1 FROM location l
+                               WHERE l.asset_id = al.asset_id
+                                 AND l.missing = 0
+                                 AND l.root IN ({marks}))
+                 GROUP BY al.label_id
+             ) c
+             JOIN label lb ON lb.id = c.label_id
+             ORDER BY lb.kind, lb.name"
+        );
+        let args: Vec<Box<dyn ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn ToSql>)
+            .collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+            let kind: String = r.get(1)?;
+            Ok(LabelCount {
+                label: LabelId(r.get(0)?),
+                kind: LabelKind::parse(&kind).ok_or_else(|| unexpected(1, &kind))?,
+                name: r.get(2)?,
+                images: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn entry_for(&self, asset: AssetId) -> Result<Option<Entry>, CatalogError> {
         Ok(self
             .conn
@@ -128,6 +169,34 @@ impl Catalog {
                 [asset.0],
                 entry_from_row,
             )
+            .optional()?)
+    }
+
+    /// Returns a present entry for `asset` restricted to `roots`.
+    pub fn entry_for_in_roots(
+        &self,
+        asset: AssetId,
+        roots: &[PathBuf],
+    ) -> Result<Option<Entry>, CatalogError> {
+        if roots.is_empty() {
+            return Ok(None);
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+             FROM location l JOIN asset a ON a.id = l.asset_id
+             WHERE l.asset_id = ? AND l.missing = 0 AND l.root IN ({marks})
+             ORDER BY l.path ASC
+             LIMIT 1"
+        );
+        let mut args: Vec<Box<dyn ToSql>> = Vec::with_capacity(roots.len() + 1);
+        args.push(Box::new(asset.0));
+        for root in roots {
+            args.push(Box::new(root.to_string_lossy().into_owned()));
+        }
+        Ok(self
+            .conn
+            .query_row(&sql, params_from_iter(args.iter()), entry_from_row)
             .optional()?)
     }
 }

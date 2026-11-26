@@ -91,6 +91,7 @@ pub struct ReviewFlow {
     cursor: usize,
     pending_group_action: Option<PendingGroupAction>,
     undo_stack: Vec<UndoAction>,
+    active_roots: Option<Vec<PathBuf>>,
 }
 
 impl Default for ReviewFlow {
@@ -108,6 +109,7 @@ impl ReviewFlow {
             cursor: 0,
             pending_group_action: None,
             undo_stack: Vec::new(),
+            active_roots: None,
         }
     }
 
@@ -173,11 +175,33 @@ impl ReviewFlow {
 
     /// Reloads pending suggestions below `threshold` from `catalog` and regroups them by label.
     pub fn reload(&mut self, catalog: &Catalog) -> Result<(), CatalogError> {
+        let roots = self.active_roots.clone();
+        self.reload_scoped(catalog, roots.as_deref())
+    }
+
+    /// Reloads pending suggestions restricted to assets under registered `roots`.
+    pub fn reload_in_roots(
+        &mut self,
+        catalog: &Catalog,
+        roots: &[PathBuf],
+    ) -> Result<(), CatalogError> {
+        self.active_roots = Some(roots.to_vec());
+        self.reload_scoped(catalog, Some(roots))
+    }
+
+    fn reload_scoped(
+        &mut self,
+        catalog: &Catalog,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<(), CatalogError> {
         let prev_group_idx = self
             .active_group
             .and_then(|id| self.groups.iter().position(|g| g.label == id));
 
-        let raw = catalog.review_queue(self.threshold)?;
+        let raw = match roots {
+            Some(r) => catalog.review_queue_in_roots(self.threshold, r)?,
+            None => catalog.review_queue(self.threshold)?,
+        };
         let mut entry_cache: HashMap<AssetId, Option<String>> = HashMap::new();
         let mut labels_cache: HashMap<AssetId, Vec<Assignment>> = HashMap::new();
         let mut by_label: HashMap<LabelId, ReviewGroup> = HashMap::new();
@@ -186,7 +210,10 @@ impl ReviewFlow {
             let sha256 = if let Some(cached) = entry_cache.get(&item.asset) {
                 cached.clone()
             } else {
-                let sha = catalog.entry_for(item.asset)?.map(|e| e.sha256);
+                let sha = match roots {
+                    Some(r) => catalog.entry_for_in_roots(item.asset, r)?.map(|e| e.sha256),
+                    None => catalog.entry_for(item.asset)?.map(|e| e.sha256),
+                };
                 entry_cache.insert(item.asset, sha.clone());
                 sha
             };

@@ -54,6 +54,19 @@ impl Selection {
         self.cursor = Some(idx);
     }
 
+    /// Right-click selection rule: on an unselected item, selects only it; on an already-selected
+    /// item, preserves the multi-selection and moves the cursor to it.
+    pub fn right_click(&mut self, idx: usize, len: usize) {
+        if idx >= len {
+            return;
+        }
+        if self.selected.contains(&idx) {
+            self.cursor = Some(idx);
+        } else {
+            self.click(idx, len);
+        }
+    }
+
     pub fn ctrl_click(&mut self, idx: usize, len: usize) {
         if idx >= len {
             return;
@@ -299,6 +312,7 @@ pub struct FilterState {
     pub search: String,
     pub chips: BTreeMap<LabelId, ChipMode>,
     pub sort: Sort,
+    pub reviewed: catalog::ReviewedFilter,
 }
 
 impl Default for FilterState {
@@ -307,6 +321,7 @@ impl Default for FilterState {
             search: String::new(),
             chips: BTreeMap::new(),
             sort: Sort::PathAsc,
+            reviewed: catalog::ReviewedFilter::All,
         }
     }
 }
@@ -358,6 +373,19 @@ impl FilterState {
         let trimmed = self.search.trim();
         if !trimmed.is_empty() {
             filter.search = Some(trimmed.to_owned());
+        }
+        filter
+    }
+
+    pub fn to_catalog_filter_scoped(
+        &self,
+        roots: &[PathBuf],
+        stages: &[catalog::StageSpec],
+    ) -> Filter {
+        let mut filter = self.to_catalog_filter();
+        filter.roots = Some(roots.to_vec());
+        if self.reviewed != catalog::ReviewedFilter::All {
+            filter.reviewed = Some((self.reviewed, stages.to_vec()));
         }
         filter
     }

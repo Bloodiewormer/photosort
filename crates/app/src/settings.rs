@@ -30,6 +30,10 @@ fn default_auto_analyze() -> bool {
     true
 }
 
+fn default_stage_rules() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -46,6 +50,18 @@ pub struct Settings {
     pub vision_models_dir: Option<PathBuf>,
     #[serde(default)]
     pub ocr_device: OcrDevice,
+    /// Master switch for automatic background review. OFF by default.
+    #[serde(default)]
+    pub background_review: bool,
+    /// Fast rule-based stage (enabled by default).
+    #[serde(default = "default_stage_rules")]
+    pub stage_rules: bool,
+    /// Image recognition stage (SigLIP 2 + YuNet). OFF until enabled.
+    #[serde(default)]
+    pub stage_vision: bool,
+    /// OCR + works matching stage. OFF until enabled (slowest).
+    #[serde(default)]
+    pub stage_ocr: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +74,10 @@ impl Default for Settings {
             ocr_models_dir: None,
             vision_models_dir: None,
             ocr_device: OcrDevice::default(),
+            background_review: false,
+            stage_rules: default_stage_rules(),
+            stage_vision: false,
+            stage_ocr: false,
         }
     }
 }
@@ -193,6 +213,43 @@ impl Settings {
             .iter()
             .filter_map(|p| LibraryRoot::new(p).ok())
             .collect()
+    }
+
+    /// Returns the currently enabled review stages with their current versions.
+    pub fn enabled_stage_specs(&self) -> Vec<catalog::StageSpec> {
+        let mut out = Vec::with_capacity(3);
+        if self.stage_rules {
+            out.push(catalog::StageSpec::new(rules::STAGE, rules::VERSION));
+        }
+        if self.stage_vision {
+            out.push(catalog::StageSpec::new(
+                catalog::VISION_STAGE,
+                catalog::VISION_VERSION,
+            ));
+        }
+        if self.stage_ocr {
+            out.push(catalog::StageSpec::new(
+                catalog::OCR_STAGE,
+                catalog::OCR_VERSION,
+            ));
+        }
+        out
+    }
+
+    /// Builds a [`crate::review_engine::ReviewConfig`] reflecting the saved preferences.
+    pub fn to_review_config(&self) -> crate::review_engine::ReviewConfig {
+        crate::review_engine::ReviewConfig {
+            enabled: self.background_review,
+            rules: self.stage_rules,
+            vision: self.stage_vision,
+            ocr: self.stage_ocr,
+            roots: self.library_roots.clone(),
+            vision_models_dir: self.vision_models_dir.clone(),
+            ocr_models_dir: self.ocr_models_dir.clone(),
+            device: self.ocr_device,
+            chunk_size: crate::review_engine::DEFAULT_CHUNK_SIZE,
+            error_backoff: crate::review_engine::DEFAULT_ERROR_BACKOFF,
+        }
     }
 }
 

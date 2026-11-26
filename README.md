@@ -15,6 +15,7 @@ Escrita en Rust con [egui](https://github.com/emilk/egui). Windows.
 - **Lectura de texto (OCR)** en español, inglés, japonés, chino y coreano, y búsqueda por ese texto.
 - **Obras de manga** mencionadas en páginas promocionales, a partir de tu propia lista.
 - **Reconocimiento visual**: manga, ilustración, foto, captura, meme, documento, presencia de personas y etiquetas que describas con tus palabras.
+- **Revisión en segundo plano**, desactivada hasta que la enciendas: analiza las fotos pendientes y marca las revisadas. Con clic derecho se pueden volver a revisar. Ver [docs/revision.md](docs/revision.md).
 - **Exportación** con copias byte a byte, verificadas con SHA-256, con sus fechas y un manifiesto CSV y JSON.
 
 Lo pendiente está en las [issues](https://github.com/Bloodiewormer/photosort/issues).

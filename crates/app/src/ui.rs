@@ -1,65 +1,49 @@
-use crate::analysis_worker::{AnalysisEvent, AnalysisWorker};
-use crate::model::{
-    CHIP_FILTER_HELP, ChipMode, FilterState, GridLayout, MoveDir, REVIEW_BADGE_TOOLTIP, Selection,
-    count_phrase, format_bytes, format_chip_label, format_chip_tooltip, format_timestamp_utc,
-    gallery_cell_tooltip, library_display_name, plural_word, selected_phrase,
+use crate::model::{ChipMode, FilterState, MoveDir, Selection, count_phrase};
+use crate::review_engine::{
+    EnginePhase, EngineSnapshot, ReviewEngine, ReviewEngineEvent, StageKind, chunk_reload_due,
 };
-use crate::ocr_worker::{OcrEvent, OcrScope, OcrWorker};
 use crate::review_flow::ReviewFlow;
-use crate::settings::{self, OcrDevice, Settings, Theme};
-use crate::theme::{self, Palette};
+use crate::screenshot::CaptureView;
+use crate::settings::{self, Settings, Theme};
+use crate::theme;
 use crate::views;
-use crate::views::ocr::{OcrDialog, OcrRunState, OcrTargetMode};
+use crate::views::context_menu::{PhotoMenuAction, PhotoMenuContext, PhotoMenuState};
+use crate::views::gallery::SimilarityView;
+use crate::views::inspector::InspectorState;
+use crate::views::settings::SettingsViewState;
+use crate::views::shell::{ActiveView, SidebarState};
 use crate::views::tags::{TagsApplyState, TagsViewState};
-use crate::views::vision::{VisionDialog, VisionRunState, VisionTargetMode};
 use crate::views::works::{WorksRunState, WorksViewState};
-use crate::vision_worker::{
-    TagsApplyEvent, TagsApplyWorker, VisionEvent, VisionRankResult, VisionRankWorker, VisionScope,
-    VisionWorker,
-};
-use crate::worker::{
-    IndexEvent, IndexWorker, Notify, PreviewWorker, ThumbPool, ThumbRequest, ThumbnailProvider,
-};
+use crate::vision_worker::{TagsApplyEvent, TagsApplyWorker, VisionRankResult, VisionRankWorker};
+use crate::worker::{Notify, PreviewWorker, ThumbPool, ThumbnailProvider};
 use crate::works_worker::{WorksEvent, WorksWorker};
 use catalog::{
-    AssetId, Assignment, Catalog, Counts, DetectedFace, DuplicateGroup, Entry, LabelCount, LabelId,
-    LabelKind, OcrLine, SCREENSHOT_CATEGORY, Sort, Source, Status, VisionRule, WorkSummary,
+    AssetId, Catalog, Counts, DuplicateGroup, Entry, LabelCount, ReviewedCounts, ReviewedFilter,
+    SCREENSHOT_CATEGORY, Status, VisionRule, WorkSummary,
 };
-use eframe::egui::{
-    self, Align, Color32, CornerRadius, Frame, Id, Key, Layout, Margin, Modifiers, RichText,
-    ScrollArea, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
-};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use eframe::egui::{self, Key, Modifiers, Pos2, TextureHandle, TextureOptions};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-// shortcut: fixed cap on GPU thumbnail textures (FIFO eviction); upgrade to LRU if users pan
-// back and forth across >1,000 visible items rapidly.
 const MAX_THUMB_TEXTURES: usize = 1024;
-const SEARCH_INPUT_ID: &str = "photosort_search_input";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActiveTab {
-    Gallery,
-    Review,
-    Duplicates,
-    Works,
-    Tags,
-}
-
-struct SimilarityView {
-    title: String,
-    threshold: Option<f32>,
-    scores: HashMap<AssetId, f32>,
-}
+const ENGINE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct PhotosortApp {
     data_dir: PathBuf,
+    demo_mode: bool,
+    force_welcome: bool,
     settings: Settings,
     catalog: Option<Catalog>,
-    active_tab: ActiveTab,
+    active_view: ActiveView,
+    logo_texture: Option<TextureHandle>,
+
     entries: Vec<Entry>,
     counts: Counts,
+    reviewed_counts: ReviewedCounts,
+    reviewed_assets: HashSet<AssetId>,
+    root_counts: HashMap<PathBuf, usize>,
     labels_in_use: Vec<LabelCount>,
     works: Vec<WorkSummary>,
     works_view: WorksViewState,
@@ -67,23 +51,30 @@ pub struct PhotosortApp {
     vision_analyzed_count: usize,
     tags_view: TagsViewState,
     similarity_view: Option<SimilarityView>,
-    pending_review_assets: HashSet<AssetId>,
+    pending_suggestions_assets: HashSet<AssetId>,
     review_flow: ReviewFlow,
     duplicate_groups: Vec<DuplicateGroup>,
+
     filter: FilterState,
+    sidebar_state: SidebarState,
+    settings_state: SettingsViewState,
     selection: Selection,
     last_columns: usize,
+    last_primary_cell_pos: Option<Pos2>,
     viewer_open: bool,
+    photo_menu: Option<PhotoMenuState>,
+    inspector: InspectorState,
 
-    index_worker: Option<IndexWorker>,
-    index_progress: Option<String>,
-    analysis_worker: Option<AnalysisWorker>,
-    analysis_progress: Option<String>,
-    ocr_worker: Option<OcrWorker>,
-    ocr_dialog: Option<OcrDialog>,
+    review_engine: Option<ReviewEngine>,
+    engine_snapshot: EngineSnapshot,
+    demo_paused: bool,
+    last_engine_refresh: Instant,
+    pending_engine_refresh: bool,
+    /// A chunk finished and the full reload it calls for has not happened yet.
+    chunk_reload_pending: bool,
+    last_full_reload: Instant,
+
     works_worker: Option<WorksWorker>,
-    vision_worker: Option<VisionWorker>,
-    vision_dialog: Option<VisionDialog>,
     tags_apply_worker: Option<TagsApplyWorker>,
     vision_rank_worker: Option<VisionRankWorker>,
     status_notice: Option<String>,
@@ -98,17 +89,6 @@ pub struct PhotosortApp {
     preview_requested: Option<PathBuf>,
     preview_loaded: Option<(PathBuf, Result<TextureHandle, String>)>,
 
-    inspector_asset: Option<AssetId>,
-    inspector_labels: Vec<Assignment>,
-    inspector_ocr_lines: Vec<OcrLine>,
-    inspector_ocr_done: bool,
-    inspector_faces: Vec<DetectedFace>,
-    inspector_vision_done: bool,
-    inspector_ocr_checked: BTreeSet<usize>,
-    inspector_ocr_draft: String,
-    inspector_alias_target: Option<LabelId>,
-    new_label_kind: LabelKind,
-    new_label_text: String,
     focus_search_next_frame: bool,
     export_wizard: Option<crate::export_flow::ExportWizard>,
     preset_export_dir: Option<PathBuf>,
@@ -126,10 +106,27 @@ impl PhotosortApp {
             &[fsguard::LibraryRoot],
         ) -> (Arc<dyn ThumbnailProvider>, Option<String>),
     ) -> Self {
+        Self::new_with_mode(cc, data_dir, false, open_thumbnails)
+    }
+
+    pub fn new_with_mode(
+        cc: &eframe::CreationContext<'_>,
+        data_dir: PathBuf,
+        demo_mode: bool,
+        open_thumbnails: impl FnOnce(
+            &Path,
+            &[fsguard::LibraryRoot],
+        ) -> (Arc<dyn ThumbnailProvider>, Option<String>),
+    ) -> Self {
         let loaded = settings::load(&data_dir);
         let settings = loaded.settings;
         let (thumbs, thumbs_warning) = open_thumbnails(&data_dir, &settings.valid_roots());
         theme::configure_styles(&cc.egui_ctx, settings.theme);
+
+        let logo_texture = theme::logo_color_image().map(|img| {
+            cc.egui_ctx
+                .load_texture("photosort_logo", img, TextureOptions::LINEAR)
+        });
 
         let ctx_for_notify = cc.egui_ctx.clone();
         let notify: Notify = Arc::new(move || ctx_for_notify.request_repaint());
@@ -148,17 +145,48 @@ impl PhotosortApp {
             }
         };
 
+        // In --demo mode, never start the real background review engine or load ONNX models.
+        let review_engine = if demo_mode {
+            None
+        } else {
+            settings::db_dest_path(&data_dir, &settings.valid_roots())
+                .ok()
+                .map(|db| {
+                    ReviewEngine::start(db, settings.to_review_config(), Some(Arc::clone(&notify)))
+                })
+        };
+
+        let initial_snapshot = if demo_mode {
+            EngineSnapshot {
+                phase: EnginePhase::Running {
+                    done: 48,
+                    total: 160,
+                    stage: StageKind::Rules,
+                    elapsed_secs: 9.6,
+                },
+                ..Default::default()
+            }
+        } else {
+            EngineSnapshot::default()
+        };
+
         let mut app = Self {
             data_dir,
+            demo_mode,
+            force_welcome: false,
             settings,
             catalog,
-            active_tab: ActiveTab::Gallery,
+            active_view: ActiveView::Gallery,
+            logo_texture,
             entries: Vec::new(),
             counts: Counts {
                 assets: 0,
                 locations: 0,
                 missing: 0,
             },
+            reviewed_counts: ReviewedCounts::default(),
+            reviewed_assets: HashSet::new(),
+            root_counts: HashMap::new(),
             labels_in_use: Vec::new(),
             works: Vec::new(),
             works_view: WorksViewState::default(),
@@ -166,22 +194,26 @@ impl PhotosortApp {
             vision_analyzed_count: 0,
             tags_view: TagsViewState::default(),
             similarity_view: None,
-            pending_review_assets: HashSet::new(),
+            pending_suggestions_assets: HashSet::new(),
             review_flow: ReviewFlow::new(),
             duplicate_groups: Vec::new(),
             filter: FilterState::default(),
+            sidebar_state: SidebarState::default(),
+            settings_state: SettingsViewState::default(),
             selection: Selection::default(),
             last_columns: 1,
+            last_primary_cell_pos: None,
             viewer_open: false,
-            index_worker: None,
-            index_progress: None,
-            analysis_worker: None,
-            analysis_progress: None,
-            ocr_worker: None,
-            ocr_dialog: None,
+            photo_menu: None,
+            inspector: InspectorState::default(),
+            review_engine,
+            engine_snapshot: initial_snapshot,
+            demo_paused: false,
+            last_engine_refresh: Instant::now(),
+            pending_engine_refresh: false,
+            chunk_reload_pending: false,
+            last_full_reload: Instant::now(),
             works_worker: None,
-            vision_worker: None,
-            vision_dialog: None,
             tags_apply_worker: None,
             vision_rank_worker: None,
             status_notice: None,
@@ -193,17 +225,6 @@ impl PhotosortApp {
             preview_worker: PreviewWorker::new(theme::PREVIEW_MAX_EDGE, Some(notify)),
             preview_requested: None,
             preview_loaded: None,
-            inspector_asset: None,
-            inspector_labels: Vec::new(),
-            inspector_ocr_lines: Vec::new(),
-            inspector_ocr_done: false,
-            inspector_faces: Vec::new(),
-            inspector_vision_done: false,
-            inspector_ocr_checked: BTreeSet::new(),
-            inspector_ocr_draft: String::new(),
-            inspector_alias_target: None,
-            new_label_kind: LabelKind::Tag,
-            new_label_text: String::new(),
             focus_search_next_frame: false,
             export_wizard: None,
             preset_export_dir: None,
@@ -212,6 +233,14 @@ impl PhotosortApp {
             last_thumbs_ready: false,
         };
         app.reload_catalog();
+        if app.demo_mode {
+            app.engine_snapshot.phase = EnginePhase::Running {
+                done: app.reviewed_counts.reviewed,
+                total: app.reviewed_counts.all.max(1),
+                stage: StageKind::Rules,
+                elapsed_secs: 9.6,
+            };
+        }
         app
     }
 
@@ -223,19 +252,33 @@ impl PhotosortApp {
 
     pub fn with_initial_view(
         mut self,
-        view: crate::screenshot::CaptureView,
+        view: CaptureView,
         preset_export_dir: Option<PathBuf>,
     ) -> Self {
-        self.active_tab = match view {
-            crate::screenshot::CaptureView::Gallery
-            | crate::screenshot::CaptureView::Export
-            | crate::screenshot::CaptureView::Ocr
-            | crate::screenshot::CaptureView::Vision => ActiveTab::Gallery,
-            crate::screenshot::CaptureView::Review => ActiveTab::Review,
-            crate::screenshot::CaptureView::Duplicates => ActiveTab::Duplicates,
-            crate::screenshot::CaptureView::Works => ActiveTab::Works,
-            crate::screenshot::CaptureView::Tags => ActiveTab::Tags,
-        };
+        match view {
+            CaptureView::Gallery | CaptureView::Export | CaptureView::Menu => {
+                self.active_view = ActiveView::Gallery;
+            }
+            CaptureView::Welcome => {
+                self.force_welcome = true;
+                self.active_view = ActiveView::Gallery;
+            }
+            CaptureView::Settings => {
+                self.active_view = ActiveView::Settings;
+            }
+            CaptureView::Suggestions => {
+                self.active_view = ActiveView::Suggestions;
+            }
+            CaptureView::Duplicates => {
+                self.active_view = ActiveView::Duplicates;
+            }
+            CaptureView::Works => {
+                self.active_view = ActiveView::Works;
+            }
+            CaptureView::Tags => {
+                self.active_view = ActiveView::Tags;
+            }
+        }
         self.preset_export_dir = preset_export_dir;
         self
     }
@@ -249,46 +292,63 @@ impl PhotosortApp {
         let Some(cat) = &self.catalog else {
             return;
         };
-        match cat.counts() {
+        let roots = self.settings.library_roots.clone();
+        let stages = self.settings.enabled_stage_specs();
+
+        match cat.counts_in_roots(&roots) {
             Ok(c) => self.counts = c,
             Err(e) => self.banner_error = Some(format!("Error al consultar contadores: {e}")),
         }
-        match cat.labels_in_use() {
+        match cat.reviewed_counts(&stages, Some(&roots)) {
+            Ok(rc) => self.reviewed_counts = rc,
+            Err(e) => self.banner_error = Some(format!("Error al contar revisadas: {e}")),
+        }
+        match cat.reviewed_assets(&stages, Some(&roots)) {
+            Ok(set) => self.reviewed_assets = set,
+            Err(e) => self.banner_error = Some(format!("Error al consultar revisadas: {e}")),
+        }
+        self.root_counts.clear();
+        for root in &roots {
+            if let Ok(n) = cat.count_images_in_root(root) {
+                self.root_counts.insert(root.clone(), n);
+            }
+        }
+        match cat.labels_in_use_in_roots(&roots) {
             Ok(list) => self.labels_in_use = list,
             Err(e) => self.banner_error = Some(format!("Error al cargar etiquetas: {e}")),
         }
-        match cat.list_works() {
+        match cat.list_works_in_roots(&roots) {
             Ok(list) => {
                 self.works = list;
                 self.works_view.sync_selection(&self.works, Some(cat));
                 if self
-                    .inspector_alias_target
+                    .inspector
+                    .alias_target
                     .is_none_or(|id| !self.works.iter().any(|w| w.label == id))
                 {
-                    self.inspector_alias_target = self.works.first().map(|w| w.label);
+                    self.inspector.alias_target = self.works.first().map(|w| w.label);
                 }
             }
             Err(e) => self.banner_error = Some(format!("Error al cargar obras: {e}")),
         }
-        // Confidence is bounded in [0, 1], so 1.1 lists every undecided suggestion.
-        if let Ok(queue) = cat.review_queue(1.1) {
-            self.pending_review_assets = queue.into_iter().map(|i| i.asset).collect();
+        if let Ok(queue) = cat.review_queue_in_roots(1.1, &roots) {
+            self.pending_suggestions_assets = queue.into_iter().map(|i| i.asset).collect();
         }
-        if let Err(e) = self.review_flow.reload(cat) {
-            self.banner_error = Some(format!("Error al cargar cola de revisión: {e}"));
+        if let Err(e) = self.review_flow.reload_in_roots(cat, &roots) {
+            self.banner_error = Some(format!("Error al cargar sugerencias: {e}"));
         }
-        match cat.duplicate_groups() {
+        match cat.duplicate_groups_in_roots(&roots) {
             Ok(groups) => self.duplicate_groups = groups,
             Err(e) => self.banner_error = Some(format!("Error al consultar duplicados: {e}")),
         }
-        match cat.list_vision_rules() {
+        match cat.list_vision_rules_in_roots(&roots) {
             Ok(rules) => {
                 self.vision_rules = rules;
                 self.tags_view.sync_selection(&self.vision_rules);
             }
             Err(e) => self.banner_error = Some(format!("Error al cargar reglas de visión: {e}")),
         }
-        if let Ok(n) = cat.count_assets_with_vision() {
+        if let Ok(n) = cat.count_assets_with_vision_in_roots(&roots) {
             self.vision_analyzed_count = n;
         }
         if self.similarity_view.is_none() {
@@ -303,14 +363,30 @@ impl PhotosortApp {
         let Some(cat) = &self.catalog else {
             return;
         };
-        let cf = self.filter.to_catalog_filter();
+        let stages = self.settings.enabled_stage_specs();
+        let cf = self
+            .filter
+            .to_catalog_filter_scoped(&self.settings.library_roots, &stages);
         match cat.entries(&cf, self.filter.sort) {
             Ok(next) => {
                 self.selection.reconcile(&self.entries, &next);
                 self.entries = next;
                 self.sync_inspector(true);
             }
-            Err(e) => self.banner_error = Some(format!("Error al filtrar imágenes: {e}")),
+            Err(e) => self.banner_error = Some(format!("Error al filtrar fotos: {e}")),
+        }
+    }
+
+    fn refresh_reviewed_counts_light(&mut self) {
+        let Some(cat) = &self.catalog else {
+            return;
+        };
+        let stages = self.settings.enabled_stage_specs();
+        if let Ok(rc) = cat.reviewed_counts(&stages, Some(&self.settings.library_roots)) {
+            self.reviewed_counts = rc;
+        }
+        if self.filter.reviewed != ReviewedFilter::All && self.similarity_view.is_none() {
+            self.reload_entries();
         }
     }
 
@@ -319,17 +395,17 @@ impl PhotosortApp {
         let next_asset = primary.map(|e| e.asset);
         let next_path = primary.map(|e| e.path.clone());
 
-        if force_labels || self.inspector_asset != next_asset {
-            if self.inspector_asset != next_asset {
-                self.inspector_ocr_checked.clear();
-                self.inspector_ocr_draft.clear();
+        if force_labels || self.inspector.asset != next_asset {
+            if self.inspector.asset != next_asset {
+                self.inspector.ocr_checked.clear();
+                self.inspector.ocr_draft.clear();
             }
-            self.inspector_asset = next_asset;
-            self.inspector_labels = match (next_asset, &self.catalog) {
+            self.inspector.asset = next_asset;
+            self.inspector.labels = match (next_asset, &self.catalog) {
                 (Some(asset), Some(cat)) => cat.labels_of(asset).unwrap_or_default(),
                 _ => Vec::new(),
             };
-            self.reload_inspector_ocr();
+            self.reload_inspector_details();
         }
 
         if self.preview_requested != next_path {
@@ -344,35 +420,26 @@ impl PhotosortApp {
         }
     }
 
-    fn reload_inspector_ocr(&mut self) {
-        match (self.inspector_asset, &self.catalog) {
+    fn reload_inspector_details(&mut self) {
+        match (self.inspector.asset, &self.catalog) {
             (Some(asset), Some(cat)) => {
-                self.inspector_ocr_lines = cat.ocr_lines(asset).unwrap_or_default();
-                self.inspector_ocr_done = cat.has_ocr_done(asset).unwrap_or(false);
-                self.inspector_faces = cat.asset_faces(asset).unwrap_or_default();
-                self.inspector_vision_done = cat.has_vision_done(asset).unwrap_or(false);
+                self.inspector.ocr_lines = cat.ocr_lines(asset).unwrap_or_default();
+                self.inspector.ocr_done = cat.has_ocr_done(asset).unwrap_or(false);
+                self.inspector.faces = cat.asset_faces(asset).unwrap_or_default();
+                self.inspector.vision_done = cat.has_vision_done(asset).unwrap_or(false);
             }
             _ => {
-                self.inspector_ocr_lines.clear();
-                self.inspector_ocr_done = false;
-                self.inspector_faces.clear();
-                self.inspector_vision_done = false;
+                self.inspector.ocr_lines.clear();
+                self.inspector.ocr_done = false;
+                self.inspector.faces.clear();
+                self.inspector.vision_done = false;
             }
         }
     }
 
-    /// Returns a human-readable Spanish description if any heavy background task is currently running.
-    fn heavy_task_running(&self) -> Option<&'static str> {
-        if self.index_worker.is_some() {
-            Some("el indexado")
-        } else if self.analysis_worker.is_some() {
-            Some("el análisis de reglas")
-        } else if self.ocr_worker.is_some() {
-            Some("la lectura de texto (OCR)")
-        } else if self.works_worker.is_some() {
+    fn foreground_heavy_task(&self) -> Option<&'static str> {
+        if self.works_worker.is_some() {
             Some("la búsqueda de obras")
-        } else if self.vision_worker.is_some() {
-            Some("el reconocimiento de imágenes")
         } else if self.tags_apply_worker.is_some() {
             Some("la aplicación de etiquetas")
         } else {
@@ -380,174 +447,64 @@ impl PhotosortApp {
         }
     }
 
+    fn sync_engine_yield(&self) {
+        if let Some(engine) = &self.review_engine {
+            engine.set_yielded(self.foreground_heavy_task().is_some());
+        }
+    }
+
     fn poll_workers(&mut self, ctx: &egui::Context) {
-        let mut finished_index = false;
-        let mut index_completed_ok = false;
-        let mut finished_analysis = false;
-        let mut finished_ocr = false;
         let mut finished_works = false;
-        let mut finished_vision = false;
         let mut finished_tags_apply = false;
         let mut finished_rank = false;
-        let mut reload_inspector_ocr = false;
-        let mut needs_reload = false;
-        if let Some(worker) = &self.index_worker {
-            while let Some(ev) = worker.try_recv() {
+        let mut needs_full_reload = false;
+        let mut inspector_asset_updated = false;
+
+        // 1. Poll background review engine
+        if let Some(engine) = &self.review_engine {
+            while let Some(ev) = engine.try_recv() {
                 match ev {
-                    IndexEvent::Progress {
-                        root_index,
-                        root_count,
-                        done,
-                        total,
-                        ..
-                    } => {
-                        self.index_progress = Some(if root_count > 1 {
-                            format!(
-                                "Indexando carpeta {}/{}: {done} / {total}",
-                                root_index + 1,
-                                root_count
-                            )
-                        } else {
-                            format!("Indexando {done} / {total}")
-                        });
+                    ReviewEngineEvent::Status(snap) => {
+                        self.engine_snapshot = snap;
                     }
-                    IndexEvent::RootDone { .. } => {
-                        needs_reload = true;
-                    }
-                    IndexEvent::Finished {
-                        stopped,
+                    ReviewEngineEvent::IndexFinished {
                         new,
                         changed,
-                        unchanged,
                         missing,
                         errors,
                     } => {
-                        finished_index = true;
-                        index_completed_ok = !stopped;
-                        needs_reload = true;
-                        self.index_progress = None;
-                        self.status_notice = Some(if stopped {
-                            format!(
-                                "Indexación detenida: {}, {}.",
-                                count_phrase(new, "nueva", "nuevas"),
-                                count_phrase(changed, "actualizada", "actualizadas"),
-                            )
-                        } else if errors > 0 {
-                            format!(
-                                "Indexación completa: {}, {}, {unchanged} sin cambios, {}, {}.",
+                        needs_full_reload = true;
+                        if new > 0 || changed > 0 || missing > 0 || errors > 0 {
+                            self.status_notice = Some(format!(
+                                "Cambios detectados: {}, {}, {}",
                                 count_phrase(new, "nueva", "nuevas"),
                                 count_phrase(changed, "actualizada", "actualizadas"),
                                 count_phrase(missing, "ausente", "ausentes"),
-                                count_phrase(errors, "error", "errores"),
-                            )
-                        } else {
-                            format!(
-                                "Indexación completa: {}, {}, {unchanged} sin cambios, {}.",
-                                count_phrase(new, "nueva", "nuevas"),
-                                count_phrase(changed, "actualizada", "actualizadas"),
-                                count_phrase(missing, "ausente", "ausentes"),
-                            )
-                        });
-                    }
-                    IndexEvent::Failed(err) => {
-                        finished_index = true;
-                        self.index_progress = None;
-                        self.banner_error = Some(format!("Error durante la indexación: {err}"));
-                    }
-                }
-            }
-        }
-        if let Some(worker) = &self.analysis_worker {
-            while let Some(ev) = worker.try_recv() {
-                match ev {
-                    AnalysisEvent::Progress { analyzed, pending } => {
-                        let total = analyzed.saturating_add(pending);
-                        self.analysis_progress = Some(format!("Analizando {analyzed} / {total}"));
-                    }
-                    AnalysisEvent::Finished {
-                        stopped,
-                        analyzed,
-                        suggestions,
-                        errors,
-                    } => {
-                        finished_analysis = true;
-                        needs_reload = true;
-                        self.analysis_progress = None;
-                        self.status_notice = Some(if stopped {
-                            format!(
-                                "Análisis detenido: {}, {}.",
-                                count_phrase(analyzed, "analizada", "analizadas"),
-                                count_phrase(suggestions, "sugerencia", "sugerencias"),
-                            )
-                        } else if errors > 0 {
-                            format!(
-                                "Análisis completo: {}, {}, {}.",
-                                count_phrase(analyzed, "analizada", "analizadas"),
-                                count_phrase(suggestions, "sugerencia", "sugerencias"),
-                                count_phrase(errors, "error", "errores"),
-                            )
-                        } else {
-                            format!(
-                                "Análisis completo: {}, {}.",
-                                count_phrase(analyzed, "analizada", "analizadas"),
-                                count_phrase(suggestions, "sugerencia", "sugerencias"),
-                            )
-                        });
-                    }
-                    AnalysisEvent::Failed(err) => {
-                        finished_analysis = true;
-                        self.analysis_progress = None;
-                        self.banner_error = Some(format!("Error durante el análisis: {err}"));
-                    }
-                }
-            }
-        }
-        if let Some(worker) = &self.ocr_worker {
-            while let Some(ev) = worker.try_recv() {
-                if let Some(dlg) = &mut self.ocr_dialog {
-                    dlg.apply_event(&ev);
-                }
-                match ev {
-                    OcrEvent::LoadingModel => {}
-                    OcrEvent::Progress { saved_asset, .. } => {
-                        if saved_asset.is_some() && saved_asset == self.inspector_asset {
-                            reload_inspector_ocr = true;
+                            ));
                         }
                     }
-                    OcrEvent::Finished {
-                        stopped,
-                        processed,
-                        errors,
+                    ReviewEngineEvent::AssetProgress {
+                        asset,
+                        now_reviewed,
                     } => {
-                        finished_ocr = true;
-                        needs_reload = true;
-                        self.status_notice = Some(if stopped {
-                            format!(
-                                "Lectura de texto detenida: {}.",
-                                count_phrase(processed, "imagen leída", "imágenes leídas"),
-                            )
-                        } else if errors > 0 {
-                            format!(
-                                "Lectura de texto completa: {}, {}.",
-                                count_phrase(processed, "imagen leída", "imágenes leídas"),
-                                count_phrase(errors, "error", "errores"),
-                            )
+                        if now_reviewed {
+                            self.reviewed_assets.insert(asset);
                         } else {
-                            format!(
-                                "Lectura de texto completa: {}.",
-                                count_phrase(processed, "imagen leída", "imágenes leídas"),
-                            )
-                        });
-                    }
-                    OcrEvent::Failed(err) => {
-                        finished_ocr = true;
-                        if self.ocr_dialog.is_none() {
-                            self.banner_error = Some(format!("Error al leer texto (OCR): {err}"));
+                            self.reviewed_assets.remove(&asset);
                         }
+                        if self.inspector.asset == Some(asset) {
+                            inspector_asset_updated = true;
+                        }
+                        self.pending_engine_refresh = true;
+                    }
+                    ReviewEngineEvent::ChunkFinished => {
+                        self.chunk_reload_pending = true;
                     }
                 }
             }
         }
+
+        // 2. Poll foreground workers (Works, TagsApply, VisionRank)
         if let Some(worker) = &self.works_worker {
             while let Some(ev) = worker.try_recv() {
                 self.works_view.apply_event(&ev);
@@ -560,16 +517,16 @@ impl PhotosortApp {
                         suggestions,
                     } => {
                         finished_works = true;
-                        needs_reload = true;
+                        needs_full_reload = true;
                         let prefix = if stopped {
                             "Búsqueda de obras detenida"
                         } else {
                             "Búsqueda de obras completa"
                         };
                         self.status_notice = Some(format!(
-                            "{prefix}: {} revisadas, {} con coincidencias ({}).",
-                            count_phrase(processed, "imagen", "imágenes"),
-                            count_phrase(matched_assets, "imagen", "imágenes"),
+                            "{prefix}: {} revisadas, {} con coincidencias ({})",
+                            count_phrase(processed, "foto", "fotos"),
+                            count_phrase(matched_assets, "foto", "fotos"),
                             count_phrase(suggestions, "sugerencia", "sugerencias"),
                         ));
                     }
@@ -580,52 +537,7 @@ impl PhotosortApp {
                 }
             }
         }
-        if let Some(worker) = &self.vision_worker {
-            while let Some(ev) = worker.try_recv() {
-                if let Some(dlg) = &mut self.vision_dialog {
-                    dlg.apply_event(&ev);
-                }
-                match ev {
-                    VisionEvent::LoadingModel => {}
-                    VisionEvent::Progress { saved_asset, .. } => {
-                        if saved_asset.is_some() && saved_asset == self.inspector_asset {
-                            reload_inspector_ocr = true;
-                        }
-                    }
-                    VisionEvent::Finished {
-                        stopped,
-                        processed,
-                        errors,
-                    } => {
-                        finished_vision = true;
-                        needs_reload = true;
-                        self.status_notice = Some(if stopped {
-                            format!(
-                                "Reconocimiento detenido: {}.",
-                                count_phrase(processed, "imagen analizada", "imágenes analizadas"),
-                            )
-                        } else if errors > 0 {
-                            format!(
-                                "Reconocimiento completo: {}, {}.",
-                                count_phrase(processed, "imagen analizada", "imágenes analizadas"),
-                                count_phrase(errors, "error", "errores"),
-                            )
-                        } else {
-                            format!(
-                                "Reconocimiento completo: {}.",
-                                count_phrase(processed, "imagen analizada", "imágenes analizadas"),
-                            )
-                        });
-                    }
-                    VisionEvent::Failed(err) => {
-                        finished_vision = true;
-                        if self.vision_dialog.is_none() {
-                            self.banner_error = Some(format!("Error al reconocer imágenes: {err}"));
-                        }
-                    }
-                }
-            }
-        }
+
         if let Some(worker) = &self.tags_apply_worker {
             while let Some(ev) = worker.try_recv() {
                 self.tags_view.apply_event(&ev);
@@ -638,16 +550,16 @@ impl PhotosortApp {
                         suggestions,
                     } => {
                         finished_tags_apply = true;
-                        needs_reload = true;
+                        needs_full_reload = true;
                         let prefix = if stopped {
                             "Aplicación de etiquetas detenida"
                         } else {
                             "Etiquetas aplicadas"
                         };
                         self.status_notice = Some(format!(
-                            "{prefix}: {} evaluadas, {} con sugerencias ({}).",
-                            count_phrase(processed, "imagen", "imágenes"),
-                            count_phrase(matched_assets, "imagen", "imágenes"),
+                            "{prefix}: {} evaluadas, {} con sugerencias ({})",
+                            count_phrase(processed, "foto", "fotos"),
+                            count_phrase(matched_assets, "foto", "fotos"),
                             count_phrase(suggestions, "sugerencia", "sugerencias"),
                         ));
                     }
@@ -658,6 +570,7 @@ impl PhotosortApp {
                 }
             }
         }
+
         if let Some(worker) = &self.vision_rank_worker
             && let Some(res) = worker.try_recv()
         {
@@ -679,7 +592,7 @@ impl PhotosortApp {
                         threshold,
                         scores,
                     });
-                    self.active_tab = ActiveTab::Gallery;
+                    self.active_view = ActiveView::Gallery;
                     self.sync_inspector(true);
                 }
                 VisionRankResult::Failed(err) => {
@@ -687,42 +600,44 @@ impl PhotosortApp {
                 }
             }
         }
-        if finished_index {
-            self.index_worker = None;
-        }
-        if finished_analysis {
-            self.analysis_worker = None;
-        }
-        if finished_ocr {
-            self.ocr_worker = None;
-        }
+
         if finished_works {
             self.works_worker = None;
-        }
-        if finished_vision {
-            self.vision_worker = None;
+            self.sync_engine_yield();
         }
         if finished_tags_apply {
             self.tags_apply_worker = None;
+            self.sync_engine_yield();
         }
         if finished_rank {
             self.vision_rank_worker = None;
         }
-        if needs_reload {
+
+        needs_full_reload |= chunk_reload_due(
+            self.chunk_reload_pending,
+            self.last_full_reload.elapsed(),
+            &self.engine_snapshot.phase,
+        );
+        if needs_full_reload {
             self.reload_catalog();
-            if let Some(dlg) = &mut self.ocr_dialog {
-                dlg.refresh_counts(self.catalog.as_ref(), &self.settings);
+            self.chunk_reload_pending = false;
+            self.last_full_reload = Instant::now();
+            self.last_engine_refresh = Instant::now();
+            self.pending_engine_refresh = false;
+        } else if self.pending_engine_refresh
+            && self.last_engine_refresh.elapsed() >= ENGINE_REFRESH_INTERVAL
+        {
+            self.refresh_reviewed_counts_light();
+            if inspector_asset_updated {
+                self.sync_inspector(true);
             }
-            if let Some(dlg) = &mut self.vision_dialog {
-                dlg.refresh_counts(self.catalog.as_ref(), &self.settings);
-            }
-        } else if reload_inspector_ocr {
+            self.last_engine_refresh = Instant::now();
+            self.pending_engine_refresh = false;
+        } else if inspector_asset_updated {
             self.sync_inspector(true);
         }
-        if index_completed_ok && self.settings.auto_analyze {
-            self.start_analysis(ctx);
-        }
 
+        // 3. Thumbnails & preview
         while let Some(res) = self.thumb_pool.try_recv() {
             match res.image {
                 Ok(img) => {
@@ -760,30 +675,142 @@ impl PhotosortApp {
         }
     }
 
-    fn start_indexing(&mut self, ctx: &egui::Context) {
-        if self.index_worker.is_some() {
+    fn save_settings_and_sync_engine(&mut self) {
+        if let Err(e) = settings::save(&self.data_dir, &self.settings) {
+            self.banner_error = Some(e.to_string());
+        }
+        if let Some(engine) = &self.review_engine {
+            engine.update_config(self.settings.to_review_config());
+        }
+    }
+
+    fn pick_and_add_library(&mut self) {
+        if let Some(folder) = rfd::FileDialog::new()
+            .set_title("Elegir carpeta con fotos (solo lectura)")
+            .pick_folder()
+        {
+            match self.settings.add_library_root(&folder, &self.data_dir) {
+                Ok(_) => {
+                    self.force_welcome = false;
+                    self.banner_error = None;
+                    if self.catalog.is_none()
+                        && let Ok(db) =
+                            settings::db_dest_path(&self.data_dir, &self.settings.valid_roots())
+                        && let Ok(cat) = Catalog::open(&db)
+                    {
+                        self.catalog = Some(cat);
+                    }
+                    self.save_settings_and_sync_engine();
+                    if let Some(engine) = &self.review_engine {
+                        engine.trigger_index();
+                    }
+                    self.reload_catalog();
+                }
+                Err(e) => self.banner_error = Some(e.to_string()),
+            }
+        }
+    }
+
+    fn remove_library(&mut self, path: &Path) {
+        if self.settings.remove_library_root(path) {
+            self.save_settings_and_sync_engine();
+            self.reload_catalog();
+            self.status_notice = Some(format!(
+                "Carpeta quitada de la aplicación: {} (ningún archivo fue modificado)",
+                path.display()
+            ));
+        }
+    }
+
+    fn request_review_assets(&mut self, assets: Vec<AssetId>) {
+        if assets.is_empty() {
             return;
         }
-        if let Some(task) = self.heavy_task_running() {
+        let stages = self.settings.enabled_stage_specs();
+        if stages.is_empty() {
+            self.status_notice =
+                Some("Activa al menos una etapa en Configuración para revisar fotos".into());
+            return;
+        }
+        if self.settings.stage_vision && self.settings.vision_models_dir.is_none() {
+            self.status_notice =
+                Some("Falta la carpeta de modelos de visión; configúrala en Configuración".into());
+            return;
+        }
+        if self.settings.stage_ocr && self.settings.ocr_models_dir.is_none() {
+            self.status_notice =
+                Some("Falta la carpeta de modelos OCR; configúrala en Configuración".into());
+            return;
+        }
+        if self.demo_mode {
             self.status_notice = Some(format!(
-                "Para indexar, espera a que termine {task} o cancélalo."
+                "Modo demo: {} en cola de revisión (sin cargar modelos)",
+                count_phrase(assets.len(), "foto", "fotos")
             ));
             return;
         }
-        let roots = self.settings.valid_roots();
-        if roots.is_empty() {
-            self.banner_error = Some("No hay carpetas válidas para indexar.".into());
+
+        let stage_names: Vec<&str> = stages.iter().map(|s| s.stage.as_str()).collect();
+        if let Some(cat) = &mut self.catalog
+            && let Err(e) = cat.reset_stages(&assets, &stage_names)
+        {
+            self.banner_error = Some(format!("No se pudo reiniciar la revisión: {e}"));
             return;
         }
-        match settings::db_dest_path(&self.data_dir, &roots) {
-            Ok(db) => {
-                let ctx_clone = ctx.clone();
-                let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
-                self.status_notice = None;
-                self.index_progress = Some("Preparando escaneo...".into());
-                self.index_worker = Some(IndexWorker::start(db, roots, Some(notify)));
+        for id in &assets {
+            self.reviewed_assets.remove(id);
+        }
+        self.refresh_reviewed_counts_light();
+
+        if let Some(engine) = &self.review_engine {
+            engine.prioritize(assets);
+        }
+    }
+
+    fn find_similar_to(&mut self, entry: &Entry) {
+        let Some(cat) = &self.catalog else {
+            return;
+        };
+        let emb = match cat.asset_embedding(entry.asset) {
+            Ok(Some((model, vec))) => (model, vec),
+            Ok(None) => {
+                self.status_notice =
+                    Some("Esta foto aún no tiene vector de reconocimiento visual".into());
+                return;
             }
-            Err(e) => self.banner_error = Some(e.to_string()),
+            Err(e) => {
+                self.banner_error = Some(format!("No se pudo leer el vector visual: {e}"));
+                return;
+            }
+        };
+        match cat.rank_by_embeddings_in_roots(
+            &emb.0,
+            &[emb.1.as_slice()],
+            &self.settings.library_roots,
+            250,
+        ) {
+            Ok(ranked) => {
+                let filename = entry
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| entry.path.display().to_string());
+                let scores: HashMap<AssetId, f32> =
+                    ranked.iter().map(|r| (r.entry.asset, r.score)).collect();
+                let next_entries: Vec<Entry> = ranked.into_iter().map(|r| r.entry).collect();
+                self.selection.reconcile(&self.entries, &next_entries);
+                self.entries = next_entries;
+                self.similarity_view = Some(SimilarityView {
+                    title: format!("Parecidas a «{filename}»"),
+                    threshold: None,
+                    scores,
+                });
+                self.active_view = ActiveView::Gallery;
+                self.sync_inspector(true);
+            }
+            Err(e) => {
+                self.banner_error = Some(format!("No se pudieron buscar fotos parecidas: {e}"));
+            }
         }
     }
 
@@ -791,10 +818,8 @@ impl PhotosortApp {
         if self.works_worker.is_some() {
             return;
         }
-        if let Some(task) = self.heavy_task_running() {
-            self.status_notice = Some(format!(
-                "Para buscar obras, espera a que termine {task} o cancélalo."
-            ));
+        if let Some(task) = self.foreground_heavy_task() {
+            self.status_notice = Some(format!("Espera a que termine {task}"));
             return;
         }
         let roots = self.settings.valid_roots();
@@ -809,88 +834,9 @@ impl PhotosortApp {
                     suggestions: 0,
                 };
                 self.works_worker = Some(WorksWorker::start(db, Some(notify)));
+                self.sync_engine_yield();
             }
             Err(e) => self.banner_error = Some(e.to_string()),
-        }
-    }
-
-    fn start_ocr(
-        &mut self,
-        ctx: &egui::Context,
-        scope: OcrScope,
-        models_dir: PathBuf,
-        device: OcrDevice,
-    ) {
-        if self.ocr_worker.is_some() {
-            return;
-        }
-        if let Some(task) = self.heavy_task_running() {
-            self.status_notice = Some(format!(
-                "Para leer texto, espera a que termine {task} o cancélalo."
-            ));
-            return;
-        }
-        match crate::views::ocr::start_ocr_worker(
-            ctx,
-            &self.data_dir,
-            &self.settings,
-            scope,
-            models_dir,
-            device,
-        ) {
-            Ok(worker) => {
-                self.ocr_worker = Some(worker);
-                if let Some(dlg) = &mut self.ocr_dialog {
-                    dlg.run_state = OcrRunState::LoadingModel;
-                }
-            }
-            Err(err) => {
-                if let Some(dlg) = &mut self.ocr_dialog {
-                    dlg.run_state = OcrRunState::Failed(err);
-                } else {
-                    self.banner_error = Some(err);
-                }
-            }
-        }
-    }
-
-    fn start_vision(
-        &mut self,
-        ctx: &egui::Context,
-        scope: VisionScope,
-        models_dir: PathBuf,
-        device: OcrDevice,
-    ) {
-        if self.vision_worker.is_some() {
-            return;
-        }
-        if let Some(task) = self.heavy_task_running() {
-            self.status_notice = Some(format!(
-                "Para reconocer imágenes, espera a que termine {task} o cancélalo."
-            ));
-            return;
-        }
-        match crate::views::vision::start_vision_worker(
-            ctx,
-            &self.data_dir,
-            &self.settings,
-            scope,
-            models_dir,
-            device,
-        ) {
-            Ok(worker) => {
-                self.vision_worker = Some(worker);
-                if let Some(dlg) = &mut self.vision_dialog {
-                    dlg.run_state = VisionRunState::LoadingModel;
-                }
-            }
-            Err(err) => {
-                if let Some(dlg) = &mut self.vision_dialog {
-                    dlg.run_state = VisionRunState::Failed(err);
-                } else {
-                    self.banner_error = Some(err);
-                }
-            }
         }
     }
 
@@ -898,10 +844,8 @@ impl PhotosortApp {
         if self.tags_apply_worker.is_some() {
             return;
         }
-        if let Some(task) = self.heavy_task_running() {
-            self.status_notice = Some(format!(
-                "Para aplicar etiquetas, espera a que termine {task} o cancélalo."
-            ));
+        if let Some(task) = self.foreground_heavy_task() {
+            self.status_notice = Some(format!("Espera a que termine {task}"));
             return;
         }
         let roots = self.settings.valid_roots();
@@ -921,6 +865,7 @@ impl PhotosortApp {
                     self.settings.ocr_device,
                     Some(notify),
                 ));
+                self.sync_engine_yield();
             }
             Err(e) => self.banner_error = Some(e.to_string()),
         }
@@ -946,6 +891,7 @@ impl PhotosortApp {
                     db,
                     self.settings.vision_models_dir.clone(),
                     self.settings.ocr_device,
+                    self.settings.library_roots.clone(),
                     title,
                     texts,
                     threshold,
@@ -957,67 +903,9 @@ impl PhotosortApp {
         }
     }
 
-    fn start_analysis(&mut self, ctx: &egui::Context) {
-        if self.analysis_worker.is_some() {
-            return;
-        }
-        if let Some(task) = self.heavy_task_running() {
-            self.status_notice = Some(format!(
-                "Para analizar reglas, espera a que termine {task} o cancélalo."
-            ));
-            return;
-        }
-        let roots = self.settings.valid_roots();
-        match settings::db_dest_path(&self.data_dir, &roots) {
-            Ok(db) => {
-                let ctx_clone = ctx.clone();
-                let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
-                self.analysis_progress = Some("Preparando análisis...".into());
-                self.analysis_worker = Some(AnalysisWorker::start(db, Some(notify)));
-            }
-            Err(e) => self.banner_error = Some(e.to_string()),
-        }
-    }
-
-    fn pick_and_add_library(&mut self, ctx: &egui::Context) {
-        if let Some(folder) = rfd::FileDialog::new()
-            .set_title("Elegir carpeta de biblioteca (solo lectura)")
-            .pick_folder()
-        {
-            match self.settings.add_library_root(&folder, &self.data_dir) {
-                Ok(_) => {
-                    if let Err(e) = settings::save(&self.data_dir, &self.settings) {
-                        self.banner_error = Some(e.to_string());
-                        return;
-                    }
-                    self.banner_error = None;
-                    if self.catalog.is_none()
-                        && let Ok(db) =
-                            settings::db_dest_path(&self.data_dir, &self.settings.valid_roots())
-                        && let Ok(cat) = Catalog::open(&db)
-                    {
-                        self.catalog = Some(cat);
-                    }
-                    self.start_indexing(ctx);
-                }
-                Err(e) => self.banner_error = Some(e.to_string()),
-            }
-        }
-    }
-
-    fn remove_library(&mut self, path: &Path) {
-        if self.settings.remove_library_root(path) {
-            if let Err(e) = settings::save(&self.data_dir, &self.settings) {
-                self.banner_error = Some(e.to_string());
-            } else {
-                self.status_notice =
-                    Some(format!("Carpeta quitada de la lista: {}", path.display()));
-            }
-        }
-    }
-
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.active_tab != ActiveTab::Gallery {
+        if self.photo_menu.is_some() {
+            // While the photo context menu is open, it owns Arrow/Enter/Escape keys.
             return;
         }
         let wants_text = ctx.egui_wants_keyboard_input();
@@ -1030,6 +918,9 @@ impl PhotosortApp {
             if !wants_text && i.consume_key(Modifiers::NONE, Key::Slash) {
                 self.focus_search_next_frame = true;
             }
+            if self.active_view != ActiveView::Gallery {
+                return;
+            }
             if i.consume_key(Modifiers::NONE, Key::Escape) {
                 if self.viewer_open {
                     self.viewer_open = false;
@@ -1039,6 +930,20 @@ impl PhotosortApp {
                 }
             }
             if wants_text {
+                return;
+            }
+
+            // Shift+F10 opens the photo context menu for the current photo.
+            // Note: egui 0.37's Key enum does not expose the Windows Application/Menu key;
+            // Shift+F10 is the standard Windows keyboard equivalent supported here.
+            if i.consume_key(Modifiers::SHIFT, Key::F10)
+                && self.selection.primary().is_some()
+                && !self.viewer_open
+            {
+                let pos = self
+                    .last_primary_cell_pos
+                    .unwrap_or_else(|| ctx.content_rect().center());
+                self.photo_menu = Some(PhotoMenuState::at(pos));
                 return;
             }
 
@@ -1092,1538 +997,78 @@ impl PhotosortApp {
         }
     }
 
-    fn draw_top_bar(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        egui::Panel::top("top_bar")
-            .exact_size(theme::TOP_BAR_HEIGHT)
-            .frame(
-                Frame::new()
-                    .fill(palette.bg_panel.color32())
-                    .inner_margin(Margin::symmetric(
-                        theme::SPACE_MD as i8,
-                        theme::SPACE_SM as i8,
-                    ))
-                    .stroke(Stroke::new(1.0, palette.border.color32())),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.label(
-                        RichText::new("photosort")
-                            .strong()
-                            .size(theme::FONT_HEADING),
-                    );
-                    ui.separator();
-
-                    let review_label = if self.review_flow.total_items() > 0 {
-                        format!("Revisión ({})", self.review_flow.total_items())
-                    } else {
-                        "Revisión".to_owned()
-                    };
-                    let dupes_label = if !self.duplicate_groups.is_empty() {
-                        format!("Duplicados ({})", self.duplicate_groups.len())
-                    } else {
-                        "Duplicados".to_owned()
-                    };
-                    let works_label = if !self.works.is_empty() {
-                        format!("Obras ({})", self.works.len())
-                    } else {
-                        "Obras".to_owned()
-                    };
-                    for (tab, label) in [
-                        (ActiveTab::Gallery, "Galería"),
-                        (ActiveTab::Review, review_label.as_str()),
-                        (ActiveTab::Duplicates, dupes_label.as_str()),
-                        (ActiveTab::Works, works_label.as_str()),
-                        (ActiveTab::Tags, "Etiquetas"),
-                    ] {
-                        let selected = self.active_tab == tab;
-                        let btn = egui::Button::new(
-                            RichText::new(label).color(palette.text_primary.color32()),
-                        )
-                        .fill(if selected {
-                            palette.accent_bg.color32()
-                        } else {
-                            palette.bg_card.color32()
-                        })
-                        .stroke(if selected {
-                            Stroke::new(theme::FOCUS_STROKE_WIDTH, palette.accent.color32())
-                        } else {
-                            Stroke::new(1.0, palette.border.color32())
-                        });
-                        if ui.add(btn).clicked() {
-                            self.active_tab = tab;
-                            if tab != ActiveTab::Gallery {
-                                self.viewer_open = false;
-                            }
-                        }
-                    }
-                    ui.separator();
-
-                    let search_id = Id::unique(SEARCH_INPUT_ID);
-                    let search_resp = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.filter.search)
-                                .id(search_id)
-                                .desired_width(155.0)
-                                .hint_text(theme::hint_text(palette, "Buscar texto (/)…")),
-                        )
-                        .on_hover_text("Busca en el texto leído (OCR) y en la ruta (/ o Ctrl+F)");
-                    if self.focus_search_next_frame {
-                        search_resp.request_focus();
-                        self.focus_search_next_frame = false;
-                    }
-                    if search_resp.changed() {
-                        self.reload_entries();
-                    }
-                    if !self.filter.search.is_empty() && ui.button("Limpiar").clicked() {
-                        self.filter.search.clear();
-                        self.reload_entries();
-                    }
-
-                    ui.separator();
-                    let prev_sort = self.filter.sort;
-                    egui::ComboBox::from_id_salt("sort_combo")
-                        .width(112.0)
-                        .selected_text(sort_label(self.filter.sort))
-                        .show_ui(ui, |ui| {
-                            for option in [
-                                Sort::PathAsc,
-                                Sort::PathDesc,
-                                Sort::SizeAsc,
-                                Sort::SizeDesc,
-                                Sort::ModifiedAsc,
-                                Sort::ModifiedDesc,
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.filter.sort,
-                                    option,
-                                    sort_label(option),
-                                );
-                            }
-                        });
-                    if self.filter.sort != prev_sort {
-                        self.reload_entries();
-                    }
-
-                    ui.separator();
-                    let heavy_task = self.heavy_task_running();
-                    let mut req_index = false;
-                    let mut req_analyze = false;
-                    let mut req_open_ocr = false;
-                    let mut req_open_vision = false;
-
-                    ui.menu_button("Procesar ▾", |ui| {
-                        let can_index =
-                            !self.settings.library_roots.is_empty() && heavy_task.is_none();
-                        if ui
-                            .add_enabled(can_index, egui::Button::new("Indexar"))
-                            .on_disabled_hover_text(if let Some(task) = heavy_task {
-                                format!("Espera a que termine {task}.")
-                            } else {
-                                "Añade primero una carpeta de biblioteca.".into()
-                            })
-                            .clicked()
-                        {
-                            req_index = true;
-                            ui.close();
-                        }
-
-                        let can_analyze = self.catalog.is_some()
-                            && self.counts.locations > 0
-                            && heavy_task.is_none();
-                        if ui
-                            .add_enabled(can_analyze, egui::Button::new("Analizar"))
-                            .on_disabled_hover_text(if let Some(task) = heavy_task {
-                                format!("Espera a que termine {task}.")
-                            } else {
-                                "Indexa primero algunas imágenes.".into()
-                            })
-                            .clicked()
-                        {
-                            req_analyze = true;
-                            ui.close();
-                        }
-
-                        ui.separator();
-
-                        let has_images = self.catalog.is_some() && self.counts.locations > 0;
-                        if ui
-                            .add_enabled(has_images, egui::Button::new("Leer texto…"))
-                            .clicked()
-                        {
-                            req_open_ocr = true;
-                            ui.close();
-                        }
-
-                        if ui
-                            .add_enabled(has_images, egui::Button::new("Reconocer imágenes…"))
-                            .clicked()
-                        {
-                            req_open_vision = true;
-                            ui.close();
-                        }
-                    });
-
-                    if req_index {
-                        self.start_indexing(ui.ctx());
-                    }
-                    if req_analyze {
-                        self.start_analysis(ui.ctx());
-                    }
-                    if req_open_ocr && self.ocr_dialog.is_none() {
-                        let selected_assets: Vec<AssetId> = self
-                            .selection
-                            .selected_indices()
-                            .into_iter()
-                            .filter_map(|i| self.entries.get(i).map(|e| e.asset))
-                            .collect();
-                        self.ocr_dialog = Some(OcrDialog::open_fresh(
-                            self.catalog.as_ref(),
-                            &self.settings,
-                            selected_assets,
-                        ));
-                    }
-                    if req_open_vision && self.vision_dialog.is_none() {
-                        let selected_assets: Vec<AssetId> = self
-                            .selection
-                            .selected_indices()
-                            .into_iter()
-                            .filter_map(|i| self.entries.get(i).map(|e| e.asset))
-                            .collect();
-                        self.vision_dialog = Some(VisionDialog::open_fresh(
-                            self.catalog.as_ref(),
-                            &self.settings,
-                            selected_assets,
-                        ));
-                    }
-
-                    if let Some(worker) = &self.index_worker {
-                        if let Some(msg) = &self.index_progress {
-                            ui.label(
-                                RichText::new(msg)
-                                    .size(theme::FONT_SMALL)
-                                    .color(palette.text_secondary.color32()),
-                            );
-                        }
-                        if ui.button("Cancelar").clicked() {
-                            worker.cancel();
-                        }
-                    } else if let Some(worker) = &self.analysis_worker {
-                        if let Some(msg) = &self.analysis_progress {
-                            ui.label(
-                                RichText::new(msg)
-                                    .size(theme::FONT_SMALL)
-                                    .color(palette.text_secondary.color32()),
-                            );
-                        }
-                        if ui.button("Cancelar").clicked() {
-                            worker.cancel();
-                        }
-                    }
-
-                    let can_export = !self.entries.is_empty() && self.catalog.is_some();
-                    if ui
-                        .add_enabled(can_export, egui::Button::new("Exportar…"))
-                        .clicked()
-                        && let Some(cat) = &self.catalog
-                    {
-                        self.export_wizard = Some(crate::export_flow::ExportWizard::open(
-                            cat,
-                            &self.entries,
-                            &self.selection,
-                            self.settings.last_export_dir.clone(),
-                        ));
-                    }
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let prev_theme = self.settings.theme;
-                        egui::ComboBox::from_id_salt("theme_combo")
-                            .width(84.0)
-                            .selected_text(theme_label(self.settings.theme))
-                            .show_ui(ui, |ui| {
-                                for option in [Theme::Dark, Theme::Light, Theme::System] {
-                                    ui.selectable_value(
-                                        &mut self.settings.theme,
-                                        option,
-                                        theme_label(option),
-                                    );
-                                }
-                            })
-                            .response
-                            .on_hover_text("Tema de la aplicación");
-                        ui.label(
-                            RichText::new("Tema")
-                                .size(theme::FONT_SMALL)
-                                .color(palette.text_secondary.color32()),
-                        );
-                        if self.settings.theme != prev_theme {
-                            theme::apply_theme_preference(ui.ctx(), self.settings.theme);
-                            if let Err(e) = settings::save(&self.data_dir, &self.settings) {
-                                self.banner_error = Some(e.to_string());
-                            }
-                        }
-                    });
-                });
-            });
-
-        if let Some(err) = self.banner_error.clone() {
-            egui::Panel::top("error_banner")
-                .frame(
-                    Frame::new()
-                        .fill(palette.chip_exclude_bg.color32())
-                        .inner_margin(Margin::symmetric(
-                            theme::SPACE_MD as i8,
-                            theme::SPACE_SM as i8,
-                        )),
-                )
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&err).color(palette.chip_exclude_fg.color32()));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Cerrar aviso").clicked() {
-                                self.banner_error = None;
-                            }
-                        });
-                    });
-                });
-        } else if let Some(notice) = self.status_notice.clone() {
-            egui::Panel::top("status_banner")
-                .frame(
-                    Frame::new()
-                        .fill(palette.bg_card.color32())
-                        .inner_margin(Margin::symmetric(
-                            theme::SPACE_MD as i8,
-                            theme::SPACE_XS as i8,
-                        ))
-                        .stroke(Stroke::new(1.0, palette.border.color32())),
-                )
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&notice).color(palette.text_secondary.color32()));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Ocultar").clicked() {
-                                self.status_notice = None;
-                            }
-                        });
-                    });
-                });
-        }
-    }
-
-    fn draw_welcome(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        egui::CentralPanel::default()
-            .frame(Frame::new().fill(palette.bg_canvas.color32()))
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space((ui.available_height() * 0.28).max(theme::SPACE_XL));
-                    Frame::new()
-                        .fill(palette.bg_panel.color32())
-                        .stroke(Stroke::new(1.0, palette.border.color32()))
-                        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
-                        .inner_margin(Margin::same(theme::SPACE_XL as i8))
-                        .show(ui, |ui| {
-                            ui.set_max_width(480.0);
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    RichText::new("Bienvenido a photosort")
-                                        .size(theme::FONT_TITLE)
-                                        .strong(),
-                                );
-                                ui.add_space(theme::SPACE_MD);
-                                ui.label(
-                                    RichText::new(
-                                        "Elige las carpetas de tu biblioteca. photosort solo las lee, nunca las modifica.",
-                                    )
-                                    .size(theme::FONT_BODY)
-                                    .color(palette.text_secondary.color32()),
-                                );
-                                ui.add_space(theme::SPACE_LG);
-                                if ui.button("Añadir carpeta").clicked() {
-                                    self.pick_and_add_library(ui.ctx());
-                                }
-                            });
-                        });
-                });
-            });
-    }
-
-    fn draw_sidebar(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        let mut to_remove: Option<PathBuf> = None;
-        let mut add_clicked = false;
-        let mut filter_changed = false;
-
-        egui::Panel::left("sidebar")
-            .default_size(theme::SIDEBAR_WIDTH)
-            .size_range(210.0..=380.0)
-            .resizable(true)
-            .frame(
-                Frame::new()
-                    .fill(palette.bg_panel.color32())
-                    .inner_margin(Margin::same(theme::SPACE_MD as i8))
-                    .stroke(Stroke::new(1.0, palette.border.color32())),
-            )
-            .show(ui, |ui| {
-                ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Bibliotecas").strong());
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Añadir carpeta").clicked() {
-                                add_clicked = true;
-                            }
-                        });
-                    });
-                    ui.add_space(theme::SPACE_XS);
-                    for root in &self.settings.library_roots {
-                        let name = library_display_name(root);
-                        let full_path = root.display().to_string();
-                        ui.horizontal(|ui| {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Quitar").clicked() {
-                                    to_remove = Some(root.clone());
-                                }
-                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    ui.add(egui::Label::new(&name).truncate())
-                                        .on_hover_text(&full_path);
-                                });
-                            });
-                        });
-                    }
-
-                    ui.add_space(theme::SPACE_MD);
-                    ui.separator();
-                    ui.add_space(theme::SPACE_SM);
-
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Etiquetas").strong());
-                        if self.filter.has_active_filters() {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Limpiar filtros").clicked() {
-                                    self.filter.clear_filters();
-                                    filter_changed = true;
-                                }
-                            });
-                        }
-                    });
-                    ui.label(
-                        RichText::new(CHIP_FILTER_HELP)
-                            .size(theme::FONT_SMALL)
-                            .color(palette.text_secondary.color32()),
-                    );
-                    ui.add_space(theme::SPACE_XS);
-
-                    if self.labels_in_use.is_empty() {
-                        ui.label(
-                            RichText::new("Sin etiquetas todavía.")
-                                .color(palette.text_secondary.color32()),
-                        );
-                    } else {
-                        for (kind, heading) in [
-                            (LabelKind::Category, "Categorías"),
-                            (LabelKind::Tag, "Etiquetas"),
-                            (LabelKind::Entity, "Entidades"),
-                        ] {
-                            let group: Vec<&LabelCount> = self
-                                .labels_in_use
-                                .iter()
-                                .filter(|lc| lc.kind == kind)
-                                .collect();
-                            if group.is_empty() {
-                                continue;
-                            }
-                            ui.add_space(theme::SPACE_XS);
-                            ui.label(
-                                RichText::new(heading)
-                                    .size(theme::FONT_SMALL)
-                                    .color(palette.text_secondary.color32()),
-                            );
-                            ui.horizontal_wrapped(|ui| {
-                                for lc in group {
-                                    let mode = self.filter.chip_mode(lc.label);
-                                    let count = lc.images.max(0) as usize;
-                                    let (bg, fg, stroke) = match mode {
-                                        None => (
-                                            palette.bg_card.color32(),
-                                            palette.text_primary.color32(),
-                                            Stroke::new(1.0, palette.border.color32()),
-                                        ),
-                                        Some(ChipMode::Require) => {
-                                            let c = palette.chip_require_fg.color32();
-                                            (
-                                                palette.chip_require_bg.color32(),
-                                                c,
-                                                Stroke::new(1.5, c),
-                                            )
-                                        }
-                                        Some(ChipMode::Any) => {
-                                            let c = palette.chip_any_fg.color32();
-                                            (palette.chip_any_bg.color32(), c, Stroke::new(1.5, c))
-                                        }
-                                        Some(ChipMode::Exclude) => {
-                                            let c = palette.chip_exclude_fg.color32();
-                                            (
-                                                palette.chip_exclude_bg.color32(),
-                                                c,
-                                                Stroke::new(1.5, c),
-                                            )
-                                        }
-                                    };
-                                    let text = format_chip_label(mode, &lc.name, count);
-                                    let mut rt = RichText::new(text).color(fg);
-                                    if mode.is_some() {
-                                        rt = rt.strong();
-                                    }
-                                    let btn = egui::Button::new(rt).fill(bg).stroke(stroke);
-                                    let resp = ui
-                                        .add(btn)
-                                        .on_hover_text(format_chip_tooltip(mode, &lc.name, count));
-                                    if resp.clicked() {
-                                        self.filter.cycle_chip(lc.label);
-                                        filter_changed = true;
-                                    }
-                                }
-                            });
-                        }
-                    }
-
-                    ui.add_space(theme::SPACE_MD);
-                    ui.separator();
-                    ui.add_space(theme::SPACE_SM);
-                    ui.label(RichText::new("Resumen").strong());
-                    ui.add_space(theme::SPACE_XS);
-                    let assets = self.counts.assets.max(0) as usize;
-                    let locations = self.counts.locations.max(0) as usize;
-                    let missing = self.counts.missing.max(0) as usize;
-                    let selected = self.selection.len();
-                    let stats = [
-                        (
-                            plural_word(assets, "Imagen única", "Imágenes únicas"),
-                            assets.to_string(),
-                        ),
-                        (
-                            plural_word(locations, "Ubicación", "Ubicaciones"),
-                            locations.to_string(),
-                        ),
-                        (
-                            plural_word(missing, "Ausente", "Ausentes"),
-                            missing.to_string(),
-                        ),
-                        ("En vista", self.entries.len().to_string()),
-                        (
-                            plural_word(selected, "Seleccionada", "Seleccionadas"),
-                            selected.to_string(),
-                        ),
-                    ];
-                    for (label, value) in stats {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(label).color(palette.text_secondary.color32()));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(value).strong());
-                            });
-                        });
-                    }
-                });
-            });
-
-        if add_clicked {
-            self.pick_and_add_library(ui.ctx());
-        }
-        if let Some(p) = to_remove {
-            self.remove_library(&p);
-        }
-        if filter_changed {
-            self.reload_entries();
-        }
-    }
-
-    fn draw_gallery(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        let mut selection_changed = false;
-        let mut visible_hashes: HashSet<String> = HashSet::new();
-        let mut to_request: Vec<ThumbRequest> = Vec::new();
-
-        let mut exit_similarity = false;
-        egui::CentralPanel::default()
-            .frame(
-                Frame::new()
-                    .fill(palette.bg_canvas.color32())
-                    .inner_margin(Margin::same(theme::SPACE_MD as i8)),
-            )
-            .show(ui, |ui| {
-                if let Some(sim) = &self.similarity_view {
-                    let passing = sim.threshold.map(|t| {
-                        self.entries
-                            .iter()
-                            .filter(|e| sim.scores.get(&e.asset).is_some_and(|&s| s >= t))
-                            .count()
-                    });
-                    Frame::new()
-                        .fill(palette.bg_panel.color32())
-                        .stroke(Stroke::new(1.0, palette.accent.color32()))
-                        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
-                        .inner_margin(Margin::symmetric(
-                            theme::SPACE_SM as i8,
-                            theme::SPACE_XS as i8,
-                        ))
-                        .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(&sim.title).strong());
-                                let info = match (sim.threshold, passing) {
-                                    (Some(t), Some(n)) => format!(
-                                        "· Similitud coseno (no es probabilidad) · Umbral {t:.3}: {} superan el umbral",
-                                        count_phrase(n, "imagen", "imágenes")
-                                    ),
-                                    _ => "· Ordenado por similitud coseno (no es probabilidad)"
-                                        .to_string(),
-                                };
-                                ui.label(
-                                    RichText::new(info)
-                                        .size(theme::FONT_SMALL)
-                                        .color(palette.text_secondary.color32()),
-                                );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Volver a la galería").clicked() {
-                                        exit_similarity = true;
-                                    }
-                                });
-                            });
-                            if sim.threshold.is_some() {
-                                ui.label(
-                                    RichText::new(
-                                        "Superar el umbral no basta para sugerir: un tipo además debe ganar a los otros tipos, y una etiqueta con descripciones negativas debe parecerse más a las positivas.",
-                                    )
-                                    .size(theme::FONT_SMALL)
-                                    .color(palette.text_secondary.color32()),
-                                );
-                            }
-                        });
-                    ui.add_space(theme::SPACE_SM);
-                }
-
-                // Selection bar when items exist
-                if !self.entries.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{} ({})",
-                                count_phrase(self.entries.len(), "imagen", "imágenes"),
-                                selected_phrase(self.selection.len()),
-                            ))
-                            .color(palette.text_secondary.color32()),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if !self.selection.is_empty()
-                                && ui.button("Limpiar selección").clicked()
-                            {
-                                self.selection.clear();
-                                selection_changed = true;
-                            }
-                            if ui.button("Invertir").clicked() {
-                                self.selection.invert(self.entries.len());
-                                selection_changed = true;
-                            }
-                            if ui.button("Seleccionar todo").clicked() {
-                                self.selection.select_all(self.entries.len());
-                                selection_changed = true;
-                            }
-                        });
-                    });
-                    ui.add_space(theme::SPACE_SM);
-                }
-
-                if self.entries.is_empty() {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(theme::SPACE_XL * 2.0);
-                        let msg = if self.counts.locations == 0 {
-                            "Aún no hay imágenes indexadas. Pulsa \"Indexar\" para escanear tus carpetas."
-                        } else {
-                            "Ninguna imagen coincide con los filtros actuales."
-                        };
-                        ui.label(RichText::new(msg).color(palette.text_secondary.color32()));
-                    });
-                    return;
-                }
-
-                let avail_w = ui.available_width();
-                let layout = GridLayout::compute(
-                    avail_w,
-                    theme::CELL_WIDTH,
-                    theme::CELL_HEIGHT,
-                    theme::CELL_SPACING,
-                    self.entries.len(),
-                );
-                self.last_columns = layout.columns;
-
-                ui.spacing_mut().item_spacing = Vec2::splat(theme::CELL_SPACING);
-                ScrollArea::vertical().auto_shrink([false, false]).show_rows(
-                    ui,
-                    theme::CELL_HEIGHT,
-                    layout.row_count,
-                    |ui, row_range| {
-                        for row in row_range {
-                            let indices = layout.row_indices(row);
-                            ui.horizontal(|ui| {
-                                for idx in indices {
-                                    let entry = &self.entries[idx];
-                                    visible_hashes.insert(entry.sha256.clone());
-                                    if !self.thumb_textures.contains_key(&entry.sha256)
-                                        && !self.thumb_failed.contains(&entry.sha256)
-                                    {
-                                        to_request.push(ThumbRequest {
-                                            source: entry.path.clone(),
-                                            sha256: entry.sha256.clone(),
-                                        });
-                                    }
-
-                                    let selected = self.selection.contains(idx);
-                                    let is_primary = self.selection.primary() == Some(idx);
-                                    let pending_review =
-                                        self.pending_review_assets.contains(&entry.asset);
-
-                                    let (rect, resp) = ui.allocate_exact_size(
-                                        Vec2::new(theme::CELL_WIDTH, theme::CELL_HEIGHT),
-                                        Sense::click(),
-                                    );
-                                    if resp.clicked() {
-                                        let mods = ui.input(|i| i.modifiers);
-                                        if mods.shift {
-                                            self.selection.shift_click(idx, self.entries.len());
-                                        } else if mods.command {
-                                            self.selection.ctrl_click(idx, self.entries.len());
-                                        } else {
-                                            self.selection.click(idx, self.entries.len());
-                                        }
-                                        selection_changed = true;
-                                    }
-                                    if resp.double_clicked() {
-                                        self.selection.click(idx, self.entries.len());
-                                        self.viewer_open = true;
-                                        selection_changed = true;
-                                    }
-
-                                    let bg = if selected {
-                                        palette.accent_bg.color32()
-                                    } else if resp.hovered() {
-                                        palette.bg_elevated.color32()
-                                    } else {
-                                        palette.bg_card.color32()
-                                    };
-                                    let border = if is_primary || resp.has_focus() {
-                                        Stroke::new(
-                                            theme::FOCUS_STROKE_WIDTH,
-                                            palette.accent.color32(),
-                                        )
-                                    } else if selected {
-                                        Stroke::new(1.5, palette.accent.color32())
-                                    } else {
-                                        Stroke::new(1.0, palette.border.color32())
-                                    };
-                                    let painter = ui.painter();
-                                    painter.rect(
-                                        rect,
-                                        CornerRadius::same(theme::RADIUS_MD),
-                                        bg,
-                                        border,
-                                        egui::StrokeKind::Inside,
-                                    );
-
-                                    let thumb_rect = egui::Rect::from_min_size(
-                                        rect.min + Vec2::splat(theme::SPACE_SM),
-                                        Vec2::new(
-                                            theme::CELL_WIDTH - theme::SPACE_SM * 2.0,
-                                            theme::CELL_THUMB_HEIGHT,
-                                        ),
-                                    );
-                                    painter.rect_filled(
-                                        thumb_rect,
-                                        CornerRadius::same(theme::RADIUS_SM),
-                                        palette.bg_canvas.color32(),
-                                    );
-
-                                    if let Some(tex) = self.thumb_textures.get(&entry.sha256) {
-                                        let fit = fit_rect(thumb_rect, tex.size_vec2());
-                                        painter.image(
-                                            tex.id(),
-                                            fit,
-                                            egui::Rect::from_min_max(
-                                                egui::pos2(0.0, 0.0),
-                                                egui::pos2(1.0, 1.0),
-                                            ),
-                                            Color32::WHITE,
-                                        );
-                                    } else {
-                                        let placeholder = if self.thumb_failed.contains(&entry.sha256)
-                                        {
-                                            "Sin miniatura"
-                                        } else {
-                                            "Cargando..."
-                                        };
-                                        painter.text(
-                                            thumb_rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            placeholder,
-                                            egui::FontId::proportional(theme::FONT_SMALL),
-                                            palette.text_secondary.color32(),
-                                        );
-                                    }
-
-                                    let badge_rect = pending_review.then(|| {
-                                        let badge_rect = egui::Rect::from_min_size(
-                                            thumb_rect.min + Vec2::splat(theme::SPACE_XS),
-                                            Vec2::new(66.0, 20.0),
-                                        );
-                                        painter.rect_filled(
-                                            badge_rect,
-                                            CornerRadius::same(theme::RADIUS_SM),
-                                            palette.review_badge_bg.color32(),
-                                        );
-                                        painter.text(
-                                            badge_rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            "Revisar",
-                                            egui::FontId::proportional(theme::FONT_SMALL),
-                                            palette.review_badge_fg.color32(),
-                                        );
-                                        badge_rect
-                                    });
-
-                                    if let Some(sim) = &self.similarity_view
-                                        && let Some(&score) = sim.scores.get(&entry.asset)
-                                    {
-                                        let passes =
-                                            sim.threshold.is_none_or(|t| score >= t);
-                                        let (s_bg, s_fg, prefix) = match sim.threshold {
-                                            Some(_) if passes => (
-                                                palette.chip_require_bg.color32(),
-                                                palette.chip_require_fg.color32(),
-                                                "✓ ",
-                                            ),
-                                            Some(_) => (
-                                                palette.bg_panel.color32(),
-                                                palette.text_secondary.color32(),
-                                                "",
-                                            ),
-                                            None => (
-                                                palette.accent_bg.color32(),
-                                                palette.text_primary.color32(),
-                                                "",
-                                            ),
-                                        };
-                                        let score_rect = egui::Rect::from_min_size(
-                                            egui::pos2(
-                                                thumb_rect.max.x - 62.0 - theme::SPACE_XS,
-                                                thumb_rect.max.y - 20.0 - theme::SPACE_XS,
-                                            ),
-                                            Vec2::new(62.0, 20.0),
-                                        );
-                                        painter.rect_filled(
-                                            score_rect,
-                                            CornerRadius::same(theme::RADIUS_SM),
-                                            s_bg,
-                                        );
-                                        painter.text(
-                                            score_rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            format!("{prefix}{score:.3}"),
-                                            egui::FontId::proportional(theme::FONT_SMALL),
-                                            s_fg,
-                                        );
-                                    }
-
-                                    let filename = entry
-                                        .path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| entry.path.display().to_string());
-                                    let label_rect = egui::Rect::from_min_max(
-                                        egui::pos2(
-                                            rect.min.x + theme::SPACE_SM,
-                                            thumb_rect.max.y + theme::SPACE_XS,
-                                        ),
-                                        egui::pos2(
-                                            rect.max.x - theme::SPACE_SM,
-                                            rect.max.y - theme::SPACE_XS,
-                                        ),
-                                    );
-                                    let mut child_ui = ui.new_child(
-                                        egui::UiBuilder::new().max_rect(label_rect),
-                                    );
-                                    // Non-interactive label so hover and clicks pass through to the cell `resp`.
-                                    child_ui.add(
-                                        egui::Label::new(
-                                            RichText::new(filename)
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.text_primary.color32()),
-                                        )
-                                        .truncate()
-                                        .sense(Sense::empty()),
-                                    );
-
-                                    if badge_rect.is_some_and(|r| ui.rect_contains_pointer(r)) {
-                                        resp.on_hover_text(REVIEW_BADGE_TOOLTIP);
-                                    } else {
-                                        let entry_path = &entry.path;
-                                        resp.on_hover_ui(|ui| {
-                                            ui.label(gallery_cell_tooltip(entry_path));
-                                        });
-                                    }
-                                }
-                            });
-                        }
-                    },
-                );
-            });
-
-        self.last_thumbs_ready = !visible_hashes.is_empty() && to_request.is_empty();
-        self.thumb_pool.set_visible(&visible_hashes);
-        for req in to_request {
-            self.thumb_pool.request(req);
-        }
-        if exit_similarity {
-            self.reload_entries();
-        }
-        if selection_changed {
-            self.sync_inspector(false);
-        }
-    }
-
-    fn draw_inspector(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        let selected_entry = self
+    fn execute_photo_menu_action(&mut self, ctx: &egui::Context, action: PhotoMenuAction) {
+        let Some(primary_entry) = self
             .selection
             .primary()
             .and_then(|i| self.entries.get(i))
-            .cloned();
+            .cloned()
+        else {
+            return;
+        };
 
-        let mut accept_action: Option<(AssetId, catalog::LabelId)> = None;
-        let mut reject_action: Option<(AssetId, catalog::LabelId)> = None;
-        let mut add_user_label: Option<(AssetId, LabelKind, String)> = None;
-        let mut create_work_from_ocr: Option<(AssetId, String)> = None;
-        let mut add_alias_from_ocr: Option<(AssetId, LabelId, String)> = None;
-
-        egui::Panel::right("inspector")
-            .default_size(theme::INSPECTOR_WIDTH)
-            .size_range(280.0..=520.0)
-            .resizable(true)
-            .frame(
-                Frame::new()
-                    .fill(palette.bg_panel.color32())
-                    .inner_margin(Margin::same(theme::SPACE_MD as i8))
-                    .stroke(Stroke::new(1.0, palette.border.color32())),
-            )
-            .show(ui, |ui| {
-                let Some(entry) = selected_entry else {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(theme::SPACE_XL * 2.0);
-                        ui.label(
-                            RichText::new("Selecciona una imagen para inspeccionarla.")
-                                .color(palette.text_secondary.color32()),
-                        );
-                    });
-                    return;
-                };
-
-                ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Inspector").strong());
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Abrir visor").clicked() {
-                                self.viewer_open = true;
-                            }
-                        });
-                    });
-                    ui.add_space(theme::SPACE_SM);
-
-                    // Preview box
-                    let preview_w = ui.available_width().max(120.0);
-                    let preview_h = 220.0;
-                    let (rect, _) =
-                        ui.allocate_exact_size(Vec2::new(preview_w, preview_h), Sense::hover());
-                    ui.painter().rect(
-                        rect,
-                        CornerRadius::same(theme::RADIUS_MD),
-                        palette.bg_canvas.color32(),
-                        Stroke::new(1.0, palette.border.color32()),
-                        egui::StrokeKind::Inside,
-                    );
-                    match &self.preview_loaded {
-                        Some((p, Ok(tex))) if p == &entry.path => {
-                            let fit = fit_rect(rect.shrink(theme::SPACE_XS), tex.size_vec2());
-                            ui.painter().image(
-                                tex.id(),
-                                fit,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                Color32::WHITE,
-                            );
-                        }
-                        Some((p, Err(e))) if p == &entry.path => {
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                format!("No se pudo decodificar: {e}"),
-                                egui::FontId::proportional(theme::FONT_SMALL),
-                                palette.text_secondary.color32(),
-                            );
-                        }
-                        _ => {
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "Cargando vista previa...",
-                                egui::FontId::proportional(theme::FONT_SMALL),
-                                palette.text_secondary.color32(),
-                            );
-                        }
-                    }
-
-                    ui.add_space(theme::SPACE_MD);
-                    ui.label(RichText::new("Metadatos").strong());
-                    ui.add_space(theme::SPACE_XS);
-                    meta_row(ui, palette, "Ruta", &entry.path.display().to_string());
-                    meta_row(ui, palette, "Tamaño", &format_bytes(entry.size));
-                    let date_str = entry
-                        .modified_ns
-                        .map(format_timestamp_utc)
-                        .unwrap_or_else(|| "Desconocida".into());
-                    meta_row(ui, palette, "Modificado", &date_str);
-                    let short_sha = if entry.sha256.len() > 16 {
-                        format!("{}...", &entry.sha256[..16])
-                    } else {
-                        entry.sha256.clone()
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("SHA-256:").color(palette.text_secondary.color32()));
-                        ui.label(RichText::new(&short_sha).monospace())
-                            .on_hover_text(&entry.sha256);
-                    });
-                    if self.inspector_vision_done {
-                        let face_count = self.inspector_faces.len();
-                        let face_label = if face_count == 0 {
-                            "0".to_string()
-                        } else {
-                            let max_score = self
-                                .inspector_faces
-                                .iter()
-                                .map(|f| f.score)
-                                .fold(0.0f32, f32::max);
-                            format!("{face_count} (máx. {max_score:.2})")
-                        };
-                        meta_row(ui, palette, "Rostros detectados", &face_label);
-                    } else {
-                        meta_row(ui, palette, "Reconocimiento visual", "Pendiente");
-                    }
-
-                    ui.add_space(theme::SPACE_MD);
-                    ui.separator();
-                    ui.add_space(theme::SPACE_SM);
-
-                    let is_screenshot = self.inspector_labels.iter().any(|a| {
-                        a.kind == LabelKind::Category
-                            && a.name.eq_ignore_ascii_case(SCREENSHOT_CATEGORY)
-                            && a.status != Status::Rejected
-                    });
-                    let mut main_ocr: Vec<&OcrLine> = Vec::new();
-                    let mut status_bar_ocr: Vec<&OcrLine> = Vec::new();
-                    for line in &self.inspector_ocr_lines {
-                        if line.top_strip && is_screenshot {
-                            status_bar_ocr.push(line);
-                        } else {
-                            main_ocr.push(line);
-                        }
-                    }
-
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Texto reconocido (OCR)").strong());
-                        if !main_ocr.is_empty() {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Copiar texto").clicked() {
-                                    let joined: String = main_ocr
-                                        .iter()
-                                        .map(|l| l.text.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    ui.ctx().copy_text(joined);
-                                }
-                            });
-                        }
-                    });
-                    ui.add_space(theme::SPACE_XS);
-                    if main_ocr.is_empty() && status_bar_ocr.is_empty() {
-                        let empty_msg = if self.inspector_ocr_done {
-                            "Sin texto reconocido."
-                        } else {
-                            "Sin lectura OCR todavía."
-                        };
-                        ui.label(
-                            RichText::new(empty_msg)
-                                .size(theme::FONT_SMALL)
-                                .color(palette.text_secondary.color32()),
-                        );
-                    } else {
-                        if !main_ocr.is_empty() {
-                            let mut ticks_changed = false;
-                            Frame::new()
-                                .fill(palette.bg_card.color32())
-                                .stroke(Stroke::new(1.0, palette.border.color32()))
-                                .corner_radius(CornerRadius::same(theme::RADIUS_SM))
-                                .inner_margin(Margin::same(theme::SPACE_SM as i8))
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    for (idx, line) in main_ocr.iter().enumerate() {
-                                        let mut checked = self.inspector_ocr_checked.contains(&idx);
-                                        ui.horizontal_wrapped(|ui| {
-                                            let tick = ui.checkbox(&mut checked, "").on_hover_text(
-                                                "Usar esta línea como título de una obra o alias",
-                                            );
-                                            tick.widget_info(|| {
-                                                egui::WidgetInfo::selected(
-                                                    egui::Role::CheckBox,
-                                                    true,
-                                                    checked,
-                                                    format!("Usar como título: {}", line.text),
-                                                )
-                                            });
-                                            if tick.changed() {
-                                                if checked {
-                                                    self.inspector_ocr_checked.insert(idx);
-                                                } else {
-                                                    self.inspector_ocr_checked.remove(&idx);
-                                                }
-                                                ticks_changed = true;
-                                            }
-                                            // OCR text is untrusted: plain selectable label only.
-                                            if line.score < ocr::select::REVIEW_BELOW {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(&line.text).color(
-                                                            palette.text_secondary.color32(),
-                                                        ),
-                                                    )
-                                                    .selectable(true),
-                                                );
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "(baja confianza · {:.0}%)",
-                                                        line.score * 100.0
-                                                    ))
-                                                    .size(theme::FONT_SMALL)
-                                                    .color(palette.text_hint.color32()),
-                                                );
-                                            } else {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(&line.text)
-                                                            .color(palette.text_primary.color32()),
-                                                    )
-                                                    .selectable(true),
-                                                );
-                                            }
-                                        });
-                                    }
-                                });
-
-                            if ticks_changed {
-                                self.inspector_ocr_draft = self
-                                    .inspector_ocr_checked
-                                    .iter()
-                                    .filter_map(|&idx| main_ocr.get(idx).map(|l| l.text.trim()))
-                                    .filter(|s| !s.is_empty())
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                            }
-
-                            if !self.inspector_ocr_checked.is_empty()
-                                || !self.inspector_ocr_draft.trim().is_empty()
-                            {
-                                ui.add_space(theme::SPACE_XS);
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.inspector_ocr_draft)
-                                        .desired_width(ui.available_width())
-                                        .hint_text(theme::hint_text(
-                                            palette,
-                                            "Título o alias desde el texto leído…",
-                                        )),
-                                );
-                                ui.add_space(theme::SPACE_XS);
-                                let draft_ready = !self.inspector_ocr_draft.trim().is_empty();
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui
-                                        .add_enabled(
-                                            draft_ready,
-                                            egui::Button::new("Crear obra con este texto"),
-                                        )
-                                        .clicked()
-                                    {
-                                        create_work_from_ocr = Some((
-                                            entry.asset,
-                                            self.inspector_ocr_draft.trim().to_string(),
-                                        ));
-                                    }
-                                    if !self.works.is_empty() {
-                                        let target_name = self
-                                            .inspector_alias_target
-                                            .and_then(|id| {
-                                                self.works.iter().find(|w| w.label == id)
-                                            })
-                                            .map(|w| w.name.as_str())
-                                            .unwrap_or("Elegir obra…");
-                                        egui::ComboBox::from_id_salt("inspector_alias_target")
-                                            .selected_text(target_name)
-                                            .width(150.0)
-                                            .show_ui(ui, |ui| {
-                                                for w in &self.works {
-                                                    ui.selectable_value(
-                                                        &mut self.inspector_alias_target,
-                                                        Some(w.label),
-                                                        &w.name,
-                                                    );
-                                                }
-                                            });
-                                        let can_alias =
-                                            draft_ready && self.inspector_alias_target.is_some();
-                                        if ui
-                                            .add_enabled(
-                                                can_alias,
-                                                egui::Button::new("Añadir como alias de…"),
-                                            )
-                                            .clicked()
-                                            && let Some(target) = self.inspector_alias_target
-                                        {
-                                            add_alias_from_ocr = Some((
-                                                entry.asset,
-                                                target,
-                                                self.inspector_ocr_draft.trim().to_string(),
-                                            ));
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                        if !status_bar_ocr.is_empty() {
-                            ui.add_space(theme::SPACE_XS);
-                            ui.label(
-                                RichText::new("Barra de estado (no se busca)")
-                                    .size(theme::FONT_SMALL)
-                                    .color(palette.text_secondary.color32()),
-                            );
-                            Frame::new()
-                                .fill(palette.bg_canvas.color32())
-                                .stroke(Stroke::new(1.0, palette.border.color32()))
-                                .corner_radius(CornerRadius::same(theme::RADIUS_SM))
-                                .inner_margin(Margin::same(theme::SPACE_SM as i8))
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    for line in &status_bar_ocr {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&line.text)
-                                                    .size(theme::FONT_SMALL)
-                                                    .color(palette.text_secondary.color32()),
-                                            )
-                                            .selectable(true),
-                                        );
-                                    }
-                                });
-                        }
-                    }
-
-                    ui.add_space(theme::SPACE_MD);
-                    ui.separator();
-                    ui.add_space(theme::SPACE_SM);
-
-                    ui.label(RichText::new("Etiquetas de la imagen").strong());
-                    ui.add_space(theme::SPACE_XS);
-                    if self.inspector_labels.is_empty() {
-                        ui.label(
-                            RichText::new("Sin etiquetas asignadas.")
-                                .color(palette.text_secondary.color32()),
-                        );
-                    } else {
-                        for assign in &self.inspector_labels {
-                            Frame::new()
-                                .fill(palette.bg_card.color32())
-                                .stroke(Stroke::new(1.0, palette.border.color32()))
-                                .corner_radius(CornerRadius::same(theme::RADIUS_SM))
-                                .inner_margin(Margin::same(theme::SPACE_SM as i8))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{}: {}",
-                                                kind_label(assign.kind),
-                                                assign.name
-                                            ))
-                                            .strong(),
-                                        );
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                let (st_text, st_color) = match assign.status {
-                                                    Status::Accepted => (
-                                                        "Aceptada",
-                                                        palette.status_accepted_fg.color32(),
-                                                    ),
-                                                    Status::Rejected => (
-                                                        "Rechazada",
-                                                        palette.status_rejected_fg.color32(),
-                                                    ),
-                                                    Status::Suggested => (
-                                                        "Sugerida",
-                                                        palette.status_suggested_fg.color32(),
-                                                    ),
-                                                };
-                                                ui.label(
-                                                    RichText::new(st_text)
-                                                        .size(theme::FONT_SMALL)
-                                                        .color(st_color),
-                                                );
-                                            },
-                                        );
-                                    });
-                                    ui.horizontal(|ui| {
-                                        let src_text = if assign.source == Source::Ai {
-                                            if assign.status == Status::Suggested {
-                                                format!(
-                                                    "Sugerencia de IA (orden {:.0}%)",
-                                                    assign.confidence * 100.0
-                                                )
-                                            } else {
-                                                format!(
-                                                    "Fuente: IA (orden {:.0}%)",
-                                                    assign.confidence * 100.0
-                                                )
-                                            }
-                                        } else {
-                                            format!(
-                                                "Fuente: {} ({:.0}%)",
-                                                source_label(assign.source),
-                                                assign.confidence * 100.0
-                                            )
-                                        };
-                                        let lbl = ui.label(
-                                            RichText::new(src_text)
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.text_secondary.color32()),
-                                        );
-                                        if assign.source == Source::Ai {
-                                            lbl.on_hover_text(
-                                                "Sugerencia automática de IA (aparece en Revisión). El número solo ordena la revisión; no es una probabilidad.",
-                                            );
-                                        }
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                if assign.status != Status::Rejected
-                                                    && ui.button("Rechazar").clicked()
-                                                {
-                                                    reject_action =
-                                                        Some((entry.asset, assign.label));
-                                                }
-                                                if assign.status != Status::Accepted
-                                                    && ui.button("Aceptar").clicked()
-                                                {
-                                                    accept_action =
-                                                        Some((entry.asset, assign.label));
-                                                }
-                                            },
-                                        );
-                                    });
-                                });
-                            ui.add_space(theme::SPACE_XS);
-                        }
-                    }
-
-                    ui.add_space(theme::SPACE_SM);
-                    ui.label(RichText::new("Añadir etiqueta").strong());
-                    ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt("new_label_kind")
-                            .selected_text(kind_label(self.new_label_kind))
-                            .width(96.0)
-                            .show_ui(ui, |ui| {
-                                for k in [LabelKind::Tag, LabelKind::Category, LabelKind::Entity] {
-                                    ui.selectable_value(&mut self.new_label_kind, k, kind_label(k));
-                                }
-                            });
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(&mut self.new_label_text)
-                                .desired_width((ui.available_width() - 78.0).max(80.0))
-                                .hint_text(theme::hint_text(palette, "Nombre...")),
-                        );
-                        let submit = ui.button("Añadir").clicked()
-                            || (edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
-                        if submit {
-                            let name = self.new_label_text.trim().to_owned();
-                            if !name.is_empty() {
-                                add_user_label = Some((entry.asset, self.new_label_kind, name));
-                                self.new_label_text.clear();
-                            }
-                        }
-                    });
+        match action {
+            PhotoMenuAction::OpenViewer => {
+                self.viewer_open = true;
+            }
+            PhotoMenuAction::RevealInExplorer => {
+                if let Err(e) = views::duplicates::reveal_in_explorer(&primary_entry.path) {
+                    self.banner_error = Some(format!("No se pudo abrir el Explorador: {e}"));
+                }
+            }
+            PhotoMenuAction::CopyPath => {
+                ctx.copy_text(primary_entry.path.display().to_string());
+                self.status_notice = Some("Ruta copiada al portapapeles".into());
+            }
+            PhotoMenuAction::ReviewSelected => {
+                let assets: Vec<AssetId> = self
+                    .selection
+                    .selected_indices()
+                    .into_iter()
+                    .filter_map(|i| self.entries.get(i).map(|e| e.asset))
+                    .collect();
+                self.request_review_assets(assets);
+            }
+            PhotoMenuAction::AddTag => {
+                self.inspector.focus_new_label_next_frame = true;
+            }
+            PhotoMenuAction::CopyOcrText => {
+                let is_screenshot = self.inspector.labels.iter().any(|a| {
+                    a.kind == catalog::LabelKind::Category
+                        && a.name.eq_ignore_ascii_case(SCREENSHOT_CATEGORY)
+                        && a.status != Status::Rejected
                 });
-            });
-
-        let mut catalog_mutated = false;
-        if let Some(cat) = &self.catalog {
-            if let Some((asset, label)) = accept_action {
-                match cat.accept(asset, label) {
-                    Ok(()) => catalog_mutated = true,
-                    Err(e) => self.banner_error = Some(format!("No se pudo aceptar: {e}")),
+                let joined: String = self
+                    .inspector
+                    .ocr_lines
+                    .iter()
+                    .filter(|l| !(l.top_strip && is_screenshot))
+                    .map(|l| l.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !joined.is_empty() {
+                    ctx.copy_text(joined);
+                    self.status_notice = Some("Texto leído copiado al portapapeles".into());
                 }
             }
-            if let Some((asset, label)) = reject_action {
-                match cat.reject(asset, label) {
-                    Ok(()) => catalog_mutated = true,
-                    Err(e) => self.banner_error = Some(format!("No se pudo rechazar: {e}")),
+            PhotoMenuAction::FindSimilar => {
+                self.find_similar_to(&primary_entry);
+            }
+            PhotoMenuAction::Export => {
+                if let Some(cat) = &self.catalog {
+                    self.export_wizard = Some(crate::export_flow::ExportWizard::open(
+                        cat,
+                        &self.entries,
+                        &self.selection,
+                        self.settings.last_export_dir.clone(),
+                    ));
                 }
             }
-            if let Some((asset, kind, name)) = add_user_label {
-                match cat.label(kind, &name).and_then(|id| cat.accept(asset, id)) {
-                    Ok(()) => catalog_mutated = true,
-                    Err(e) => self.banner_error = Some(format!("No se pudo añadir etiqueta: {e}")),
-                }
-            }
-        }
-        if let Some(cat) = &mut self.catalog {
-            if let Some((asset, name)) = create_work_from_ocr {
-                match cat
-                    .create_work(&name)
-                    .and_then(|_| cat.load_work_matcher())
-                    .and_then(|m| cat.apply_work_matches(asset, &m))
-                {
-                    Ok(_) => {
-                        self.inspector_ocr_checked.clear();
-                        self.inspector_ocr_draft.clear();
-                        self.status_notice = Some(
-                            "Obra creada. En «Obras» puedes buscarla en las demás imágenes.".into(),
-                        );
-                        catalog_mutated = true;
-                    }
-                    Err(e) => self.banner_error = Some(format!("No se pudo crear la obra: {e}")),
-                }
-            }
-            if let Some((asset, target, alias)) = add_alias_from_ocr {
-                match cat.add_work_alias(target, &alias) {
-                    Ok(true) => {
-                        if let Ok(m) = cat.load_work_matcher() {
-                            let _ = cat.apply_work_matches(asset, &m);
-                        }
-                        self.inspector_ocr_checked.clear();
-                        self.inspector_ocr_draft.clear();
-                        self.status_notice = Some(
-                            "Alias añadido. En «Obras» puedes aplicarlo a las demás imágenes."
-                                .into(),
-                        );
-                        catalog_mutated = true;
-                    }
-                    Ok(false) => {
-                        self.status_notice = Some(
-                            "Ese alias ya existe o tiene menos de 2 caracteres alfanuméricos."
-                                .into(),
-                        );
-                    }
-                    Err(e) => self.banner_error = Some(format!("No se pudo añadir el alias: {e}")),
-                }
+            PhotoMenuAction::ClearSelection => {
+                self.selection.clear();
+                self.sync_inspector(false);
             }
         }
-        if catalog_mutated {
-            self.reload_catalog();
-        }
-    }
-
-    fn draw_viewer_overlay(&mut self, ctx: &egui::Context, palette: &Palette) {
-        if !self.viewer_open {
-            return;
-        }
-        let Some(idx) = self.selection.primary() else {
-            self.viewer_open = false;
-            return;
-        };
-        let Some(entry) = self.entries.get(idx).cloned() else {
-            self.viewer_open = false;
-            return;
-        };
-
-        let screen = ctx.content_rect();
-        egui::Area::new(Id::unique("image_viewer_overlay"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(screen.min)
-            .show(ctx, |ui| {
-                Frame::new()
-                    .fill(Color32::from_rgba_unmultiplied(12, 14, 17, 240))
-                    .inner_margin(Margin::same(theme::SPACE_LG as i8))
-                    .show(ui, |ui| {
-                        ui.set_min_size(screen.size() - Vec2::splat(theme::SPACE_LG * 2.0));
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} / {} — {}",
-                                    idx + 1,
-                                    self.entries.len(),
-                                    entry.path.display()
-                                ))
-                                .color(theme::DARK_PALETTE.text_primary.color32()),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Cerrar").clicked() {
-                                    self.viewer_open = false;
-                                }
-                                if ui.button("Siguiente").clicked() {
-                                    self.selection.move_cursor(
-                                        MoveDir::Right,
-                                        1,
-                                        self.entries.len(),
-                                        false,
-                                    );
-                                    self.sync_inspector(false);
-                                }
-                                if ui.button("Anterior").clicked() {
-                                    self.selection.move_cursor(
-                                        MoveDir::Left,
-                                        1,
-                                        self.entries.len(),
-                                        false,
-                                    );
-                                    self.sync_inspector(false);
-                                }
-                            });
-                        });
-                        ui.add_space(theme::SPACE_MD);
-
-                        let avail = ui.available_size();
-                        let (rect, _) = ui.allocate_exact_size(avail, Sense::hover());
-                        match &self.preview_loaded {
-                            Some((p, Ok(tex))) if p == &entry.path => {
-                                let fit = fit_rect(rect, tex.size_vec2());
-                                ui.painter().image(
-                                    tex.id(),
-                                    fit,
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(0.0, 0.0),
-                                        egui::pos2(1.0, 1.0),
-                                    ),
-                                    Color32::WHITE,
-                                );
-                            }
-                            Some((p, Err(e))) if p == &entry.path => {
-                                ui.painter().text(
-                                    rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    format!("Error al cargar imagen: {e}"),
-                                    egui::FontId::proportional(theme::FONT_BODY),
-                                    palette.text_secondary.color32(),
-                                );
-                            }
-                            _ => {
-                                ui.painter().text(
-                                    rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "Cargando imagen...",
-                                    egui::FontId::proportional(theme::FONT_BODY),
-                                    theme::DARK_PALETTE.text_secondary.color32(),
-                                );
-                            }
-                        }
-                    });
-            });
     }
 
     fn step_screenshot(&mut self, ctx: &egui::Context) {
@@ -2648,8 +1093,7 @@ impl PhotosortApp {
                 w.validation_error().is_some()
                     || matches!(w.phase(), crate::export_flow::ExportPhase::Error(_))
             });
-        let ocr_open = self.ocr_dialog.is_some();
-        let vision_open = self.vision_dialog.is_some();
+        let menu_open = self.photo_menu.is_some();
 
         let step = self
             .screenshot
@@ -2665,8 +1109,7 @@ impl PhotosortApp {
                         export_open,
                         export_ready,
                         export_failed,
-                        ocr_open,
-                        vision_open,
+                        menu_open,
                         image_received: false,
                     },
                 )
@@ -2679,27 +1122,13 @@ impl PhotosortApp {
             crate::screenshot::CaptureStep::OpenExport if has_entries => {
                 self.open_export_for_capture(ctx);
             }
-            crate::screenshot::CaptureStep::OpenOcr if has_entries => {
+            crate::screenshot::CaptureStep::OpenMenu if has_entries => {
                 self.selection.click(0, self.entries.len());
                 self.sync_inspector(false);
-                let mut dlg = OcrDialog::open_fresh(
-                    self.catalog.as_ref(),
-                    &self.settings,
-                    vec![self.entries[0].asset],
-                );
-                dlg.mode = OcrTargetMode::Folders;
-                self.ocr_dialog = Some(dlg);
-            }
-            crate::screenshot::CaptureStep::OpenVision if has_entries => {
-                self.selection.click(0, self.entries.len());
-                self.sync_inspector(false);
-                let mut dlg = VisionDialog::open_fresh(
-                    self.catalog.as_ref(),
-                    &self.settings,
-                    vec![self.entries[0].asset],
-                );
-                dlg.mode = VisionTargetMode::Folders;
-                self.vision_dialog = Some(dlg);
+                let pos = self
+                    .last_primary_cell_pos
+                    .unwrap_or_else(|| Pos2::new(380.0, 240.0));
+                self.photo_menu = Some(PhotoMenuState::at(pos));
             }
             _ => {}
         }
@@ -2714,7 +1143,6 @@ impl PhotosortApp {
             .preset_export_dir
             .clone()
             .or_else(|| self.settings.last_export_dir.clone());
-        // Pass an empty selection so ExportWizard includes all filtered demo images.
         let mut wizard =
             crate::export_flow::ExportWizard::open(cat, &self.entries, &Selection::default(), dest);
         if matches!(wizard.phase(), crate::export_flow::ExportPhase::Error(_)) {
@@ -2738,136 +1166,437 @@ impl eframe::App for PhotosortApp {
         self.handle_shortcuts(&ctx);
 
         let palette = theme::palette_for(&ctx);
-        self.draw_top_bar(ui, palette);
 
-        if self.settings.library_roots.is_empty() {
-            self.draw_welcome(ui, palette);
-        } else {
-            match self.active_tab {
-                ActiveTab::Gallery => {
-                    self.draw_sidebar(ui, palette);
-                    self.draw_inspector(ui, palette);
-                    self.draw_gallery(ui, palette);
-                    self.draw_viewer_overlay(&ctx, palette);
+        if self.force_welcome || self.settings.library_roots.is_empty() {
+            if views::shell::draw_welcome(ui, palette, self.logo_texture.as_ref()) {
+                self.pick_and_add_library();
+            }
+            self.step_screenshot(&ctx);
+            return;
+        }
+
+        // 1. Left sidebar (always present when folders exist)
+        let sidebar_out = views::shell::draw_sidebar(
+            ui,
+            palette,
+            self.logo_texture.as_ref(),
+            self.active_view,
+            self.reviewed_counts,
+            self.review_flow.total_items(),
+            self.duplicate_groups.len(),
+            self.works.len(),
+            self.vision_rules.len(),
+            &self.labels_in_use,
+            &mut self.filter,
+            &mut self.sidebar_state,
+        );
+        if let Some(view) = sidebar_out.switch_view {
+            if view != ActiveView::Gallery {
+                self.viewer_open = false;
+                self.photo_menu = None;
+            }
+            self.active_view = view;
+        }
+        if let Some(rev) = sidebar_out.set_reviewed_filter {
+            self.filter.reviewed = rev;
+            self.reload_entries();
+        } else if sidebar_out.filter_changed {
+            self.reload_entries();
+        }
+
+        // 2. Minimal top bar (search + background review status)
+        let top_out = views::shell::draw_top_bar(
+            ui,
+            palette,
+            &mut self.filter.search,
+            &mut self.focus_search_next_frame,
+            &self.engine_snapshot,
+            self.banner_error.as_deref(),
+            self.status_notice.as_deref(),
+        );
+        if top_out.search_changed {
+            self.active_view = ActiveView::Gallery;
+            self.reload_entries();
+        }
+        if top_out.open_settings {
+            self.active_view = ActiveView::Settings;
+        }
+        if top_out.toggle_pause {
+            if self.demo_mode {
+                self.demo_paused = !self.demo_paused;
+                self.engine_snapshot.phase = if self.demo_paused {
+                    EnginePhase::Paused
+                } else {
+                    EnginePhase::Running {
+                        done: self.reviewed_counts.reviewed,
+                        total: self.reviewed_counts.all.max(1),
+                        stage: StageKind::Rules,
+                        elapsed_secs: 9.6,
+                    }
+                };
+            } else if let Some(engine) = &self.review_engine {
+                let next = !engine.is_paused();
+                engine.set_paused(next);
+            }
+        }
+        if top_out.retry_failed
+            && let Some(engine) = &self.review_engine
+        {
+            engine.retry_failed();
+        }
+        if top_out.dismiss_error {
+            self.banner_error = None;
+        }
+        if top_out.dismiss_notice {
+            self.status_notice = None;
+        }
+
+        // 3. Main view
+        match self.active_view {
+            ActiveView::Gallery => {
+                // Inspector hidden when nothing is selected!
+                let primary_entry = self
+                    .selection
+                    .primary()
+                    .and_then(|i| self.entries.get(i))
+                    .cloned();
+                let primary_reviewed = primary_entry
+                    .as_ref()
+                    .is_some_and(|e| self.reviewed_assets.contains(&e.asset));
+                let insp_out = views::inspector::draw(
+                    ui,
+                    palette,
+                    primary_entry.as_ref(),
+                    primary_reviewed,
+                    &mut self.inspector,
+                    &self.works,
+                    self.preview_loaded.as_ref(),
+                );
+
+                let gal_out = views::gallery::draw(
+                    ui,
+                    palette,
+                    &self.entries,
+                    &mut self.selection,
+                    &mut self.filter.sort,
+                    self.similarity_view.as_ref(),
+                    &self.reviewed_assets,
+                    &self.pending_suggestions_assets,
+                    self.counts.locations > 0,
+                    &self.thumb_pool,
+                    &self.thumb_textures,
+                    &self.thumb_failed,
+                );
+                self.last_thumbs_ready = gal_out.thumbs_ready;
+                self.last_columns = gal_out.last_columns;
+                if gal_out.primary_cell_pos.is_some() {
+                    self.last_primary_cell_pos = gal_out.primary_cell_pos;
                 }
-                ActiveTab::Review => {
-                    let outcome = views::review::draw(
-                        ui,
-                        palette,
-                        &mut self.review_flow,
-                        self.catalog.as_ref(),
-                        &self.thumb_pool,
-                        &self.thumb_textures,
-                        &self.thumb_failed,
-                    );
-                    self.last_thumbs_ready = outcome.thumbs_ready;
-                    if let Some(err) = outcome.error {
-                        self.banner_error = Some(err);
+                if gal_out.open_viewer || insp_out.open_viewer {
+                    self.viewer_open = true;
+                }
+                if gal_out.sort_changed || gal_out.exit_similarity {
+                    self.reload_entries();
+                } else if gal_out.selection_changed {
+                    self.sync_inspector(false);
+                }
+                if let Some((_idx, pos)) = gal_out.open_photo_menu {
+                    self.photo_menu = Some(PhotoMenuState::at(pos));
+                }
+                if gal_out.review_selected {
+                    let assets: Vec<AssetId> = self
+                        .selection
+                        .selected_indices()
+                        .into_iter()
+                        .filter_map(|i| self.entries.get(i).map(|e| e.asset))
+                        .collect();
+                    self.request_review_assets(assets);
+                }
+                if let Some(asset) = insp_out.review_asset {
+                    self.request_review_assets(vec![asset]);
+                }
+                if gal_out.open_export
+                    && let Some(cat) = &self.catalog
+                {
+                    self.export_wizard = Some(crate::export_flow::ExportWizard::open(
+                        cat,
+                        &self.entries,
+                        &self.selection,
+                        self.settings.last_export_dir.clone(),
+                    ));
+                }
+
+                // Apply inspector catalog mutations
+                let mut catalog_mutated = false;
+                if let Some(cat) = &self.catalog {
+                    if let Some((asset, label)) = insp_out.accept_action {
+                        match cat.accept(asset, label) {
+                            Ok(()) => catalog_mutated = true,
+                            Err(e) => self.banner_error = Some(format!("No se pudo aceptar: {e}")),
+                        }
                     }
-                    if let Some(notice) = outcome.status_notice {
-                        self.status_notice = Some(notice);
+                    if let Some((asset, label)) = insp_out.reject_action {
+                        match cat.reject(asset, label) {
+                            Ok(()) => catalog_mutated = true,
+                            Err(e) => self.banner_error = Some(format!("No se pudo rechazar: {e}")),
+                        }
                     }
-                    if outcome.catalog_mutated {
-                        self.reload_catalog();
+                    if let Some((asset, kind, name)) = insp_out.add_user_label {
+                        match cat.label(kind, &name).and_then(|id| cat.accept(asset, id)) {
+                            Ok(()) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error = Some(format!("No se pudo añadir etiqueta: {e}"))
+                            }
+                        }
                     }
                 }
-                ActiveTab::Duplicates => {
-                    let outcome = views::duplicates::draw(
-                        ui,
-                        palette,
-                        &self.duplicate_groups,
-                        &self.thumb_pool,
-                        &self.thumb_textures,
-                        &self.thumb_failed,
-                    );
-                    self.last_thumbs_ready = outcome.thumbs_ready;
-                    if let Some(err) = outcome.error {
-                        self.banner_error = Some(err);
+                if let Some(cat) = &mut self.catalog {
+                    if let Some((asset, name)) = insp_out.create_work_from_ocr {
+                        match cat
+                            .create_work(&name)
+                            .and_then(|_| cat.load_work_matcher())
+                            .and_then(|m| cat.apply_work_matches(asset, &m))
+                        {
+                            Ok(_) => {
+                                self.inspector.ocr_checked.clear();
+                                self.inspector.ocr_draft.clear();
+                                self.status_notice = Some(
+                                    "Obra creada. En Obras puedes buscarla en las demás fotos"
+                                        .into(),
+                                );
+                                catalog_mutated = true;
+                            }
+                            Err(e) => {
+                                self.banner_error = Some(format!("No se pudo crear la obra: {e}"))
+                            }
+                        }
+                    }
+                    if let Some((asset, target, alias)) = insp_out.add_alias_from_ocr {
+                        match cat.add_work_alias(target, &alias) {
+                            Ok(true) => {
+                                if let Ok(m) = cat.load_work_matcher() {
+                                    let _ = cat.apply_work_matches(asset, &m);
+                                }
+                                self.inspector.ocr_checked.clear();
+                                self.inspector.ocr_draft.clear();
+                                self.status_notice = Some(
+                                    "Alias añadido. En Obras puedes aplicarlo a las demás fotos"
+                                        .into(),
+                                );
+                                catalog_mutated = true;
+                            }
+                            Ok(false) => {
+                                self.status_notice = Some(
+                                    "Ese alias ya existe o tiene menos de 2 caracteres alfanuméricos"
+                                        .into(),
+                                );
+                            }
+                            Err(e) => {
+                                self.banner_error = Some(format!("No se pudo añadir el alias: {e}"))
+                            }
+                        }
                     }
                 }
-                ActiveTab::Works => {
-                    let other_heavy = if self.works_worker.is_some() {
-                        None
-                    } else {
-                        self.heavy_task_running()
+                if catalog_mutated {
+                    self.reload_catalog();
+                }
+
+                // Viewer overlay
+                if views::gallery::draw_viewer_overlay(
+                    &ctx,
+                    palette,
+                    &mut self.viewer_open,
+                    &self.entries,
+                    &mut self.selection,
+                    self.preview_loaded.as_ref(),
+                ) {
+                    self.sync_inspector(false);
+                }
+
+                // Photo context menu
+                if self.photo_menu.is_some() {
+                    let all_reviewed = self
+                        .selection
+                        .selected_indices()
+                        .into_iter()
+                        .filter_map(|i| self.entries.get(i))
+                        .all(|e| self.reviewed_assets.contains(&e.asset));
+                    let has_ocr_text = !self.inspector.ocr_lines.is_empty();
+                    let has_embedding = self
+                        .inspector
+                        .asset
+                        .and_then(|a| self.catalog.as_ref()?.asset_embedding(a).ok().flatten())
+                        .is_some();
+                    let menu_ctx = PhotoMenuContext {
+                        selected_count: self.selection.len().max(1),
+                        all_reviewed,
+                        has_ocr_text,
+                        has_embedding,
                     };
-                    let outcome = views::works::draw(
-                        ui,
+                    if let Some(action) = views::context_menu::draw_photo_menu(
+                        &ctx,
                         palette,
-                        &mut self.works_view,
-                        &self.works,
-                        self.catalog.as_mut(),
-                        self.works_worker.is_some(),
-                        other_heavy,
-                    );
-                    if let Some(err) = outcome.error {
-                        self.banner_error = Some(err);
-                    }
-                    if let Some(notice) = outcome.status_notice {
-                        self.status_notice = Some(notice);
-                    }
-                    if let Some(work_id) = outcome.deleted {
-                        self.filter.set_chip(work_id, None);
-                    }
-                    if outcome.catalog_mutated {
-                        self.reload_catalog();
-                    }
-                    if outcome.cancel_match
-                        && let Some(worker) = &self.works_worker
-                    {
-                        worker.cancel();
-                    }
-                    if outcome.start_match {
-                        self.start_works_match(&ctx);
-                    }
-                    if let Some(work_id) = outcome.open_in_gallery {
-                        self.filter.clear_filters();
-                        self.filter.set_chip(work_id, Some(ChipMode::Require));
-                        self.active_tab = ActiveTab::Gallery;
-                        self.reload_entries();
-                    }
-                }
-                ActiveTab::Tags => {
-                    let other_heavy = if self.tags_apply_worker.is_some() {
-                        None
-                    } else {
-                        self.heavy_task_running()
-                    };
-                    let outcome = views::tags::draw(
-                        ui,
-                        palette,
-                        &mut self.tags_view,
-                        &self.vision_rules,
-                        self.vision_analyzed_count,
-                        self.catalog.as_mut(),
-                        self.tags_apply_worker.is_some(),
-                        self.vision_rank_worker.is_some(),
-                        other_heavy,
-                    );
-                    if let Some(err) = outcome.error {
-                        self.banner_error = Some(err);
-                    }
-                    if let Some(notice) = outcome.status_notice {
-                        self.status_notice = Some(notice);
-                    }
-                    if outcome.catalog_mutated {
-                        self.reload_catalog();
-                    }
-                    if outcome.cancel_apply
-                        && let Some(worker) = &self.tags_apply_worker
-                    {
-                        worker.cancel();
-                    }
-                    if outcome.start_apply {
-                        self.start_tags_apply(&ctx);
-                    }
-                    if let Some((title, texts, threshold)) = outcome.rank_request {
-                        self.start_vision_rank(&ctx, title, texts, threshold);
+                        &mut self.photo_menu,
+                        menu_ctx,
+                    ) {
+                        self.execute_photo_menu_action(&ctx, action);
                     }
                 }
             }
+            ActiveView::Suggestions => {
+                let outcome = views::review::draw(
+                    ui,
+                    palette,
+                    &mut self.review_flow,
+                    self.catalog.as_ref(),
+                    &self.thumb_pool,
+                    &self.thumb_textures,
+                    &self.thumb_failed,
+                );
+                self.last_thumbs_ready = outcome.thumbs_ready;
+                if let Some(err) = outcome.error {
+                    self.banner_error = Some(err);
+                }
+                if let Some(notice) = outcome.status_notice {
+                    self.status_notice = Some(notice);
+                }
+                if outcome.catalog_mutated {
+                    self.reload_catalog();
+                }
+            }
+            ActiveView::Duplicates => {
+                let outcome = views::duplicates::draw(
+                    ui,
+                    palette,
+                    &self.duplicate_groups,
+                    &self.thumb_pool,
+                    &self.thumb_textures,
+                    &self.thumb_failed,
+                );
+                self.last_thumbs_ready = outcome.thumbs_ready;
+                if let Some(err) = outcome.error {
+                    self.banner_error = Some(err);
+                }
+            }
+            ActiveView::Works => {
+                let other_heavy = if self.works_worker.is_some() {
+                    None
+                } else {
+                    self.foreground_heavy_task()
+                };
+                let outcome = views::works::draw(
+                    ui,
+                    palette,
+                    &mut self.works_view,
+                    &self.works,
+                    self.catalog.as_mut(),
+                    self.works_worker.is_some(),
+                    other_heavy,
+                );
+                if let Some(err) = outcome.error {
+                    self.banner_error = Some(err);
+                }
+                if let Some(notice) = outcome.status_notice {
+                    self.status_notice = Some(notice);
+                }
+                if let Some(work_id) = outcome.deleted {
+                    self.filter.set_chip(work_id, None);
+                }
+                if outcome.catalog_mutated {
+                    self.reload_catalog();
+                }
+                if outcome.cancel_match
+                    && let Some(worker) = &self.works_worker
+                {
+                    worker.cancel();
+                }
+                if outcome.start_match {
+                    self.start_works_match(&ctx);
+                }
+                if let Some(work_id) = outcome.open_in_gallery {
+                    self.filter.clear_filters();
+                    self.filter.set_chip(work_id, Some(ChipMode::Require));
+                    self.active_view = ActiveView::Gallery;
+                    self.reload_entries();
+                }
+            }
+            ActiveView::Tags => {
+                let other_heavy = if self.tags_apply_worker.is_some() {
+                    None
+                } else {
+                    self.foreground_heavy_task()
+                };
+                let outcome = views::tags::draw(
+                    ui,
+                    palette,
+                    &mut self.tags_view,
+                    &self.vision_rules,
+                    self.vision_analyzed_count,
+                    self.catalog.as_mut(),
+                    self.tags_apply_worker.is_some(),
+                    self.vision_rank_worker.is_some(),
+                    other_heavy,
+                );
+                if let Some(err) = outcome.error {
+                    self.banner_error = Some(err);
+                }
+                if let Some(notice) = outcome.status_notice {
+                    self.status_notice = Some(notice);
+                }
+                if outcome.catalog_mutated {
+                    self.reload_catalog();
+                }
+                if outcome.cancel_apply
+                    && let Some(worker) = &self.tags_apply_worker
+                {
+                    worker.cancel();
+                }
+                if outcome.start_apply {
+                    self.start_tags_apply(&ctx);
+                }
+                if let Some((title, texts, threshold)) = outcome.rank_request {
+                    self.start_vision_rank(&ctx, title, texts, threshold);
+                }
+            }
+            ActiveView::Settings => {
+                let outcome = views::settings::draw(
+                    ui,
+                    palette,
+                    &mut self.settings,
+                    &mut self.settings_state,
+                    &self.root_counts,
+                    &self.engine_snapshot,
+                    &self.data_dir,
+                    self.demo_mode,
+                );
+                if let Some(err) = outcome.error {
+                    self.banner_error = Some(err);
+                }
+                if outcome.add_folder {
+                    self.pick_and_add_library();
+                }
+                if let Some(root) = outcome.remove_folder {
+                    self.remove_library(&root);
+                }
+                if outcome.scan_changes_now {
+                    if let Some(task) = self.foreground_heavy_task() {
+                        self.status_notice = Some(format!("Espera a que termine {task}"));
+                    } else if let Some(engine) = &self.review_engine {
+                        engine.trigger_index();
+                    }
+                }
+                if outcome.theme_changed {
+                    theme::apply_theme_preference(&ctx, self.settings.theme);
+                }
+                if outcome.settings_changed {
+                    self.save_settings_and_sync_engine();
+                    self.reload_catalog();
+                }
+            }
         }
-        crate::views::export::draw_window(
+
+        // Export wizard modal (when opened from selection bar or photo context menu)
+        views::export::draw_window(
             &ctx,
             palette,
             &mut self.export_wizard,
@@ -2875,108 +1604,7 @@ impl eframe::App for PhotosortApp {
             &mut self.settings,
             &mut self.banner_error,
         );
-        let ocr_other_heavy = if self.ocr_worker.is_some() {
-            None
-        } else {
-            self.heavy_task_running()
-        };
-        let ocr_outcome = crate::views::ocr::draw_window(
-            &ctx,
-            palette,
-            &mut self.ocr_dialog,
-            self.ocr_worker.is_some(),
-            ocr_other_heavy,
-            &self.data_dir,
-            &mut self.settings,
-            &mut self.banner_error,
-        );
-        if ocr_outcome.cancel_requested
-            && let Some(worker) = &self.ocr_worker
-        {
-            worker.cancel();
-        }
-        if let Some((scope, models_dir, device)) = ocr_outcome.start_request {
-            self.start_ocr(&ctx, scope, models_dir, device);
-        }
-
-        let vision_other_heavy = if self.vision_worker.is_some() {
-            None
-        } else {
-            self.heavy_task_running()
-        };
-        let vision_outcome = crate::views::vision::draw_window(
-            &ctx,
-            palette,
-            &mut self.vision_dialog,
-            self.vision_worker.is_some(),
-            vision_other_heavy,
-            &self.data_dir,
-            &mut self.settings,
-            &mut self.banner_error,
-        );
-        if vision_outcome.cancel_requested
-            && let Some(worker) = &self.vision_worker
-        {
-            worker.cancel();
-        }
-        if let Some((scope, models_dir, device)) = vision_outcome.start_request {
-            self.start_vision(&ctx, scope, models_dir, device);
-        }
 
         self.step_screenshot(&ctx);
-    }
-}
-
-fn fit_rect(bounds: egui::Rect, content: Vec2) -> egui::Rect {
-    if content.x <= 0.0 || content.y <= 0.0 || bounds.width() <= 0.0 || bounds.height() <= 0.0 {
-        return bounds;
-    }
-    let scale = (bounds.width() / content.x)
-        .min(bounds.height() / content.y)
-        .min(1.0);
-    let size = content * scale;
-    egui::Rect::from_center_size(bounds.center(), size)
-}
-
-fn meta_row(ui: &mut egui::Ui, palette: &Palette, key: &str, value: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(format!("{key}:")).color(palette.text_secondary.color32()));
-        ui.label(value);
-    });
-}
-
-fn sort_label(sort: Sort) -> &'static str {
-    match sort {
-        Sort::PathAsc => "Ruta (A-Z)",
-        Sort::PathDesc => "Ruta (Z-A)",
-        Sort::SizeAsc => "Tamaño (menor)",
-        Sort::SizeDesc => "Tamaño (mayor)",
-        Sort::ModifiedAsc => "Fecha (antigua)",
-        Sort::ModifiedDesc => "Fecha (reciente)",
-    }
-}
-
-fn theme_label(theme: Theme) -> &'static str {
-    match theme {
-        Theme::Dark => "Oscuro",
-        Theme::Light => "Claro",
-        Theme::System => "Sistema",
-    }
-}
-
-fn kind_label(kind: LabelKind) -> &'static str {
-    match kind {
-        LabelKind::Category => "Categoría",
-        LabelKind::Tag => "Etiqueta",
-        LabelKind::Entity => "Entidad",
-    }
-}
-
-fn source_label(source: catalog::Source) -> &'static str {
-    match source {
-        catalog::Source::Ai => "IA",
-        catalog::Source::Ocr => "OCR",
-        catalog::Source::Rules => "Reglas",
-        catalog::Source::User => "Usuario",
     }
 }

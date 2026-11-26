@@ -26,13 +26,14 @@ const MAX_WINDOW_HEIGHT: u32 = 4320;
 pub enum CaptureView {
     #[default]
     Gallery,
-    Review,
+    Settings,
+    Welcome,
+    Suggestions,
     Duplicates,
     Works,
     Tags,
     Export,
-    Ocr,
-    Vision,
+    Menu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +71,7 @@ pub fn usage_text() -> &'static str {
     "Uso: photosort [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
      [--screenshot <salida.png>] [--screenshot-delay-frames <N>] \
      [--window-size <Ancho>x<Alto>] [--theme dark|light] \
-     [--view gallery|review|duplicates|works|tags|export|ocr|vision]"
+     [--view gallery|settings|welcome|suggestions|duplicates|works|tags|export|menu]"
 }
 
 pub fn parse_window_size(raw: &str) -> Result<[u32; 2], String> {
@@ -114,8 +115,12 @@ pub fn parse_theme(raw: &str) -> Result<Theme, String> {
 pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
     if raw.eq_ignore_ascii_case("gallery") {
         Ok(CaptureView::Gallery)
-    } else if raw.eq_ignore_ascii_case("review") {
-        Ok(CaptureView::Review)
+    } else if raw.eq_ignore_ascii_case("settings") {
+        Ok(CaptureView::Settings)
+    } else if raw.eq_ignore_ascii_case("welcome") {
+        Ok(CaptureView::Welcome)
+    } else if raw.eq_ignore_ascii_case("suggestions") || raw.eq_ignore_ascii_case("review") {
+        Ok(CaptureView::Suggestions)
     } else if raw.eq_ignore_ascii_case("duplicates") {
         Ok(CaptureView::Duplicates)
     } else if raw.eq_ignore_ascii_case("works") {
@@ -124,13 +129,11 @@ pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
         Ok(CaptureView::Tags)
     } else if raw.eq_ignore_ascii_case("export") {
         Ok(CaptureView::Export)
-    } else if raw.eq_ignore_ascii_case("ocr") {
-        Ok(CaptureView::Ocr)
-    } else if raw.eq_ignore_ascii_case("vision") {
-        Ok(CaptureView::Vision)
+    } else if raw.eq_ignore_ascii_case("menu") {
+        Ok(CaptureView::Menu)
     } else {
         Err(format!(
-            "Vista inválida para --view: '{raw}' (usa 'gallery', 'review', 'duplicates', 'works', 'tags', 'export', 'ocr' o 'vision')"
+            "Vista inválida para --view: '{raw}' (usa 'gallery', 'settings', 'welcome', 'suggestions', 'duplicates', 'works', 'tags', 'export' o 'menu')"
         ))
     }
 }
@@ -233,8 +236,7 @@ pub struct FrameSignals {
     pub export_open: bool,
     pub export_ready: bool,
     pub export_failed: bool,
-    pub ocr_open: bool,
-    pub vision_open: bool,
+    pub menu_open: bool,
     pub image_received: bool,
 }
 
@@ -242,8 +244,7 @@ pub struct FrameSignals {
 pub enum CaptureAction {
     SelectFirst,
     OpenExport,
-    OpenOcr,
-    OpenVision,
+    OpenMenu,
     WaitForWorkers,
     WaitFrame,
     RequestScreenshot,
@@ -257,8 +258,7 @@ pub enum CaptureStep {
     None,
     SelectFirst,
     OpenExport,
-    OpenOcr,
-    OpenVision,
+    OpenMenu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,13 +321,9 @@ impl CaptureState {
                     self.setup_triggered = true;
                     return CaptureAction::OpenExport;
                 }
-                CaptureView::Ocr if !signals.ocr_open => {
+                CaptureView::Menu if !signals.menu_open => {
                     self.setup_triggered = true;
-                    return CaptureAction::OpenOcr;
-                }
-                CaptureView::Vision if !signals.vision_open => {
-                    self.setup_triggered = true;
-                    return CaptureAction::OpenVision;
+                    return CaptureAction::OpenMenu;
                 }
                 _ => {}
             }
@@ -345,16 +341,17 @@ impl CaptureState {
                     CaptureView::Gallery => {
                         !signals.has_entries || (signals.thumbs_ready && signals.preview_ready)
                     }
-                    CaptureView::Review | CaptureView::Duplicates => signals.thumbs_ready,
-                    CaptureView::Works | CaptureView::Tags => true,
+                    CaptureView::Menu => {
+                        !signals.has_entries
+                            || (signals.thumbs_ready && signals.preview_ready && signals.menu_open)
+                    }
+                    CaptureView::Suggestions | CaptureView::Duplicates => signals.thumbs_ready,
+                    CaptureView::Settings
+                    | CaptureView::Welcome
+                    | CaptureView::Works
+                    | CaptureView::Tags => true,
                     CaptureView::Export => {
                         !signals.has_entries || (signals.thumbs_ready && signals.export_ready)
-                    }
-                    CaptureView::Ocr => {
-                        !signals.has_entries || (signals.thumbs_ready && signals.ocr_open)
-                    }
-                    CaptureView::Vision => {
-                        !signals.has_entries || (signals.thumbs_ready && signals.vision_open)
                     }
                 };
                 if ready {
@@ -376,30 +373,32 @@ impl CaptureState {
                                 "Tiempo de espera agotado esperando la carga de miniaturas y vista previa."
                                     .into()
                             }
-                            CaptureView::Review => {
-                                "Tiempo de espera agotado esperando las miniaturas de la pestaña Revisión."
+                            CaptureView::Menu => {
+                                "Tiempo de espera agotado esperando el menú contextual de la foto."
+                                    .into()
+                            }
+                            CaptureView::Suggestions => {
+                                "Tiempo de espera agotado esperando las miniaturas de Sugerencias."
                                     .into()
                             }
                             CaptureView::Duplicates => {
-                                "Tiempo de espera agotado esperando las miniaturas de la pestaña Duplicados."
+                                "Tiempo de espera agotado esperando las miniaturas de Duplicados."
                                     .into()
                             }
+                            CaptureView::Settings => {
+                                "Tiempo de espera agotado esperando Configuración.".into()
+                            }
+                            CaptureView::Welcome => {
+                                "Tiempo de espera agotado esperando la pantalla inicial.".into()
+                            }
                             CaptureView::Works => {
-                                "Tiempo de espera agotado esperando la pestaña Obras.".into()
+                                "Tiempo de espera agotado esperando Obras.".into()
                             }
                             CaptureView::Tags => {
-                                "Tiempo de espera agotado esperando la pestaña Etiquetas.".into()
+                                "Tiempo de espera agotado esperando Etiquetas.".into()
                             }
                             CaptureView::Export => {
                                 "Tiempo de espera agotado esperando la vista previa del asistente de exportación."
-                                    .into()
-                            }
-                            CaptureView::Ocr => {
-                                "Tiempo de espera agotado esperando la ventana de lectura OCR."
-                                    .into()
-                            }
-                            CaptureView::Vision => {
-                                "Tiempo de espera agotado esperando la ventana de reconocimiento de imágenes."
                                     .into()
                             }
                         })
@@ -588,13 +587,9 @@ impl ScreenshotController {
                 ctx.request_repaint();
                 CaptureStep::OpenExport
             }
-            CaptureAction::OpenOcr => {
+            CaptureAction::OpenMenu => {
                 ctx.request_repaint();
-                CaptureStep::OpenOcr
-            }
-            CaptureAction::OpenVision => {
-                ctx.request_repaint();
-                CaptureStep::OpenVision
+                CaptureStep::OpenMenu
             }
             CaptureAction::WaitForWorkers => {
                 ctx.request_repaint_after(Duration::from_millis(25));

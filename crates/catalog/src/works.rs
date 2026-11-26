@@ -804,6 +804,56 @@ impl Catalog {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Lists all works (`kind = 'entity'`) with their alias count and non-rejected present image count
+    /// restricted to `roots`.
+    pub fn list_works_in_roots(
+        &self,
+        roots: &[std::path::PathBuf],
+    ) -> Result<Vec<WorkSummary>, CatalogError> {
+        let mut stmt = if roots.is_empty() {
+            self.conn.prepare(
+                "SELECT lb.id, lb.name,
+                        (SELECT COUNT(*) FROM work_alias wa WHERE wa.label_id = lb.id) AS aliases,
+                        0 AS images
+                 FROM label lb
+                 WHERE lb.kind = 'entity'
+                 ORDER BY lb.name COLLATE NOCASE",
+            )?
+        } else {
+            let marks = vec!["?"; roots.len()].join(",");
+            let sql = format!(
+                "SELECT lb.id, lb.name,
+                        (SELECT COUNT(*) FROM work_alias wa WHERE wa.label_id = lb.id) AS aliases,
+                        (SELECT COUNT(*) FROM asset_label al
+                         WHERE al.label_id = lb.id
+                           AND al.status <> 'rejected'
+                           AND EXISTS (SELECT 1 FROM location l
+                                       WHERE l.asset_id = al.asset_id
+                                         AND l.missing = 0
+                                         AND l.root IN ({marks}))) AS images
+                 FROM label lb
+                 WHERE lb.kind = 'entity'
+                 ORDER BY lb.name COLLATE NOCASE"
+            );
+            self.conn.prepare(&sql)?
+        };
+        let args: Vec<Box<dyn rusqlite::ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+            let aliases: i64 = r.get(2)?;
+            let images: i64 = r.get(3)?;
+            Ok(WorkSummary {
+                label: LabelId(r.get(0)?),
+                name: r.get(1)?,
+                aliases: aliases.max(0) as usize,
+                images: images.max(0) as usize,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Lists all works (`kind = 'entity'`) with their alias count and non-rejected present image count.
     pub fn list_works(&self) -> Result<Vec<WorkSummary>, CatalogError> {
         let mut stmt = self.conn.prepare(

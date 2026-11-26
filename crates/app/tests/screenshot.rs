@@ -89,9 +89,15 @@ fn parse_args_rejects_invalid_values_and_unknown_flags() {
     assert_eq!(parse_theme("Light").unwrap(), Theme::Light);
 
     assert_eq!(parse_view("gallery").unwrap(), CaptureView::Gallery);
-    assert_eq!(parse_view("REVIEW").unwrap(), CaptureView::Review);
+    assert_eq!(parse_view("settings").unwrap(), CaptureView::Settings);
+    assert_eq!(parse_view("welcome").unwrap(), CaptureView::Welcome);
+    assert_eq!(parse_view("suggestions").unwrap(), CaptureView::Suggestions);
+    assert_eq!(parse_view("REVIEW").unwrap(), CaptureView::Suggestions);
     assert_eq!(parse_view("Duplicates").unwrap(), CaptureView::Duplicates);
+    assert_eq!(parse_view("works").unwrap(), CaptureView::Works);
+    assert_eq!(parse_view("tags").unwrap(), CaptureView::Tags);
     assert_eq!(parse_view("export").unwrap(), CaptureView::Export);
+    assert_eq!(parse_view("menu").unwrap(), CaptureView::Menu);
     let err = parse_view("mapa").unwrap_err();
     assert!(err.contains("Vista") && err.contains("mapa"), "{err}");
 }
@@ -190,7 +196,7 @@ fn capture_state_selects_first_waits_for_readiness_delays_then_captures() {
 
 #[test]
 fn capture_state_review_and_duplicates_wait_for_thumbs_without_selecting_first() {
-    for view in [CaptureView::Review, CaptureView::Duplicates] {
+    for view in [CaptureView::Suggestions, CaptureView::Duplicates] {
         let mut state = CaptureState::for_view(view, 1, 10, 5);
 
         // Does not emit SelectFirst or OpenExport; waits while thumbs are loading.

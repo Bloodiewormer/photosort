@@ -692,6 +692,80 @@ impl Catalog {
         Ok(done != 0)
     }
 
+    /// Count of present assets under `roots` that have a stored vision embedding.
+    pub fn count_assets_with_vision_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<usize, CatalogError> {
+        if roots.is_empty() {
+            return Ok(0);
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(*)
+             FROM asset_embedding e
+             WHERE EXISTS (SELECT 1 FROM location l
+                           WHERE l.asset_id = e.asset_id
+                             AND l.missing = 0
+                             AND l.root IN ({marks}))"
+        );
+        let args: Vec<Box<dyn rusqlite::ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let count: i64 =
+            self.conn
+                .query_row(&sql, rusqlite::params_from_iter(args.iter()), |r| r.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Lists all configured vision rules with per-rule counts restricted to present assets under `roots`.
+    pub fn list_vision_rules_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<VisionRule>, CatalogError> {
+        if roots.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT vr.id, vr.label_id, lb.kind, lb.name, vr.mode, vr.threshold, vr.enabled,
+                        vr.positives, vr.negatives, vr.builtin_key, 0, 0, 0
+                 FROM vision_rule vr
+                 JOIN label lb ON lb.id = vr.label_id
+                 ORDER BY CASE vr.mode WHEN 'type' THEN 0 ELSE 1 END, vr.id ASC",
+            )?;
+            let rows = stmt.query_map([], map_vision_rule_row)?;
+            return Ok(rows.collect::<Result<_, _>>()?);
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT vr.id, vr.label_id, lb.kind, lb.name, vr.mode, vr.threshold, vr.enabled,
+                    vr.positives, vr.negatives, vr.builtin_key,
+                    (SELECT COUNT(*) FROM asset_label al
+                     WHERE al.label_id = vr.label_id AND al.source = 'ai' AND al.status = 'accepted'
+                       AND EXISTS (SELECT 1 FROM location l
+                                   WHERE l.asset_id = al.asset_id AND l.missing = 0 AND l.root IN ({marks}))) AS acc,
+                    (SELECT COUNT(*) FROM asset_label al
+                     WHERE al.label_id = vr.label_id AND al.source = 'ai' AND al.status = 'rejected'
+                       AND EXISTS (SELECT 1 FROM location l
+                                   WHERE l.asset_id = al.asset_id AND l.missing = 0 AND l.root IN ({marks}))) AS rej,
+                    (SELECT COUNT(*) FROM asset_label al
+                     WHERE al.label_id = vr.label_id AND al.source = 'ai' AND al.status = 'suggested'
+                       AND EXISTS (SELECT 1 FROM location l
+                                   WHERE l.asset_id = al.asset_id AND l.missing = 0 AND l.root IN ({marks}))) AS sug
+             FROM vision_rule vr
+             JOIN label lb ON lb.id = vr.label_id
+             ORDER BY CASE vr.mode WHEN 'type' THEN 0 ELSE 1 END, vr.id ASC"
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(roots.len() * 3);
+        for _ in 0..3 {
+            for r in roots {
+                args.push(Box::new(r.to_string_lossy().into_owned()));
+            }
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), map_vision_rule_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Count of present assets that have a stored vision embedding.
     pub fn count_assets_with_vision(&self) -> Result<usize, CatalogError> {
         let count: i64 = self.conn.query_row(
@@ -1128,6 +1202,154 @@ impl Catalog {
         }
         Ok(out)
     }
+
+    /// Like [`rank_by_embeddings`](Self::rank_by_embeddings), restricted to assets under `roots`.
+    pub fn rank_by_embeddings_in_roots(
+        &self,
+        model: &str,
+        queries: &[&[f32]],
+        roots: &[PathBuf],
+        limit: usize,
+    ) -> Result<Vec<RankedAsset>, CatalogError> {
+        if queries.is_empty() || limit == 0 || roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut q_arrays = Vec::with_capacity(queries.len());
+        for q in queries {
+            if q.len() != EMBEDDING_DIM {
+                return Err(CatalogError::Db(rusqlite::Error::InvalidParameterName(
+                    format!("expected {EMBEDDING_DIM}-dim query, got {}", q.len()),
+                )));
+            }
+            let mut arr = [0.0f32; EMBEDDING_DIM];
+            arr.copy_from_slice(q);
+            q_arrays.push(arr);
+        }
+
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT e.asset_id, e.vector
+             FROM asset_embedding e
+             WHERE e.model = ?
+               AND EXISTS (SELECT 1 FROM location l
+                           WHERE l.asset_id = e.asset_id
+                             AND l.missing = 0
+                             AND l.root IN ({marks}))"
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(roots.len() + 1);
+        args.push(Box::new(model.to_string()));
+        for r in roots {
+            args.push(Box::new(r.to_string_lossy().into_owned()));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let mut heap: BinaryHeap<HeapItem> = BinaryHeap::with_capacity(limit.min(4096) + 1);
+        let mut rows = stmt.query(rusqlite::params_from_iter(args.iter()))?;
+        while let Some(row) = rows.next()? {
+            let asset_id: i64 = row.get(0)?;
+            let blob = row.get_ref(1)?.as_blob().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Blob,
+                    Box::new(e),
+                )
+            })?;
+            if blob.len() != EMBEDDING_BYTES {
+                continue;
+            }
+            let score = q_arrays
+                .iter()
+                .map(|q| dot_blob_le(blob, q))
+                .fold(f32::NEG_INFINITY, f32::max);
+            let item = HeapItem { asset_id, score };
+            if heap.len() < limit {
+                heap.push(item);
+            } else if let Some(&worst) = heap.peek()
+                && item < worst
+            {
+                heap.pop();
+                heap.push(item);
+            }
+        }
+        drop(rows);
+        drop(stmt);
+
+        let mut top: Vec<HeapItem> = heap.into_vec();
+        top.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.asset_id.cmp(&b.asset_id))
+        });
+
+        if top.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries_by_id: HashMap<i64, Entry> = HashMap::with_capacity(top.len());
+        let entry_sql = format!(
+            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+             FROM location l JOIN asset a ON a.id = l.asset_id
+             WHERE l.asset_id = ? AND l.missing = 0 AND l.root IN ({marks})
+             ORDER BY l.path ASC
+             LIMIT 1"
+        );
+        let mut entry_stmt = self.conn.prepare(&entry_sql)?;
+        for item in &top {
+            let mut e_args: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(roots.len() + 1);
+            e_args.push(Box::new(item.asset_id));
+            for r in roots {
+                e_args.push(Box::new(r.to_string_lossy().into_owned()));
+            }
+            if let Some(entry) = entry_stmt
+                .query_row(rusqlite::params_from_iter(e_args.iter()), |r| {
+                    let size: i64 = r.get(3)?;
+                    Ok(Entry {
+                        asset: AssetId(r.get(0)?),
+                        path: PathBuf::from(r.get::<_, String>(1)?),
+                        sha256: r.get(2)?,
+                        size: size.max(0) as u64,
+                        modified_ns: r.get(4)?,
+                    })
+                })
+                .optional()?
+            {
+                entries_by_id.insert(item.asset_id, entry);
+            }
+        }
+
+        let mut out = Vec::with_capacity(top.len());
+        for item in top {
+            if let Some(entry) = entries_by_id.remove(&item.asset_id) {
+                out.push(RankedAsset {
+                    entry,
+                    score: item.score,
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn map_vision_rule_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VisionRule> {
+    let kind_s: String = r.get(2)?;
+    let mode_s: String = r.get(4)?;
+    let pos_s: String = r.get(7)?;
+    let neg_s: String = r.get(8)?;
+    Ok(VisionRule {
+        id: RuleId(r.get(0)?),
+        label: LabelId(r.get(1)?),
+        kind: LabelKind::parse(&kind_s).ok_or_else(|| unexpected(2, &kind_s))?,
+        name: r.get(3)?,
+        mode: RuleMode::parse(&mode_s).ok_or_else(|| unexpected(4, &mode_s))?,
+        threshold: r.get::<_, f64>(5)? as f32,
+        enabled: r.get::<_, i64>(6)? != 0,
+        positives: split_descriptions(&pos_s),
+        negatives: split_descriptions(&neg_s),
+        builtin_key: r.get(9)?,
+        accepted_ai: r.get::<_, i64>(10)?.max(0) as usize,
+        rejected_ai: r.get::<_, i64>(11)?.max(0) as usize,
+        suggested_ai: r.get::<_, i64>(12)?.max(0) as usize,
+    })
 }
 
 fn apply_suggestions_in_tx(
