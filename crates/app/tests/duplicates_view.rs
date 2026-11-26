@@ -104,7 +104,7 @@ fn formatting_and_explorer_select_args_produce_expected_spanish_text() {
     let g = make_group(1, "aaa", 1024, &["x/1.jpg", "x/2.jpg", "x/3.jpg"]);
     assert_eq!(
         format_group_heading(&g),
-        "3 copias · 1.0 KB c/u · 2.0 KB duplicados"
+        "3 copias · 1.0 KB cada una · 2.0 KB duplicados"
     );
 
     let p = Path::new(r"C:\fotos de prueba\imagen 01.jpg");

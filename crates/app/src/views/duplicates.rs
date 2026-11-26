@@ -1,4 +1,4 @@
-use crate::model::{count_phrase, format_bytes, format_timestamp_utc};
+use crate::model::{count_phrase, format_bytes, format_timestamp_utc, truncate_middle};
 use crate::theme::{self, Palette};
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::DuplicateGroup;
@@ -15,6 +15,7 @@ use std::process::Command;
 
 const DUP_CARD_WIDTH: f32 = 260.0;
 const DUP_THUMB_HEIGHT: f32 = 132.0;
+const DUP_PATH_MAX_CHARS: usize = 38;
 
 pub const READ_ONLY_NOTE: &str = "Nota: photosort solo muestra duplicados para revisión. Este programa nunca borra, mueve ni renombra ningún archivo.";
 
@@ -76,7 +77,7 @@ pub fn format_summary_line(summary: &DuplicatesSummary) -> String {
 
 pub fn format_group_heading(group: &DuplicateGroup) -> String {
     format!(
-        "{} · {} c/u · {} duplicados",
+        "{} · {} cada una · {} duplicados",
         count_phrase(group.entries.len(), "copia", "copias"),
         format_bytes(group.size),
         format_bytes(group_wasted_bytes(group)),
@@ -201,81 +202,103 @@ pub fn draw(
                                 });
                                 ui.add_space(theme::SPACE_SM);
 
-                                ui.horizontal_wrapped(|ui| {
-                                    for entry in &group.entries {
-                                        visible_hashes.insert(entry.sha256.clone());
-                                        if !thumb_textures.contains_key(&entry.sha256)
-                                            && !thumb_failed.contains(&entry.sha256)
-                                        {
-                                            to_request.push(ThumbRequest {
-                                                source: entry.path.clone(),
-                                                sha256: entry.sha256.clone(),
-                                            });
-                                        }
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::TOP)
+                                        .with_main_wrap(true),
+                                    |ui| {
+                                        for entry in &group.entries {
+                                            visible_hashes.insert(entry.sha256.clone());
+                                            if !thumb_textures.contains_key(&entry.sha256)
+                                                && !thumb_failed.contains(&entry.sha256)
+                                            {
+                                                to_request.push(ThumbRequest {
+                                                    source: entry.path.clone(),
+                                                    sha256: entry.sha256.clone(),
+                                                });
+                                            }
 
-                                        Frame::new()
-                                            .fill(palette.bg_card.color32())
-                                            .stroke(Stroke::new(1.0, palette.border.color32()))
-                                            .corner_radius(CornerRadius::same(theme::RADIUS_SM))
-                                            .inner_margin(Margin::same(theme::SPACE_SM as i8))
-                                            .show(ui, |ui| {
-                                                ui.set_width(DUP_CARD_WIDTH);
-                                                let (thumb_rect, _) = ui.allocate_exact_size(
-                                                    Vec2::new(DUP_CARD_WIDTH, DUP_THUMB_HEIGHT),
-                                                    Sense::hover(),
-                                                );
-                                                draw_thumb_box(
-                                                    ui,
-                                                    palette,
-                                                    thumb_rect,
-                                                    thumb_textures.get(&entry.sha256),
-                                                    thumb_failed.contains(&entry.sha256),
-                                                );
-                                                ui.add_space(theme::SPACE_XS);
+                                            Frame::new()
+                                                .fill(palette.bg_card.color32())
+                                                .stroke(Stroke::new(1.0, palette.border.color32()))
+                                                .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                                .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                                .show(ui, |ui| {
+                                                    ui.set_width(DUP_CARD_WIDTH);
+                                                    let (thumb_rect, _) = ui.allocate_exact_size(
+                                                        Vec2::new(DUP_CARD_WIDTH, DUP_THUMB_HEIGHT),
+                                                        Sense::hover(),
+                                                    );
+                                                    draw_thumb_box(
+                                                        ui,
+                                                        palette,
+                                                        thumb_rect,
+                                                        thumb_textures.get(&entry.sha256),
+                                                        thumb_failed.contains(&entry.sha256),
+                                                    );
+                                                    ui.add_space(theme::SPACE_XS);
 
-                                                let filename = entry
-                                                    .path
-                                                    .file_name()
-                                                    .map(|n| n.to_string_lossy().into_owned())
-                                                    .unwrap_or_else(|| {
-                                                        entry.path.display().to_string()
-                                                    });
-                                                ui.label(
-                                                    RichText::new(filename)
+                                                    let filename = entry
+                                                        .path
+                                                        .file_name()
+                                                        .map(|n| n.to_string_lossy().into_owned())
+                                                        .unwrap_or_else(|| {
+                                                            entry.path.display().to_string()
+                                                        });
+                                                    let full_path =
+                                                        entry.path.display().to_string();
+                                                    ui.label(
+                                                        RichText::new(truncate_middle(
+                                                            &filename,
+                                                            DUP_PATH_MAX_CHARS,
+                                                        ))
                                                         .size(theme::FONT_BODY)
                                                         .strong(),
-                                                );
-                                                ui.label(
-                                                    RichText::new(entry.path.display().to_string())
+                                                    )
+                                                    .on_hover_text(&full_path);
+                                                    let folder = entry
+                                                        .path
+                                                        .parent()
+                                                        .map(|p| p.display().to_string())
+                                                        .unwrap_or_default();
+                                                    ui.label(
+                                                        RichText::new(truncate_middle(
+                                                            &folder,
+                                                            DUP_PATH_MAX_CHARS,
+                                                        ))
                                                         .size(theme::FONT_SMALL)
                                                         .color(palette.text_secondary.color32()),
-                                                );
+                                                    )
+                                                    .on_hover_text(&full_path);
 
-                                                let date_str = entry
-                                                    .modified_ns
-                                                    .map(format_timestamp_utc)
-                                                    .unwrap_or_else(|| "Desconocida".into());
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{} · {}",
-                                                        format_bytes(entry.size),
-                                                        date_str
-                                                    ))
-                                                    .size(theme::FONT_SMALL)
-                                                    .color(palette.text_secondary.color32()),
-                                                );
-                                                ui.add_space(theme::SPACE_XS);
+                                                    let date_str = entry
+                                                        .modified_ns
+                                                        .map(format_timestamp_utc)
+                                                        .unwrap_or_else(|| "Desconocida".into());
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{} · {}",
+                                                            format_bytes(entry.size),
+                                                            date_str
+                                                        ))
+                                                        .size(theme::FONT_SMALL)
+                                                        .color(palette.text_secondary.color32()),
+                                                    );
+                                                    ui.add_space(theme::SPACE_XS);
 
-                                                if ui.button("Mostrar en el Explorador").clicked()
-                                                    && let Err(e) = reveal_in_explorer(&entry.path)
-                                                {
-                                                    open_error = Some(format!(
-                                                        "No se pudo abrir el Explorador: {e}"
-                                                    ));
-                                                }
-                                            });
-                                    }
-                                });
+                                                    if ui
+                                                        .button("Mostrar en el Explorador")
+                                                        .clicked()
+                                                        && let Err(e) =
+                                                            reveal_in_explorer(&entry.path)
+                                                    {
+                                                        open_error = Some(format!(
+                                                            "No se pudo abrir el Explorador: {e}"
+                                                        ));
+                                                    }
+                                                });
+                                        }
+                                    },
+                                );
                             });
                         ui.add_space(theme::SPACE_MD);
                     }

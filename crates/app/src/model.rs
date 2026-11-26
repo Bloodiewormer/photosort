@@ -439,3 +439,22 @@ pub fn library_display_name(root: &Path) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.display().to_string())
 }
+
+/// Shortens `text` to at most `max_chars` characters by replacing the middle with `…`,
+/// so both the start and the end stay visible. Counts characters, not bytes.
+pub fn truncate_middle(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let keep = max_chars - 1;
+    let tail = keep / 2;
+    let head = keep - tail;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}

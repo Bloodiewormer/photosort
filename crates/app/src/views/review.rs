@@ -9,7 +9,7 @@ use eframe::egui::{
 };
 use std::collections::{HashMap, HashSet};
 
-const REVIEW_THUMB_SIZE: Vec2 = Vec2::new(112.0, 84.0);
+const REVIEW_THUMB_SIZE: Vec2 = Vec2::new(140.0, 104.0);
 const GROUPS_PANEL_WIDTH: f32 = 264.0;
 
 #[derive(Debug, Default)]

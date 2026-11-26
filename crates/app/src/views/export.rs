@@ -13,6 +13,8 @@ use export::Preview;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+const EXPORT_WINDOW_WIDTH: f32 = 520.0;
+
 /// Draws the export wizard window when open, polling background preview/copy workers each frame.
 pub fn draw_window(
     ctx: &egui::Context,
@@ -39,9 +41,11 @@ pub fn draw_window(
     let mut open_flag = true;
     let mut window = egui::Window::new("Exportar copias")
         .collapsible(false)
-        .resizable(true)
-        .min_width(480.0)
-        .default_width(540.0);
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .min_width(EXPORT_WINDOW_WIDTH)
+        .max_width(EXPORT_WINDOW_WIDTH)
+        .default_width(EXPORT_WINDOW_WIDTH);
     if !wizard.is_running() {
         window = window.open(&mut open_flag);
     }
@@ -197,10 +201,10 @@ fn draw_choose_step(
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let can_preview =
                 wizard.item_count() > 0 && !wizard.dest_input().as_os_str().is_empty();
-            if ui
+            let clicked = ui
                 .add_enabled(can_preview, egui::Button::new("Calcular vista previa"))
-                .clicked()
-            {
+                .clicked();
+            if clicked || (can_preview && enter_pressed(ctx)) {
                 let roots = settings.valid_roots();
                 let notify = repaint_notify(ctx);
                 if let Ok(dest) = wizard.request_preview(&roots, Some(notify))
@@ -335,10 +339,10 @@ fn draw_preview_ready(
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let can_export = wizard.can_start_export();
-            if ui
+            let clicked = ui
                 .add_enabled(can_export, egui::Button::new("Exportar"))
-                .clicked()
-            {
+                .clicked();
+            if clicked || (can_export && enter_pressed(ctx)) {
                 let notify = repaint_notify(ctx);
                 let _ = wizard.start_export(Some(notify));
             }
@@ -534,6 +538,10 @@ fn info_row(ui: &mut egui::Ui, palette: &Palette, label: &str, value: &str) {
             ui.label(RichText::new(value).strong());
         });
     });
+}
+
+fn enter_pressed(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
 }
 
 fn repaint_notify(ctx: &egui::Context) -> Notify {
