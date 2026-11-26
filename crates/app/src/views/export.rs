@@ -2,7 +2,7 @@ use crate::export_flow::{
     ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, layout_description,
     layout_label, open_in_explorer, remember_export_dir,
 };
-use crate::model::format_bytes;
+use crate::model::{count_phrase, format_bytes, plural_word};
 use crate::settings::Settings;
 use crate::theme::{self, Palette};
 use crate::worker::Notify;
@@ -12,6 +12,8 @@ use eframe::egui::{
 use export::Preview;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const EXPORT_WINDOW_WIDTH: f32 = 520.0;
 
 /// Draws the export wizard window when open, polling background preview/copy workers each frame.
 pub fn draw_window(
@@ -39,9 +41,11 @@ pub fn draw_window(
     let mut open_flag = true;
     let mut window = egui::Window::new("Exportar copias")
         .collapsible(false)
-        .resizable(true)
-        .min_width(480.0)
-        .default_width(540.0);
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .min_width(EXPORT_WINDOW_WIDTH)
+        .max_width(EXPORT_WINDOW_WIDTH)
+        .default_width(EXPORT_WINDOW_WIDTH);
     if !wizard.is_running() {
         window = window.open(&mut open_flag);
     }
@@ -95,11 +99,14 @@ fn draw_header(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
         "de los resultados filtrados actuales"
     };
     let count = wizard.item_count();
-    let plural = if count == 1 { "imagen" } else { "imágenes" };
+    let verb = plural_word(count, "exportará", "exportarán");
     ui.label(
-        RichText::new(format!("Se exportarán {count} {plural} ({origin})."))
-            .size(theme::FONT_BODY)
-            .strong(),
+        RichText::new(format!(
+            "Se {verb} {} ({origin}).",
+            count_phrase(count, "imagen", "imágenes")
+        ))
+        .size(theme::FONT_BODY)
+        .strong(),
     );
     ui.label(
         RichText::new(
@@ -131,7 +138,10 @@ fn draw_choose_step(
         let edit = ui.add(
             egui::TextEdit::singleline(&mut path_text)
                 .desired_width(edit_w)
-                .hint_text("Elige una carpeta fuera de tus bibliotecas…"),
+                .hint_text(theme::hint_text(
+                    palette,
+                    "Elige una carpeta fuera de tus bibliotecas…",
+                )),
         );
         if edit.changed() {
             wizard.set_dest(PathBuf::from(path_text.trim()));
@@ -191,10 +201,10 @@ fn draw_choose_step(
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let can_preview =
                 wizard.item_count() > 0 && !wizard.dest_input().as_os_str().is_empty();
-            if ui
+            let clicked = ui
                 .add_enabled(can_preview, egui::Button::new("Calcular vista previa"))
-                .clicked()
-            {
+                .clicked();
+            if clicked || (can_preview && enter_pressed(ctx)) {
                 let roots = settings.valid_roots();
                 let notify = repaint_notify(ctx);
                 if let Ok(dest) = wizard.request_preview(&roots, Some(notify))
@@ -259,7 +269,12 @@ fn draw_preview_ready(
         );
         info_row(ui, palette, "Estructura", layout_label(wizard.layout()));
         ui.separator();
-        info_row(ui, palette, "Archivos a copiar", &preview.files.to_string());
+        info_row(
+            ui,
+            palette,
+            "Archivos a copiar",
+            &count_phrase(preview.files, "archivo", "archivos"),
+        );
         info_row(ui, palette, "Tamaño total", &format_bytes(preview.bytes));
         let free_text = preview
             .free_bytes
@@ -269,20 +284,28 @@ fn draw_preview_ready(
         info_row(
             ui,
             palette,
-            "Se renombrarán por conflicto",
-            &preview.renamed.to_string(),
+            plural_word(
+                preview.renamed,
+                "Se renombrará por conflicto",
+                "Se renombrarán por conflicto",
+            ),
+            &count_phrase(preview.renamed, "archivo", "archivos"),
         );
         info_row(
             ui,
             palette,
-            "Ya presentes (se omitirán)",
-            &preview.already_present.to_string(),
+            plural_word(
+                preview.already_present,
+                "Ya presente (se omitirá)",
+                "Ya presentes (se omitirán)",
+            ),
+            &count_phrase(preview.already_present, "archivo", "archivos"),
         );
         info_row(
             ui,
             palette,
-            "Orígenes ilegibles",
-            &preview.unreadable.to_string(),
+            plural_word(preview.unreadable, "Origen ilegible", "Orígenes ilegibles"),
+            &count_phrase(preview.unreadable, "archivo", "archivos"),
         );
     });
 
@@ -316,10 +339,10 @@ fn draw_preview_ready(
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let can_export = wizard.can_start_export();
-            if ui
+            let clicked = ui
                 .add_enabled(can_export, egui::Button::new("Exportar"))
-                .clicked()
-            {
+                .clicked();
+            if clicked || (can_export && enter_pressed(ctx)) {
                 let notify = repaint_notify(ctx);
                 let _ = wizard.start_export(Some(notify));
             }
@@ -393,14 +416,24 @@ fn draw_done_step(
     ui.add_space(theme::SPACE_XS);
 
     card_frame(palette).show(ui, |ui| {
-        info_row(ui, palette, "Copiados", &summary.copied.to_string());
         info_row(
             ui,
             palette,
-            "Ya presentes",
-            &summary.already_present.to_string(),
+            plural_word(summary.copied, "Copiado", "Copiados"),
+            &count_phrase(summary.copied, "archivo", "archivos"),
         );
-        info_row(ui, palette, "Fallidos", &summary.failed.len().to_string());
+        info_row(
+            ui,
+            palette,
+            plural_word(summary.already_present, "Ya presente", "Ya presentes"),
+            &count_phrase(summary.already_present, "archivo", "archivos"),
+        );
+        info_row(
+            ui,
+            palette,
+            plural_word(summary.failed.len(), "Fallido", "Fallidos"),
+            &count_phrase(summary.failed.len(), "archivo", "archivos"),
+        );
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Manifiestos:").color(palette.text_secondary.color32()));
@@ -505,6 +538,10 @@ fn info_row(ui: &mut egui::Ui, palette: &Palette, label: &str, value: &str) {
             ui.label(RichText::new(value).strong());
         });
     });
+}
+
+fn enter_pressed(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
 }
 
 fn repaint_notify(ctx: &egui::Context) -> Notify {

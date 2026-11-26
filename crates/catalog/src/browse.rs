@@ -54,32 +54,56 @@ fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
     })
 }
 
+// `(asset_id, label_id)` is the primary key of `asset_label`, so each asset appears at most once
+// per label without needing `COUNT(DISTINCT ...)`. Grouping by `al.label_id` lets SQLite stream
+// `asset_label_active_label` in order without a temporary B-tree for GROUP BY.
+const LABELS_IN_USE_SQL: &str = "SELECT lb.id, lb.kind, lb.name, c.images
+     FROM (
+         SELECT al.label_id, COUNT(*) AS images
+         FROM asset_label al
+         WHERE al.status <> 'rejected'
+           AND EXISTS (SELECT 1 FROM location l WHERE l.asset_id = al.asset_id AND l.missing = 0)
+         GROUP BY al.label_id
+     ) c
+     JOIN label lb ON lb.id = c.label_id
+     ORDER BY lb.kind, lb.name";
+
+fn build_entries_sql(filter: &Filter, sort: Sort) -> (String, Vec<Box<dyn ToSql>>) {
+    let mut sql = String::from(
+        "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+         FROM location l JOIN asset a ON a.id = l.asset_id
+         WHERE l.missing = 0",
+    );
+    let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+    append_filter(&mut sql, &mut args, filter);
+    sql.push(' ');
+    sql.push_str(sort.order_clause());
+    (sql, args)
+}
+
 impl Catalog {
+    pub fn explain_entries(
+        &self,
+        filter: &Filter,
+        sort: Sort,
+    ) -> Result<Vec<String>, CatalogError> {
+        let (sql, args) = build_entries_sql(filter, sort);
+        self.explain_sql(&sql, params_from_iter(args.iter()))
+    }
+
+    pub fn explain_labels_in_use(&self) -> Result<Vec<String>, CatalogError> {
+        self.explain_sql(LABELS_IN_USE_SQL, [])
+    }
+
     pub fn entries(&self, filter: &Filter, sort: Sort) -> Result<Vec<Entry>, CatalogError> {
-        let mut sql = String::from(
-            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
-             FROM location l JOIN asset a ON a.id = l.asset_id
-             WHERE l.missing = 0",
-        );
-        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
-        append_filter(&mut sql, &mut args, filter);
-        sql.push(' ');
-        sql.push_str(sort.order_clause());
+        let (sql, args) = build_entries_sql(filter, sort);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args.iter()), entry_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn labels_in_use(&self) -> Result<Vec<LabelCount>, CatalogError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT lb.id, lb.kind, lb.name, COUNT(DISTINCT al.asset_id)
-             FROM label lb
-             JOIN asset_label al ON al.label_id = lb.id
-             WHERE al.status <> 'rejected'
-               AND EXISTS (SELECT 1 FROM location l WHERE l.asset_id = al.asset_id AND l.missing = 0)
-             GROUP BY lb.id, lb.kind, lb.name
-             ORDER BY lb.kind, lb.name",
-        )?;
+        let mut stmt = self.conn.prepare(LABELS_IN_USE_SQL)?;
         let rows = stmt.query_map([], |r| {
             let kind: String = r.get(1)?;
             Ok(LabelCount {

@@ -16,6 +16,9 @@ use std::time::UNIX_EPOCH;
 
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA temp_store = MEMORY;
+PRAGMA cache_size = -32000;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS asset (
     id     INTEGER PRIMARY KEY,
@@ -33,6 +36,8 @@ CREATE TABLE IF NOT EXISTS location (
     missing  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS location_asset ON location(asset_id);
+CREATE INDEX IF NOT EXISTS location_missing_asset ON location(missing, asset_id);
+CREATE INDEX IF NOT EXISTS location_asset_missing ON location(asset_id, missing);
 CREATE TABLE IF NOT EXISTS label (
     id   INTEGER PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('category', 'tag', 'entity')),
@@ -48,6 +53,12 @@ CREATE TABLE IF NOT EXISTS asset_label (
     PRIMARY KEY (asset_id, label_id)
 );
 CREATE INDEX IF NOT EXISTS asset_label_label ON asset_label(label_id);
+CREATE INDEX IF NOT EXISTS asset_label_active_label
+    ON asset_label(label_id, asset_id) WHERE status <> 'rejected';
+CREATE UNIQUE INDEX IF NOT EXISTS asset_label_active_asset
+    ON asset_label(asset_id, label_id) WHERE status <> 'rejected';
+CREATE INDEX IF NOT EXISTS asset_label_review
+    ON asset_label(confidence, asset_id, label_id) WHERE status = 'suggested';
 CREATE TABLE IF NOT EXISTS analysis (
     asset_id INTEGER NOT NULL REFERENCES asset(id),
     stage    TEXT NOT NULL,
@@ -134,8 +145,9 @@ impl Catalog {
     }
 
     /// Adds new and changed images and flags the ones that disappeared. A file is only read again when
-    /// its size or modified time differs from what the catalog remembers. Progress is committed file by
-    /// file, so an interrupted run keeps its work and the next one resumes where it stopped.
+    /// its size or modified time differs from what the catalog remembers. Progress is committed in
+    /// batches (and immediately on [`Control::Stop`]), so an interrupted run keeps its work and the
+    /// next one resumes where it stopped.
     // shortcut: a file edited in place keeping the same size and modified time is not noticed; upgrade
     // to an explicit "rehash everything" command if that ever matters.
     pub fn index(&mut self, root: &LibraryRoot) -> Result<IndexReport, CatalogError> {
@@ -150,6 +162,10 @@ impl Catalog {
         root: &LibraryRoot,
         progress: &mut dyn FnMut(&Progress) -> Control,
     ) -> Result<IndexReport, CatalogError> {
+        // Batch commits avoid tens of thousands of individual WAL transactions on 35k+ libraries
+        // while keeping resumable granularity and short write locks for concurrent readers.
+        const INDEX_BATCH_SIZE: usize = 512;
+
         let root_key = root.as_path().to_string_lossy().into_owned();
         let scanned = scanner::scan(root.as_path())?;
         let total = scanned.files.len();
@@ -168,74 +184,100 @@ impl Catalog {
             return Ok(report);
         }
 
-        for (idx, file) in scanned.files.into_iter().enumerate() {
-            let path = file.path.to_string_lossy().into_owned();
-            let mtime = file
-                .modified
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as i64);
-            let known: Option<(i64, Option<i64>)> = self
-                .conn
-                .query_row(
-                    "SELECT size, mtime_ns FROM location WHERE path = ?1",
-                    [&path],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
+        let mut files = scanned.files.into_iter().enumerate().peekable();
+        while files.peek().is_some() {
+            let tx = self.conn.transaction()?;
+            let mut batch_count = 0usize;
+            let mut stopped = false;
 
-            if let Some((size, remembered)) = known
-                && size == file.size as i64
-                && remembered.is_some()
-                && remembered == mtime
-            {
-                self.conn.execute(
-                    "UPDATE location SET seen_run = ?1, missing = 0 WHERE path = ?2",
-                    params![run, path],
-                )?;
-                report.unchanged += 1;
-            } else {
-                match scanner::sha256_file(&file.path) {
-                    Ok(sha) => {
-                        report.hashed += 1;
-                        let tx = self.conn.transaction()?;
-                        tx.execute(
-                            "INSERT OR IGNORE INTO asset (sha256, size) VALUES (?1, ?2)",
-                            params![sha, file.size as i64],
-                        )?;
-                        let asset_id: i64 =
-                            tx.query_row("SELECT id FROM asset WHERE sha256 = ?1", [&sha], |r| {
-                                r.get(0)
-                            })?;
-                        tx.execute(
-                            "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
-                             ON CONFLICT(path) DO UPDATE SET asset_id = ?1, root = ?2, size = ?4,
-                                 mtime_ns = ?5, seen_run = ?6, missing = 0",
-                            params![asset_id, root_key, path, file.size as i64, mtime, run],
-                        )?;
-                        tx.commit()?;
-                        if known.is_some() {
-                            report.changed += 1;
-                        } else {
-                            report.new += 1;
+            while batch_count < INDEX_BATCH_SIZE {
+                let Some((idx, file)) = files.next() else {
+                    break;
+                };
+                batch_count += 1;
+
+                let path = file.path.to_string_lossy().into_owned();
+                let mtime = file
+                    .modified
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as i64);
+                let known: Option<(i64, Option<i64>)> = {
+                    let mut stmt =
+                        tx.prepare_cached("SELECT size, mtime_ns FROM location WHERE path = ?1")?;
+                    stmt.query_row([&path], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()?
+                };
+
+                if let Some((size, remembered)) = known
+                    && size == file.size as i64
+                    && remembered.is_some()
+                    && remembered == mtime
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "UPDATE location SET seen_run = ?1, missing = 0 WHERE path = ?2",
+                    )?;
+                    stmt.execute(params![run, path])?;
+                    report.unchanged += 1;
+                } else {
+                    match scanner::sha256_file(&file.path) {
+                        Ok(sha) => {
+                            report.hashed += 1;
+                            {
+                                let mut stmt = tx.prepare_cached(
+                                    "INSERT OR IGNORE INTO asset (sha256, size) VALUES (?1, ?2)",
+                                )?;
+                                stmt.execute(params![sha, file.size as i64])?;
+                            }
+                            let asset_id: i64 = {
+                                let mut stmt =
+                                    tx.prepare_cached("SELECT id FROM asset WHERE sha256 = ?1")?;
+                                stmt.query_row([&sha], |r| r.get(0))?
+                            };
+                            {
+                                let mut stmt = tx.prepare_cached(
+                                    "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
+                                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+                                     ON CONFLICT(path) DO UPDATE SET asset_id = ?1, root = ?2, size = ?4,
+                                         mtime_ns = ?5, seen_run = ?6, missing = 0",
+                                )?;
+                                stmt.execute(params![
+                                    asset_id,
+                                    root_key,
+                                    path,
+                                    file.size as i64,
+                                    mtime,
+                                    run
+                                ])?;
+                            }
+                            if known.is_some() {
+                                report.changed += 1;
+                            } else {
+                                report.new += 1;
+                            }
+                        }
+                        Err(e) => {
+                            // still on disk, so it must not be flagged missing
+                            let mut stmt = tx.prepare_cached(
+                                "UPDATE location SET seen_run = ?1 WHERE path = ?2",
+                            )?;
+                            stmt.execute(params![run, path])?;
+                            report.errors.push((file.path, e.to_string()));
                         }
                     }
-                    Err(e) => {
-                        // still on disk, so it must not be flagged missing
-                        self.conn.execute(
-                            "UPDATE location SET seen_run = ?1 WHERE path = ?2",
-                            params![run, path],
-                        )?;
-                        report.errors.push((file.path, e.to_string()));
-                    }
+                }
+
+                if progress(&Progress {
+                    done: idx + 1,
+                    total,
+                }) == Control::Stop
+                {
+                    stopped = true;
+                    break;
                 }
             }
 
-            if progress(&Progress {
-                done: idx + 1,
-                total,
-            }) == Control::Stop
-            {
+            tx.commit()?;
+            if stopped {
                 report.stopped = true;
                 return Ok(report);
             }
@@ -249,20 +291,32 @@ impl Catalog {
         Ok(report)
     }
 
+    pub(crate) fn explain_sql<P: rusqlite::Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> Result<Vec<String>, CatalogError> {
+        let mut stmt = self.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        let rows = stmt.query_map(params, |r| r.get::<_, String>(3))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn explain_counts(&self) -> Result<Vec<String>, CatalogError> {
+        self.explain_sql(Self::COUNTS_SQL, [])
+    }
+
+    const COUNTS_SQL: &str = "SELECT (SELECT COUNT(DISTINCT asset_id) FROM location),
+            (SELECT COUNT(*) FROM location),
+            (SELECT COUNT(*) FROM location WHERE missing = 1)";
+
     pub fn counts(&self) -> Result<Counts, CatalogError> {
-        Ok(self.conn.query_row(
-            "SELECT (SELECT COUNT(DISTINCT asset_id) FROM location),
-                    (SELECT COUNT(*) FROM location),
-                    (SELECT COUNT(*) FROM location WHERE missing = 1)",
-            [],
-            |r| {
-                Ok(Counts {
-                    assets: r.get(0)?,
-                    locations: r.get(1)?,
-                    missing: r.get(2)?,
-                })
-            },
-        )?)
+        Ok(self.conn.query_row(Self::COUNTS_SQL, [], |r| {
+            Ok(Counts {
+                assets: r.get(0)?,
+                locations: r.get(1)?,
+                missing: r.get(2)?,
+            })
+        })?)
     }
 
     /// Groups of paths that hold exactly the same bytes. Only for review: nothing is ever deleted.
