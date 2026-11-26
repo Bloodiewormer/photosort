@@ -357,7 +357,7 @@ impl FilterState {
         }
         let trimmed = self.search.trim();
         if !trimmed.is_empty() {
-            filter.path_contains = Some(trimmed.to_owned());
+            filter.search = Some(trimmed.to_owned());
         }
         filter
     }

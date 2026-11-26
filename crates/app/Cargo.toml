@@ -13,6 +13,7 @@ eframe = "0.37.0"
 export = { version = "0.1.0", path = "../export" }
 fsguard = { path = "../fsguard" }
 image = "0.25.10"
+ocr = { path = "../ocr" }
 rfd = "0.18.0"
 rules = { path = "../rules" }
 scanner = { path = "../scanner" }
@@ -25,4 +26,5 @@ thumbs = { version = "0.1.0", path = "../thumbs" }
 windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
+dunce = "1.0.5"
 walkdir = "2.5.1"

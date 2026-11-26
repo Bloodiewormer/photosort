@@ -4,16 +4,18 @@ use crate::model::{
     count_phrase, format_bytes, format_chip_label, format_chip_tooltip, format_timestamp_utc,
     gallery_cell_tooltip, library_display_name, plural_word, selected_phrase,
 };
+use crate::ocr_worker::{OcrEvent, OcrWorker};
 use crate::review_flow::ReviewFlow;
 use crate::settings::{self, Settings, Theme};
 use crate::theme::{self, Palette};
 use crate::views;
+use crate::views::ocr::{OcrDialog, OcrRunState, OcrTargetMode};
 use crate::worker::{
     IndexEvent, IndexWorker, Notify, PreviewWorker, ThumbPool, ThumbRequest, ThumbnailProvider,
 };
 use catalog::{
-    AssetId, Assignment, Catalog, Counts, DuplicateGroup, Entry, LabelCount, LabelKind, Sort,
-    Status,
+    AssetId, Assignment, Catalog, Counts, DuplicateGroup, Entry, LabelCount, LabelKind, OcrLine,
+    SCREENSHOT_CATEGORY, Sort, Status,
 };
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Frame, Id, Key, Layout, Margin, Modifiers, RichText,
@@ -55,6 +57,8 @@ pub struct PhotosortApp {
     index_progress: Option<String>,
     analysis_worker: Option<AnalysisWorker>,
     analysis_progress: Option<String>,
+    ocr_worker: Option<OcrWorker>,
+    ocr_dialog: Option<OcrDialog>,
     status_notice: Option<String>,
     banner_error: Option<String>,
 
@@ -69,6 +73,8 @@ pub struct PhotosortApp {
 
     inspector_asset: Option<AssetId>,
     inspector_labels: Vec<Assignment>,
+    inspector_ocr_lines: Vec<OcrLine>,
+    inspector_ocr_done: bool,
     new_label_kind: LabelKind,
     new_label_text: String,
     focus_search_next_frame: bool,
@@ -133,6 +139,8 @@ impl PhotosortApp {
             index_progress: None,
             analysis_worker: None,
             analysis_progress: None,
+            ocr_worker: None,
+            ocr_dialog: None,
             status_notice: None,
             banner_error,
             thumb_pool: ThumbPool::new(3, thumbs, Some(Arc::clone(&notify))),
@@ -144,6 +152,8 @@ impl PhotosortApp {
             preview_loaded: None,
             inspector_asset: None,
             inspector_labels: Vec::new(),
+            inspector_ocr_lines: Vec::new(),
+            inspector_ocr_done: false,
             new_label_kind: LabelKind::Tag,
             new_label_text: String::new(),
             focus_search_next_frame: false,
@@ -169,9 +179,9 @@ impl PhotosortApp {
         preset_export_dir: Option<PathBuf>,
     ) -> Self {
         self.active_tab = match view {
-            crate::screenshot::CaptureView::Gallery | crate::screenshot::CaptureView::Export => {
-                ActiveTab::Gallery
-            }
+            crate::screenshot::CaptureView::Gallery
+            | crate::screenshot::CaptureView::Export
+            | crate::screenshot::CaptureView::Ocr => ActiveTab::Gallery,
             crate::screenshot::CaptureView::Review => ActiveTab::Review,
             crate::screenshot::CaptureView::Duplicates => ActiveTab::Duplicates,
         };
@@ -236,6 +246,7 @@ impl PhotosortApp {
                 (Some(asset), Some(cat)) => cat.labels_of(asset).unwrap_or_default(),
                 _ => Vec::new(),
             };
+            self.reload_inspector_ocr();
         }
 
         if self.preview_requested != next_path {
@@ -250,10 +261,25 @@ impl PhotosortApp {
         }
     }
 
+    fn reload_inspector_ocr(&mut self) {
+        match (self.inspector_asset, &self.catalog) {
+            (Some(asset), Some(cat)) => {
+                self.inspector_ocr_lines = cat.ocr_lines(asset).unwrap_or_default();
+                self.inspector_ocr_done = cat.has_ocr_done(asset).unwrap_or(false);
+            }
+            _ => {
+                self.inspector_ocr_lines.clear();
+                self.inspector_ocr_done = false;
+            }
+        }
+    }
+
     fn poll_workers(&mut self, ctx: &egui::Context) {
         let mut finished_index = false;
         let mut index_completed_ok = false;
         let mut finished_analysis = false;
+        let mut finished_ocr = false;
+        let mut reload_inspector_ocr = false;
         let mut needs_reload = false;
         if let Some(worker) = &self.index_worker {
             while let Some(ev) = worker.try_recv() {
@@ -366,14 +392,68 @@ impl PhotosortApp {
                 }
             }
         }
+        if let Some(worker) = &self.ocr_worker {
+            while let Some(ev) = worker.try_recv() {
+                if let Some(dlg) = &mut self.ocr_dialog {
+                    dlg.apply_event(&ev);
+                }
+                match ev {
+                    OcrEvent::LoadingModel => {}
+                    OcrEvent::Progress { saved_asset, .. } => {
+                        if saved_asset.is_some() && saved_asset == self.inspector_asset {
+                            reload_inspector_ocr = true;
+                        }
+                    }
+                    OcrEvent::Finished {
+                        stopped,
+                        processed,
+                        errors,
+                    } => {
+                        finished_ocr = true;
+                        needs_reload = true;
+                        self.status_notice = Some(if stopped {
+                            format!(
+                                "Lectura de texto detenida: {}.",
+                                count_phrase(processed, "imagen leída", "imágenes leídas"),
+                            )
+                        } else if errors > 0 {
+                            format!(
+                                "Lectura de texto completa: {}, {}.",
+                                count_phrase(processed, "imagen leída", "imágenes leídas"),
+                                count_phrase(errors, "error", "errores"),
+                            )
+                        } else {
+                            format!(
+                                "Lectura de texto completa: {}.",
+                                count_phrase(processed, "imagen leída", "imágenes leídas"),
+                            )
+                        });
+                    }
+                    OcrEvent::Failed(err) => {
+                        finished_ocr = true;
+                        if self.ocr_dialog.is_none() {
+                            self.banner_error = Some(format!("Error al leer texto (OCR): {err}"));
+                        }
+                    }
+                }
+            }
+        }
         if finished_index {
             self.index_worker = None;
         }
         if finished_analysis {
             self.analysis_worker = None;
         }
+        if finished_ocr {
+            self.ocr_worker = None;
+        }
         if needs_reload {
             self.reload_catalog();
+            if let Some(dlg) = &mut self.ocr_dialog {
+                dlg.refresh_counts(self.catalog.as_ref(), &self.settings);
+            }
+        } else if reload_inspector_ocr {
+            self.reload_inspector_ocr();
         }
         if index_completed_ok && self.settings.auto_analyze {
             self.start_analysis(ctx);
@@ -418,6 +498,13 @@ impl PhotosortApp {
 
     fn start_indexing(&mut self, ctx: &egui::Context) {
         if self.index_worker.is_some() {
+            return;
+        }
+        // The indexer keeps the database locked while it hashes a batch, longer than the OCR
+        // worker waits before giving up, so the two never run together.
+        if self.ocr_worker.is_some() {
+            self.status_notice =
+                Some("Para indexar, espera a que termine la lectura de texto o cancélala.".into());
             return;
         }
         let roots = self.settings.valid_roots();
@@ -629,11 +716,8 @@ impl PhotosortApp {
                     let search_resp = ui.add(
                         egui::TextEdit::singleline(&mut self.filter.search)
                             .id(search_id)
-                            .desired_width(240.0)
-                            .hint_text(theme::hint_text(
-                                palette,
-                                "Buscar por ruta o nombre (/ o Ctrl+F)...",
-                            )),
+                            .desired_width(195.0)
+                            .hint_text(theme::hint_text(palette, "Buscar ruta o texto (/)…")),
                     );
                     if self.focus_search_next_frame {
                         search_resp.request_focus();
@@ -680,9 +764,15 @@ impl PhotosortApp {
                             worker.cancel();
                         }
                     } else {
-                        let can_index = !self.settings.library_roots.is_empty();
+                        let can_index =
+                            !self.settings.library_roots.is_empty() && self.ocr_worker.is_none();
                         if ui
                             .add_enabled(can_index, egui::Button::new("Indexar"))
+                            .on_disabled_hover_text(if self.ocr_worker.is_some() {
+                                "Se está leyendo texto: espera a que termine o cancela."
+                            } else {
+                                "Añade primero una carpeta de biblioteca."
+                            })
                             .clicked()
                         {
                             self.start_indexing(ui.ctx());
@@ -718,6 +808,25 @@ impl PhotosortApp {
                         {
                             self.start_analysis(ui.ctx());
                         }
+                    }
+
+                    let can_ocr = self.catalog.is_some() && self.counts.locations > 0;
+                    if ui
+                        .add_enabled(can_ocr, egui::Button::new("Leer texto…"))
+                        .clicked()
+                        && self.ocr_dialog.is_none()
+                    {
+                        let selected_assets: Vec<AssetId> = self
+                            .selection
+                            .selected_indices()
+                            .into_iter()
+                            .filter_map(|i| self.entries.get(i).map(|e| e.asset))
+                            .collect();
+                        self.ocr_dialog = Some(OcrDialog::open_fresh(
+                            self.catalog.as_ref(),
+                            &self.settings,
+                            selected_assets,
+                        ));
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1379,6 +1488,122 @@ impl PhotosortApp {
                     ui.separator();
                     ui.add_space(theme::SPACE_SM);
 
+                    let is_screenshot = self.inspector_labels.iter().any(|a| {
+                        a.kind == LabelKind::Category
+                            && a.name.eq_ignore_ascii_case(SCREENSHOT_CATEGORY)
+                            && a.status != Status::Rejected
+                    });
+                    let mut main_ocr: Vec<&OcrLine> = Vec::new();
+                    let mut status_bar_ocr: Vec<&OcrLine> = Vec::new();
+                    for line in &self.inspector_ocr_lines {
+                        if line.top_strip && is_screenshot {
+                            status_bar_ocr.push(line);
+                        } else {
+                            main_ocr.push(line);
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Texto reconocido (OCR)").strong());
+                        if !main_ocr.is_empty() {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Copiar texto").clicked() {
+                                    let joined: String = main_ocr
+                                        .iter()
+                                        .map(|l| l.text.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    ui.ctx().copy_text(joined);
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(theme::SPACE_XS);
+                    if main_ocr.is_empty() && status_bar_ocr.is_empty() {
+                        let empty_msg = if self.inspector_ocr_done {
+                            "Sin texto reconocido."
+                        } else {
+                            "Sin lectura OCR todavía."
+                        };
+                        ui.label(
+                            RichText::new(empty_msg)
+                                .size(theme::FONT_SMALL)
+                                .color(palette.text_secondary.color32()),
+                        );
+                    } else {
+                        if !main_ocr.is_empty() {
+                            Frame::new()
+                                .fill(palette.bg_card.color32())
+                                .stroke(Stroke::new(1.0, palette.border.color32()))
+                                .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    for line in &main_ocr {
+                                        if line.score < ocr::select::REVIEW_BELOW {
+                                            ui.horizontal_wrapped(|ui| {
+                                                // OCR text is untrusted: plain selectable label only.
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&line.text).color(
+                                                            palette.text_secondary.color32(),
+                                                        ),
+                                                    )
+                                                    .selectable(true),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "(baja confianza · {:.0}%)",
+                                                        line.score * 100.0
+                                                    ))
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(palette.text_hint.color32()),
+                                                );
+                                            });
+                                        } else {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&line.text)
+                                                        .color(palette.text_primary.color32()),
+                                                )
+                                                .selectable(true),
+                                            );
+                                        }
+                                    }
+                                });
+                        }
+                        if !status_bar_ocr.is_empty() {
+                            ui.add_space(theme::SPACE_XS);
+                            ui.label(
+                                RichText::new("Barra de estado (no se busca)")
+                                    .size(theme::FONT_SMALL)
+                                    .color(palette.text_secondary.color32()),
+                            );
+                            Frame::new()
+                                .fill(palette.bg_canvas.color32())
+                                .stroke(Stroke::new(1.0, palette.border.color32()))
+                                .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    for line in &status_bar_ocr {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&line.text)
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(palette.text_secondary.color32()),
+                                            )
+                                            .selectable(true),
+                                        );
+                                    }
+                                });
+                        }
+                    }
+
+                    ui.add_space(theme::SPACE_MD);
+                    ui.separator();
+                    ui.add_space(theme::SPACE_SM);
+
                     ui.label(RichText::new("Etiquetas de la imagen").strong());
                     ui.add_space(theme::SPACE_XS);
                     if self.inspector_labels.is_empty() {
@@ -1635,6 +1860,7 @@ impl PhotosortApp {
                 w.validation_error().is_some()
                     || matches!(w.phase(), crate::export_flow::ExportPhase::Error(_))
             });
+        let ocr_open = self.ocr_dialog.is_some();
 
         let step = self
             .screenshot
@@ -1650,6 +1876,7 @@ impl PhotosortApp {
                         export_open,
                         export_ready,
                         export_failed,
+                        ocr_open,
                         image_received: false,
                     },
                 )
@@ -1661,6 +1888,17 @@ impl PhotosortApp {
             }
             crate::screenshot::CaptureStep::OpenExport if has_entries => {
                 self.open_export_for_capture(ctx);
+            }
+            crate::screenshot::CaptureStep::OpenOcr if has_entries => {
+                self.selection.click(0, self.entries.len());
+                self.sync_inspector(false);
+                let mut dlg = OcrDialog::open_fresh(
+                    self.catalog.as_ref(),
+                    &self.settings,
+                    vec![self.entries[0].asset],
+                );
+                dlg.mode = OcrTargetMode::Folders;
+                self.ocr_dialog = Some(dlg);
             }
             _ => {}
         }
@@ -1756,6 +1994,48 @@ impl eframe::App for PhotosortApp {
             &mut self.settings,
             &mut self.banner_error,
         );
+        let ocr_outcome = crate::views::ocr::draw_window(
+            &ctx,
+            palette,
+            &mut self.ocr_dialog,
+            self.ocr_worker.is_some(),
+            self.index_worker.is_some(),
+            &self.data_dir,
+            &mut self.settings,
+            &mut self.banner_error,
+        );
+        if ocr_outcome.cancel_requested
+            && let Some(worker) = &self.ocr_worker
+        {
+            worker.cancel();
+        }
+        if let Some((scope, models_dir, device)) = ocr_outcome.start_request
+            && self.ocr_worker.is_none()
+            && self.index_worker.is_none()
+        {
+            match crate::views::ocr::start_ocr_worker(
+                &ctx,
+                &self.data_dir,
+                &self.settings,
+                scope,
+                models_dir,
+                device,
+            ) {
+                Ok(worker) => {
+                    self.ocr_worker = Some(worker);
+                    if let Some(dlg) = &mut self.ocr_dialog {
+                        dlg.run_state = OcrRunState::LoadingModel;
+                    }
+                }
+                Err(err) => {
+                    if let Some(dlg) = &mut self.ocr_dialog {
+                        dlg.run_state = OcrRunState::Failed(err);
+                    } else {
+                        self.banner_error = Some(err);
+                    }
+                }
+            }
+        }
 
         self.step_screenshot(&ctx);
     }

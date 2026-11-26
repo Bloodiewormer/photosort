@@ -19,6 +19,13 @@ pub enum Theme {
     Light,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OcrDevice {
+    #[default]
+    DirectMl,
+    Cpu,
+}
+
 fn default_auto_analyze() -> bool {
     true
 }
@@ -33,6 +40,10 @@ pub struct Settings {
     pub theme: Theme,
     #[serde(default = "default_auto_analyze")]
     pub auto_analyze: bool,
+    #[serde(default)]
+    pub ocr_models_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub ocr_device: OcrDevice,
 }
 
 impl Default for Settings {
@@ -42,6 +53,8 @@ impl Default for Settings {
             last_export_dir: None,
             theme: Theme::default(),
             auto_analyze: default_auto_analyze(),
+            ocr_models_dir: None,
+            ocr_device: OcrDevice::default(),
         }
     }
 }

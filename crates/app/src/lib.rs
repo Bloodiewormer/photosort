@@ -3,6 +3,7 @@ pub mod bench;
 pub mod demo;
 pub mod export_flow;
 pub mod model;
+pub mod ocr_worker;
 pub mod review_flow;
 pub mod screenshot;
 pub mod settings;

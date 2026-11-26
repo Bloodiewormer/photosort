@@ -1,6 +1,6 @@
 # Evaluación de OCR local (2026-11-26)
 
-La crate `crates/ocr` mide el OCR. **No está conectada con la app ni con el catálogo.** Todo se midió con **imágenes sintéticas** generadas por la propia crate, con títulos y grupos inventados. No se usó ninguna foto ni se accedió a la biblioteca. **Estas cifras no predicen la calidad sobre fotos reales.**
+La crate `crates/ocr` mide el OCR. La evaluación original de abajo se hizo **antes** de integrarla en la app y en el catálogo, con **imágenes sintéticas** generadas por la propia crate, con títulos y grupos inventados. No se usó ninguna foto ni se accedió a la biblioteca. **Estas cifras no predicen la calidad sobre fotos reales.** La integración en el catálogo y la app se resume al final de este documento.
 
 Equipo: Windows 11, Ryzen 5 5600G (6 núcleos / 12 hilos), GTX 1650 SUPER de 4 GB (controlador 610.88, unos 1,2 GB ya ocupados por otros programas), 14 GB de RAM, plan de energía «Equilibrado», Rust 1.100.
 
@@ -418,3 +418,23 @@ cargo run --release -p ocr --example ocr_eval -- samples --out "$env:TEMP\ocr-mu
 ```
 
 Las imágenes dependen de las versiones de las fuentes de Windows: otra versión puede cambiar ligeramente las cifras.
+
+## Integración en el catálogo y la app (2026-11-26)
+
+- **Almacenamiento (`crates/catalog`):** tabla `ocr_line(asset_id, line, text, search_key, score, recognizer, x0, y0, x1, y1, top_strip)` con un `id` fijo y una sola fila por `(asset_id, line)`. Guardar las líneas de un activo reemplaza las anteriores y marca la etapa `ocr` versión `1` en una sola transacción (incluso si la imagen no tiene texto).
+- **Normalización de búsqueda:** NFKD, eliminación solo de marcas combinantes `U+0300..=U+036F` (conserva dakuten japonés y hangul), NFC, minúsculas y eliminación de todo espacio en blanco. Se aplica la misma función al guardar y al buscar; una consulta que se normaliza a cadena vacía no coincide mediante OCR.
+- **Barra de estado de capturas:** al leer se marca `top_strip = true` cuando `alto >= 1,7 * ancho` y el borde inferior de la caja está dentro del 5 % superior. Las líneas se conservan siempre y se excluyen de la búsqueda solo en tiempo de consulta si el activo tiene la categoría no rechazada `Capturas de pantalla`.
+- **Índice de búsqueda (45.000 activos sintéticos × 13 líneas = 585.000 líneas, `--release`, 20 repeticiones):**
+
+  | Consulta | `instr` simple (p95) | FTS5 `trigram` ≥ 3 car. (p95) | Objetivo |
+  |---|---:|---:|---:|
+  | Acierto raro (`paper crown`, 9 resultados) | 156,97 ms | **12,95 ms** | < 150 ms |
+  | Sin resultados (`zzzyyyxxx`, 0 resultados) | 159,64 ms | **11,78 ms** | < 150 ms |
+  | Muy frecuente (`84%`, 36.000 resultados) | 216,68 ms | 156,62 ms | < 150 ms |
+
+  El recorrido simple con `instr` superó el objetivo de 150 ms en los tres casos, por lo que se activó un índice FTS5 `trigram` (`ocr_line_fts`) para consultas de 3 o más caracteres; las consultas de 1–2 caracteres siguen usando `instr`.
+
+  Repetición independiente con FTS5 (p95): acierto raro 15,4 ms, sin resultados 12,7 ms y muy frecuente 164,2 ms. Con 2 caracteres: 165,7 ms sin resultados y 56,2 ms con 45.000 resultados. **Las consultas muy amplias y algunas de 1–2 caracteres superan un poco el objetivo** a este tamaño; la búsqueda corre en el hilo de la interfaz. La columna `instr` de la tabla no se repitió.
+- **Indexado y OCR no se ejecutan a la vez:** el indexador mantiene la base de datos bloqueada mientras calcula las huellas de un lote, más de lo que el OCR espera antes de abandonar. La interfaz impide la combinación.
+- **`DirectML.dll` junto a la app:** un ejecutable en `target/release` carga la 1.15.4 incluida y no la de System32 (1.15.6) usada en las mediciones de arriba. Comprobado con el medidor en esa carpeta: 74,5 ms de mediana (74,7 ms con la de System32) y los mismos aciertos en el conjunto de formas fijas con lote 6; la primera imagen tardó 2,1 s frente a 0,5 s, en una sola ejecución.
+- **Interfaz (`crates/app`):** botón «Leer texto…» abre una ventana explícita (nada se ejecuta automáticamente) para elegir selección actual o carpetas (ninguna marcada por defecto), carpeta de modelos y dispositivo (`GPU (DirectML)` con lote 6 por defecto, o `CPU` con lote 1; sin caída silenciosa y avisando que cambiar de dispositivo requiere reiniciar). El inspector muestra el texto como etiquetas planas seleccionables, atenúa con aviso textual las líneas por debajo de `REVIEW_BELOW` (`0,65`) y separa las de barra de estado de capturas como «Barra de estado (no se busca)».
