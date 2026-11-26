@@ -216,9 +216,11 @@ version = "0.1.0"
 dependencies = [
  "catalog",
  "eframe",
+ "export",
  "fsguard",
  "image",
  "rfd",
+ "rules",
  "scanner",
  "serde",
  "serde_json",
@@ -1281,6 +1283,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

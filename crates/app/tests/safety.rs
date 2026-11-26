@@ -1,6 +1,7 @@
 // Fixtures are created in temp dirs, never inside a real library root.
 #![allow(clippy::disallowed_methods)]
 
+use app::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use app::worker::{IndexEvent, IndexWorker, PreviewWorker};
 use fsguard::{LibraryRoot, ensure_writable};
 use image::{ImageBuffer, Rgba};
@@ -92,5 +93,65 @@ fn worker_indexing_and_preview_leave_the_originals_untouched() {
     let loaded = preview.recv().unwrap();
     assert!(loaded.image.is_ok());
 
+    assert_eq!(before, snapshot(&library));
+}
+
+#[test]
+fn analysis_worker_leaves_the_originals_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    write_png(&library.join("Screenshot_01.png"), [255, 0, 0, 255]);
+    write_png(
+        &library.join("sub/IMG-20240501-WA0001.png"),
+        [0, 255, 0, 255],
+    );
+    write_png(&library.join("sub/deep/plain.png"), [0, 0, 255, 255]);
+    fs::write(library.join("sub/corrupt.jpg"), b"not an image").unwrap();
+
+    let root = LibraryRoot::new(&library).unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db_index =
+        ensure_writable(&data.join("catalog.sqlite"), std::slice::from_ref(&root)).unwrap();
+    let db_analyze =
+        ensure_writable(&data.join("catalog.sqlite"), std::slice::from_ref(&root)).unwrap();
+
+    let indexer = IndexWorker::start(db_index, vec![root], None);
+    while let Ok(ev) = indexer.recv() {
+        match ev {
+            IndexEvent::Finished { stopped, .. } => {
+                assert!(!stopped);
+                break;
+            }
+            IndexEvent::Failed(e) => panic!("indexing failed: {e}"),
+            _ => {}
+        }
+    }
+
+    // Settle NTFS lazy directory mtime before capturing the baseline snapshot.
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    let analyzer = AnalysisWorker::start(db_analyze, None);
+    let mut finished = false;
+    while let Ok(ev) = analyzer.recv() {
+        match ev {
+            AnalysisEvent::Finished {
+                stopped,
+                analyzed,
+                errors,
+                ..
+            } => {
+                assert!(!stopped);
+                assert_eq!(analyzed, 3);
+                assert_eq!(errors, 1);
+                finished = true;
+                break;
+            }
+            AnalysisEvent::Failed(e) => panic!("analysis failed: {e}"),
+            AnalysisEvent::Progress { .. } => {}
+        }
+    }
+    assert!(finished);
     assert_eq!(before, snapshot(&library));
 }

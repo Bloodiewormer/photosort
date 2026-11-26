@@ -1,7 +1,8 @@
 // Fixtures are created in temp dirs, never inside a real library root.
 #![allow(clippy::disallowed_methods)]
 
-use export::{ExportItem, export, preview};
+use catalog::{Assignment, LabelId, LabelKind, Source, Status};
+use export::{Control, ExportItem, Layout, export, export_with, preview, preview_with};
 use fsguard::{LibraryRoot, ensure_export_dir};
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,6 +45,17 @@ fn snapshot(root: &Path) -> Snapshot {
         .collect()
 }
 
+fn assign(kind: LabelKind, name: &str) -> Assignment {
+    Assignment {
+        label: LabelId(1),
+        kind,
+        name: name.into(),
+        source: Source::User,
+        confidence: 1.0,
+        status: Status::Accepted,
+    }
+}
+
 #[test]
 fn previewing_and_exporting_leave_the_originals_untouched() {
     let tmp = tempfile::tempdir().unwrap();
@@ -73,6 +85,61 @@ fn previewing_and_exporting_leave_the_originals_untouched() {
     preview(&items, &dest).unwrap();
     export(&items, &dest).unwrap();
     export(&items, &dest).unwrap();
+
+    assert_eq!(before, snapshot(&library));
+}
+
+#[test]
+fn previewing_and_exporting_in_all_four_layouts_leave_the_originals_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    let specs = [
+        (
+            "a.jpg",
+            &b"jpeg bytes"[..],
+            vec![
+                assign(LabelKind::Category, "Manga"),
+                assign(LabelKind::Entity, "Obra A"),
+            ],
+        ),
+        (
+            "sub/b.png",
+            &b"png bytes"[..],
+            vec![assign(LabelKind::Category, "Fotos")],
+        ),
+        ("sub/deep/c.webp", &b"webp bytes"[..], vec![]),
+    ];
+    let mut items = vec![];
+    for (rel, bytes, labels) in specs {
+        let p = library.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, bytes).unwrap();
+        items.push(ExportItem { source: p, labels });
+    }
+    let root = LibraryRoot::new(&library).unwrap();
+
+    // Throwaway read so NTFS settles directory modified times before taking the baseline snapshot.
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    for (i, layout) in [
+        Layout::Flat,
+        Layout::ByCategory,
+        Layout::ByEntity,
+        Layout::ByYear,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dest = ensure_export_dir(
+            &tmp.path().join(format!("export_{i}")),
+            std::slice::from_ref(&root),
+        )
+        .unwrap();
+        preview_with(&items, &dest, layout).unwrap();
+        export_with(&items, &dest, layout, &mut |_| Control::Continue).unwrap();
+        export_with(&items, &dest, layout, &mut |_| Control::Continue).unwrap();
+    }
 
     assert_eq!(before, snapshot(&library));
 }

@@ -19,7 +19,11 @@ pub enum Theme {
     Light,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+fn default_auto_analyze() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub library_roots: Vec<PathBuf>,
@@ -27,6 +31,19 @@ pub struct Settings {
     pub last_export_dir: Option<PathBuf>,
     #[serde(default)]
     pub theme: Theme,
+    #[serde(default = "default_auto_analyze")]
+    pub auto_analyze: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            library_roots: Vec::new(),
+            last_export_dir: None,
+            theme: Theme::default(),
+            auto_analyze: default_auto_analyze(),
+        }
+    }
 }
 
 #[derive(Debug)]

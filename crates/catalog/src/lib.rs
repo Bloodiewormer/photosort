@@ -1,9 +1,11 @@
 mod analysis;
 mod browse;
+mod dupes;
 mod labels;
 
 pub use analysis::Pending;
 pub use browse::{Entry, LabelCount, Sort};
+pub use dupes::DuplicateGroup;
 pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, Source, Status};
 
 use fsguard::{DestPath, LibraryRoot};

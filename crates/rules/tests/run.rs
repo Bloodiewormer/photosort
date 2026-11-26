@@ -7,7 +7,7 @@ use image::codecs::gif::GifEncoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, Frame, ImageEncoder, RgbaImage};
-use rules::{RunReport, STAGE, VERSION, read_facts, run};
+use rules::{Control, RunProgress, RunReport, STAGE, VERSION, read_facts, run, run_with};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -378,4 +378,114 @@ fn run_retries_the_same_asset_once_a_temporarily_unreadable_file_returns() {
     assert!(recovered.errors.is_empty());
     assert_eq!(s.labels("temp.jpg")[0].name, "foto de cámara");
     assert!(s.cat.pending(STAGE, VERSION, 10).unwrap().is_empty());
+}
+
+#[test]
+fn run_with_reports_monotonic_progress_and_matches_run_results() {
+    let files = [
+        ("shots/Screenshot_01.png", png_bytes(1920, 1080, None)),
+        (
+            "camera/DSC001.jpg",
+            jpeg_bytes(400, 300, Some((TAG_MAKE, "Fujifilm"))),
+        ),
+        ("chat/IMG-20240501-WA0003.jpg", jpeg_bytes(400, 400, None)),
+        ("strips/chapter.gif", gif_bytes(40, 120)),
+        ("misc/plain.png", png_bytes(200, 200, None)),
+    ];
+    let baseline = Setup::new(&files);
+    let with_cb = Setup::new(&files);
+
+    let r_base = run(&baseline.cat).unwrap();
+    let mut seen: Vec<RunProgress> = Vec::new();
+    let r_with = run_with(&with_cb.cat, &mut |p: &RunProgress| {
+        seen.push(*p);
+        Control::Continue
+    })
+    .unwrap();
+
+    assert_eq!(r_with, r_base);
+    assert!(!r_with.stopped);
+    assert_eq!(
+        seen.first(),
+        Some(&RunProgress {
+            analyzed: 0,
+            pending: 5
+        })
+    );
+    assert_eq!(
+        seen.last(),
+        Some(&RunProgress {
+            analyzed: 5,
+            pending: 0
+        })
+    );
+    assert!(seen.windows(2).all(|w| w[0].analyzed <= w[1].analyzed));
+    assert!(seen.windows(2).all(|w| w[0].pending >= w[1].pending));
+
+    for (rel, _) in &files {
+        assert_eq!(with_cb.labels(rel), baseline.labels(rel), "file {rel}");
+    }
+
+    let mut second_seen = Vec::new();
+    let second = run_with(&with_cb.cat, &mut |p| {
+        second_seen.push(*p);
+        Control::Continue
+    })
+    .unwrap();
+    assert_eq!(second, RunReport::default());
+    assert_eq!(
+        second_seen,
+        vec![RunProgress {
+            analyzed: 0,
+            pending: 0
+        }]
+    );
+}
+
+#[test]
+fn run_with_stop_midway_keeps_done_work_and_later_run_completes_identically() {
+    let files = [
+        ("shots/Screenshot_01.png", png_bytes(1920, 1080, None)),
+        (
+            "camera/DSC001.jpg",
+            jpeg_bytes(400, 300, Some((TAG_MAKE, "Fujifilm"))),
+        ),
+        ("chat/IMG-20240501-WA0003.jpg", jpeg_bytes(400, 400, None)),
+        ("strips/chapter.gif", gif_bytes(40, 120)),
+        ("misc/plain.png", png_bytes(200, 200, None)),
+    ];
+    let baseline = Setup::new(&files);
+    let partial = Setup::new(&files);
+
+    // Stop immediately at 0: nothing analyzed, all 5 still pending.
+    let zero = run_with(&partial.cat, &mut |_| Control::Stop).unwrap();
+    assert!(zero.stopped);
+    assert_eq!(zero.analyzed, 0);
+    assert_eq!(partial.cat.pending(STAGE, VERSION, 100).unwrap().len(), 5);
+
+    // Stop mid-way after 2 items: those 2 stay marked done.
+    let first = run_with(&partial.cat, &mut |p| {
+        if p.analyzed >= 2 {
+            Control::Stop
+        } else {
+            Control::Continue
+        }
+    })
+    .unwrap();
+    assert!(first.stopped);
+    assert_eq!(first.analyzed, 2);
+    assert_eq!(partial.cat.pending(STAGE, VERSION, 100).unwrap().len(), 3);
+
+    // Complete the remaining 3 items in a second full run.
+    let rest = run_with(&partial.cat, &mut |_| Control::Continue).unwrap();
+    assert!(!rest.stopped);
+    assert_eq!(rest.analyzed, 3);
+    assert!(partial.cat.pending(STAGE, VERSION, 100).unwrap().is_empty());
+
+    let expected = run(&baseline.cat).unwrap();
+    assert_eq!(first.analyzed + rest.analyzed, expected.analyzed);
+    assert_eq!(first.suggestions + rest.suggestions, expected.suggestions);
+    for (rel, _) in &files {
+        assert_eq!(partial.labels(rel), baseline.labels(rel), "file {rel}");
+    }
 }

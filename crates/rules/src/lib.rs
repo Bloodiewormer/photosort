@@ -1,3 +1,4 @@
+pub use catalog::Control;
 use catalog::{Catalog, CatalogError, LabelKind, Source};
 use std::collections::HashSet;
 use std::fs::File;
@@ -25,11 +26,18 @@ pub struct Suggestion {
     pub confidence: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunProgress {
+    pub analyzed: usize,
+    pub pending: usize,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RunReport {
     pub analyzed: usize,
     pub suggestions: usize,
     pub errors: Vec<(PathBuf, String)>,
+    pub stopped: bool,
 }
 
 /// Reads ONLY header/metadata: image dimensions via `image::image_dimensions` (no full decode)
@@ -79,8 +87,28 @@ fn has_non_empty_tag(data: &exif::Exif, tag: exif::Tag) -> bool {
 /// for each, then `mark_done`. An unreadable file is reported in `errors` and NOT marked done
 /// (it is retried next run). Never touches user decisions. Safe to run repeatedly.
 pub fn run(catalog: &Catalog) -> Result<RunReport, CatalogError> {
+    run_with(catalog, &mut |_| Control::Continue)
+}
+
+/// Like [`run`], reporting monotonic progress after each pending item and stopping early when
+/// `progress` returns [`Control::Stop`]. Everything already analyzed stays committed and marked done.
+pub fn run_with(
+    catalog: &Catalog,
+    progress: &mut dyn FnMut(&RunProgress) -> Control,
+) -> Result<RunReport, CatalogError> {
     let mut report = RunReport::default();
     let mut failed: HashSet<i64> = HashSet::new();
+    // Snapshot initial pending count once so `pending` decreases monotonically without extra SQL per item.
+    let initial_pending = catalog.pending(STAGE, VERSION, usize::MAX)?.len();
+
+    if progress(&RunProgress {
+        analyzed: 0,
+        pending: initial_pending,
+    }) == Control::Stop
+    {
+        report.stopped = true;
+        return Ok(report);
+    }
 
     loop {
         let batch = catalog.pending(STAGE, VERSION, BATCH_SIZE.saturating_add(failed.len()))?;
@@ -90,21 +118,31 @@ pub fn run(catalog: &Catalog) -> Result<RunReport, CatalogError> {
                 continue;
             }
             progressed = true;
-            let facts = match read_facts(&item.path) {
-                Ok(facts) => facts,
+            match read_facts(&item.path) {
+                Ok(facts) => {
+                    for s in suggest(&facts) {
+                        let label = catalog.label(s.kind, s.name)?;
+                        catalog.suggest(item.asset, label, Source::Rules, s.confidence)?;
+                        report.suggestions += 1;
+                    }
+                    catalog.mark_done(item.asset, STAGE, VERSION)?;
+                    report.analyzed += 1;
+                }
                 Err(e) => {
                     report.errors.push((item.path, e.to_string()));
                     failed.insert(item.asset.0);
-                    continue;
                 }
-            };
-            for s in suggest(&facts) {
-                let label = catalog.label(s.kind, s.name)?;
-                catalog.suggest(item.asset, label, Source::Rules, s.confidence)?;
-                report.suggestions += 1;
             }
-            catalog.mark_done(item.asset, STAGE, VERSION)?;
-            report.analyzed += 1;
+
+            let pending = initial_pending.saturating_sub(report.analyzed + failed.len());
+            if progress(&RunProgress {
+                analyzed: report.analyzed,
+                pending,
+            }) == Control::Stop
+            {
+                report.stopped = true;
+                return Ok(report);
+            }
         }
         if !progressed {
             break;
