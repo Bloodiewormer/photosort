@@ -28,3 +28,6 @@ Formato: fecha · decisión · alternativas · porqué.
   - DirectML se registra en el entorno de ONNX Runtime con error obligatorio, porque `oar-ocr` caería a CPU en silencio.
   - Se recomienda leer cada línea con los dos reconocedores (y no en cascada), porque el general inventa ideogramas con mucha confianza ante texto coreano.
   - Pendiente: medir con una muestra real aprobada.
+- **2026-11-26 · El piloto de OCR con fotos reales se revisa en un informe local** (y no leyendo los resultados en un servicio externo).
+  - La consola de la herramienta solo muestra cantidades y tiempos; el texto leído se queda en el equipo.
+  - El filtro de 0,65 contra texto inventado atenúa líneas, no las borra, hasta medirlo en fotos reales.

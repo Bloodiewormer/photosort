@@ -156,6 +156,12 @@ fn map_image_error(err: ImageError) -> ThumbError {
     }
 }
 
+/// Decodes `source` read-only, upright per its EXIF orientation, with the thumbnail size limits.
+/// Images larger than `max_px` on a side are scaled down in memory.
+pub fn decode(source: &Path, max_px: u32) -> Result<DynamicImage, ThumbError> {
+    decode_and_resize(source, format_for_extension(source)?, max_px)
+}
+
 fn decode_and_resize(
     source: &Path,
     ext_format: ImageFormat,
