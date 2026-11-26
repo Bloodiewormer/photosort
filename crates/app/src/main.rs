@@ -2,8 +2,7 @@ use app::model::{ChipMode, FilterState, GridLayout, Selection};
 use app::settings::{self, Settings};
 use app::ui::PhotosortApp;
 use app::worker::{
-    IndexEvent, IndexWorker, NoThumbnails, PreviewWorker, ThumbPool, ThumbRequest,
-    ThumbnailProvider,
+    IndexEvent, IndexWorker, PreviewWorker, ThumbPool, ThumbRequest, ThumbnailProvider,
 };
 use catalog::{Catalog, LabelKind, Sort, Source};
 use fsguard::{DestPath, ensure_writable};
@@ -78,7 +77,7 @@ fn main() -> ExitCode {
             Ok(Box::new(PhotosortApp::new(
                 cc,
                 data_dir,
-                Arc::new(NoThumbnails),
+                app::thumb_provider::open_thumbnails,
             )))
         }),
     );
@@ -308,6 +307,33 @@ fn run_self_test() -> bool {
         Ok(())
     })();
     check("thumbnail_pool_and_preview_worker", media_res, &mut all_ok);
+
+    // 5. Real thumbnails: the cache must appear under the data dir, never inside the library
+    let real_thumbs_res = (|| -> Result<(), String> {
+        let (provider, warning) =
+            app::thumb_provider::open_thumbnails(&data_dir, &cfg.valid_roots());
+        if let Some(w) = warning {
+            return Err(w);
+        }
+        let pool = ThumbPool::new(2, provider, None);
+        pool.request(ThumbRequest {
+            source: entries[0].path.clone(),
+            sha256: entries[0].sha256.clone(),
+        });
+        let thumb = pool.recv().map_err(|e| e.to_string())?;
+        let img = thumb.image?;
+        if img.size != [32, 24] {
+            return Err(format!("unexpected thumb size: {:?}", img.size));
+        }
+        let cached = fs::read_dir(data_dir.join("cache"))
+            .map_err(|e| e.to_string())?
+            .count();
+        if cached != 1 {
+            return Err(format!("expected 1 cached thumbnail, found {cached}"));
+        }
+        Ok(())
+    })();
+    check("real_thumbnails_end_to_end", real_thumbs_res, &mut all_ok);
 
     // Ensure TempDir drops cleanly at the end of self-test.
     drop(tmp);

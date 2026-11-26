@@ -58,16 +58,22 @@ impl PhotosortApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         data_dir: PathBuf,
-        thumbs: Arc<dyn ThumbnailProvider>,
+        open_thumbnails: impl FnOnce(
+            &Path,
+            &[fsguard::LibraryRoot],
+        ) -> (Arc<dyn ThumbnailProvider>, Option<String>),
     ) -> Self {
         let loaded = settings::load(&data_dir);
         let settings = loaded.settings;
+        let (thumbs, thumbs_warning) = open_thumbnails(&data_dir, &settings.valid_roots());
         theme::configure_styles(&cc.egui_ctx, settings.theme);
 
         let ctx_for_notify = cc.egui_ctx.clone();
         let notify: Notify = Arc::new(move || ctx_for_notify.request_repaint());
 
-        let mut banner_error = loaded.warning;
+        let mut banner_error = loaded
+            .warning
+            .or(thumbs_warning.map(|why| format!("Miniaturas desactivadas: {why}")));
         let catalog = match settings::db_dest_path(&data_dir, &settings.valid_roots())
             .map_err(|e| e.to_string())
             .and_then(|db| Catalog::open(&db).map_err(|e| e.to_string()))
