@@ -16,20 +16,24 @@ impl DuplicateGroup {
     }
 }
 
+const DUPLICATE_GROUPS_SQL: &str = "SELECT l.asset_id, l.path, a.sha256, a.size, l.size, l.mtime_ns
+     FROM location l
+     JOIN asset a ON a.id = l.asset_id
+     WHERE l.missing = 0 AND l.asset_id IN (
+         SELECT asset_id FROM location WHERE missing = 0
+         GROUP BY asset_id HAVING COUNT(*) > 1
+     )
+     ORDER BY l.asset_id ASC, l.path ASC";
+
 impl Catalog {
+    pub fn explain_duplicate_groups(&self) -> Result<Vec<String>, CatalogError> {
+        self.explain_sql(DUPLICATE_GROUPS_SQL, [])
+    }
+
     /// Non-missing locations sharing the same asset (2+ locations per group), ordered by wasted
     /// bytes (`size * (n - 1)`) descending then `sha256` ascending, with entries ordered by path.
     pub fn duplicate_groups(&self) -> Result<Vec<DuplicateGroup>, CatalogError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT l.asset_id, l.path, a.sha256, a.size, l.size, l.mtime_ns
-             FROM location l
-             JOIN asset a ON a.id = l.asset_id
-             WHERE l.missing = 0 AND l.asset_id IN (
-                 SELECT asset_id FROM location WHERE missing = 0
-                 GROUP BY asset_id HAVING COUNT(*) > 1
-             )
-             ORDER BY l.asset_id ASC, l.path ASC",
-        )?;
+        let mut stmt = self.conn.prepare(DUPLICATE_GROUPS_SQL)?;
 
         let rows = stmt.query_map([], |r| {
             let asset_id: i64 = r.get(0)?;
