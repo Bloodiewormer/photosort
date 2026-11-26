@@ -3,21 +3,21 @@ use rusqlite::types::Type;
 use rusqlite::{OptionalExtension, ToSql, params, params_from_iter};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AssetId(pub i64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LabelId(pub i64);
 
 /// General categories, specific tags and recognised entities (works, groups, people) are different things.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LabelKind {
     Category,
     Tag,
     Entity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Source {
     Ai,
     Ocr,
@@ -25,7 +25,7 @@ pub enum Source {
     User,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Status {
     Suggested,
     Accepted,
@@ -43,7 +43,7 @@ pub struct Assignment {
 }
 
 /// Every condition must hold. Rejected labels never match.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Filter {
     /// The image has all of these labels.
     pub require: Vec<LabelId>,
@@ -73,7 +73,7 @@ impl LabelKind {
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "category" => Self::Category,
             "tag" => Self::Tag,
@@ -116,7 +116,7 @@ impl Status {
 }
 
 /// The database has CHECK constraints, so an unknown value means a damaged file: report it.
-fn unexpected(column: usize, value: &str) -> rusqlite::Error {
+pub(crate) fn unexpected(column: usize, value: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         column,
         Type::Text,
@@ -127,6 +127,27 @@ fn unexpected(column: usize, value: &str) -> rusqlite::Error {
 /// Matches the images that carry the label, ignoring rejected ones. The caller appends the comparison.
 const HAS: &str = "EXISTS (SELECT 1 FROM asset_label al WHERE al.asset_id = l.asset_id \
                    AND al.status <> 'rejected' AND al.label_id";
+
+/// Appends the filter's WHERE predicates against table alias `l` (location).
+pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, filter: &Filter) {
+    for id in &filter.require {
+        sql.push_str(&format!(" AND {HAS} = ?)"));
+        args.push(Box::new(id.0));
+    }
+    if !filter.any.is_empty() {
+        let marks = vec!["?"; filter.any.len()].join(",");
+        sql.push_str(&format!(" AND {HAS} IN ({marks}))"));
+        args.extend(filter.any.iter().map(|id| Box::new(id.0) as Box<dyn ToSql>));
+    }
+    for id in &filter.exclude {
+        sql.push_str(&format!(" AND NOT {HAS} = ?)"));
+        args.push(Box::new(id.0));
+    }
+    if let Some(text) = &filter.path_contains {
+        sql.push_str(" AND instr(lower(l.path), lower(?)) > 0");
+        args.push(Box::new(text.clone()));
+    }
+}
 
 impl Catalog {
     /// Returns the label, creating it the first time. Names ignore case within a kind.
@@ -219,23 +240,7 @@ impl Catalog {
     pub fn find(&self, filter: &Filter) -> Result<Vec<PathBuf>, CatalogError> {
         let mut sql = String::from("SELECT l.path FROM location l WHERE l.missing = 0");
         let mut args: Vec<Box<dyn ToSql>> = Vec::new();
-        for id in &filter.require {
-            sql.push_str(&format!(" AND {HAS} = ?)"));
-            args.push(Box::new(id.0));
-        }
-        if !filter.any.is_empty() {
-            let marks = vec!["?"; filter.any.len()].join(",");
-            sql.push_str(&format!(" AND {HAS} IN ({marks}))"));
-            args.extend(filter.any.iter().map(|id| Box::new(id.0) as Box<dyn ToSql>));
-        }
-        for id in &filter.exclude {
-            sql.push_str(&format!(" AND NOT {HAS} = ?)"));
-            args.push(Box::new(id.0));
-        }
-        if let Some(text) = &filter.path_contains {
-            sql.push_str(" AND instr(lower(l.path), lower(?)) > 0");
-            args.push(Box::new(text.clone()));
-        }
+        append_filter(&mut sql, &mut args, filter);
         sql.push_str(" ORDER BY l.path");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args.iter()), |r| r.get::<_, String>(0))?;
