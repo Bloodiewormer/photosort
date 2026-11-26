@@ -14,20 +14,29 @@ Opciones útiles:
 - `--data-dir <carpeta>`: carpeta base para guardar el entorno demo (`<carpeta>\library` y `<carpeta>\data`). Si se omite, se crea un directorio temporal que se elimina al cerrar.
 - `--theme dark|light`: fuerza el tema oscuro o claro durante la ejecución.
 - `--window-size <Ancho>x<Alto>`: tamaño inicial de la ventana en píxeles (por defecto `1280x820`).
+- `--view gallery|review|duplicates|export`: selecciona la vista inicial y el criterio de espera al tomar capturas (por defecto `gallery`).
 
 ## Tomar una captura de pantalla
 
 ```powershell
-cargo run -p app -- --demo --screenshot "$env:TEMP\photosort-dark.png" --theme dark
-cargo run -p app -- --demo --screenshot "$env:TEMP\photosort-light.png" --theme light
+cargo run -p app -- --demo --screenshot "$env:TEMP\photosort-gallery-dark.png" --view gallery --theme dark
+cargo run -p app -- --demo --screenshot "$env:TEMP\photosort-review-light.png" --view review --theme light
+cargo run -p app -- --demo --screenshot "$env:TEMP\photosort-duplicates-dark.png" --view duplicates --theme dark
+cargo run -p app -- --demo --screenshot "$env:TEMP\photosort-export-light.png" --view export --theme light
 ```
 
-Cómo funciona `--screenshot <salida.png>`:
+Cómo funciona `--screenshot <salida.png>` según `--view`:
 
-1. Espera a que las miniaturas visibles y la vista previa del inspector terminen de cargarse.
-2. Selecciona automáticamente la primera imagen para poblar el inspector.
-3. Deja pasar unos fotogramas de estabilización (`--screenshot-delay-frames <N>`, por defecto `3`), solicita la captura al viewport de `egui`, guarda el archivo PNG y cierra la aplicación con código `0` (o distinto de cero si hay error o tiempo de espera agotado).
-4. La ruta de salida se valida con `fsguard::ensure_writable` frente a las raíces de biblioteca registradas: cualquier ruta dentro de la biblioteca demo es rechazada.
+- **`gallery`** (por defecto): selecciona automáticamente la primera imagen para poblar el inspector y espera a que carguen las miniaturas visibles y la vista previa.
+- **`review`**: abre la pestaña **Revisión** y espera a que terminen de cargar las miniaturas del grupo activo.
+- **`duplicates`**: abre la pestaña **Duplicados** y espera a que carguen las miniaturas de todos los grupos visibles.
+- **`export`**: abre el asistente de exportación sobre todas las imágenes demo con destino preconfigurado en `<base demo>\export-out` (fuera de la biblioteca demo y validado con `fsguard::ensure_export_dir`), calcula la vista previa y espera a que esté lista (`Ready`) junto con las miniaturas de fondo.
+
+En todos los casos:
+
+1. Tras cumplirse el criterio de carga de la vista, deja pasar unos fotogramas de estabilización (`--screenshot-delay-frames <N>`, por defecto `3`), solicita la captura al viewport de `egui`, guarda el archivo PNG y cierra la aplicación con código `0` (o distinto de cero si hay error o tiempo de espera agotado).
+2. La ruta de salida se valida con `fsguard::ensure_writable` frente a las raíces de biblioteca registradas: cualquier ruta dentro de la biblioteca demo es rechazada.
+3. Si se indica un nombre de vista desconocido en `--view`, el programa termina con error y un mensaje explicativo en español.
 
 ## Qué contienen los datos demo
 
