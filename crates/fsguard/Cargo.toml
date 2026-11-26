@@ -1,0 +1,10 @@
+[package]
+name = "fsguard"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dunce = "1.0.5"
+
+[dev-dependencies]
+tempfile = "3.27.0"
