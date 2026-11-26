@@ -1,7 +1,8 @@
 use crate::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use crate::model::{
-    ChipMode, FilterState, GridLayout, MoveDir, Selection, count_phrase, format_bytes,
-    format_timestamp_utc, plural_word, selected_phrase,
+    CHIP_FILTER_HELP, ChipMode, FilterState, GridLayout, MoveDir, Selection, count_phrase,
+    format_bytes, format_chip_label, format_chip_tooltip, format_timestamp_utc, plural_word,
+    selected_phrase,
 };
 use crate::review_flow::ReviewFlow;
 use crate::settings::{self, Settings, Theme};
@@ -857,7 +858,7 @@ impl PhotosortApp {
                         }
                     });
                     ui.label(
-                        RichText::new("Clic para alternar: Y / O / NO")
+                        RichText::new(CHIP_FILTER_HELP)
                             .size(theme::FONT_SMALL)
                             .color(palette.text_secondary.color32()),
                     );
@@ -891,33 +892,44 @@ impl PhotosortApp {
                             ui.horizontal_wrapped(|ui| {
                                 for lc in group {
                                     let mode = self.filter.chip_mode(lc.label);
-                                    let (bg, fg, prefix) = match mode {
+                                    let count = lc.images.max(0) as usize;
+                                    let (bg, fg, stroke) = match mode {
                                         None => (
                                             palette.bg_card.color32(),
                                             palette.text_primary.color32(),
-                                            "",
+                                            Stroke::new(1.0, palette.border.color32()),
                                         ),
-                                        Some(ChipMode::Require) => (
-                                            palette.chip_require_bg.color32(),
-                                            palette.chip_require_fg.color32(),
-                                            "Y: ",
-                                        ),
-                                        Some(ChipMode::Any) => (
-                                            palette.chip_any_bg.color32(),
-                                            palette.chip_any_fg.color32(),
-                                            "O: ",
-                                        ),
-                                        Some(ChipMode::Exclude) => (
-                                            palette.chip_exclude_bg.color32(),
-                                            palette.chip_exclude_fg.color32(),
-                                            "NO: ",
-                                        ),
+                                        Some(ChipMode::Require) => {
+                                            let c = palette.chip_require_fg.color32();
+                                            (
+                                                palette.chip_require_bg.color32(),
+                                                c,
+                                                Stroke::new(1.5, c),
+                                            )
+                                        }
+                                        Some(ChipMode::Any) => {
+                                            let c = palette.chip_any_fg.color32();
+                                            (palette.chip_any_bg.color32(), c, Stroke::new(1.5, c))
+                                        }
+                                        Some(ChipMode::Exclude) => {
+                                            let c = palette.chip_exclude_fg.color32();
+                                            (
+                                                palette.chip_exclude_bg.color32(),
+                                                c,
+                                                Stroke::new(1.5, c),
+                                            )
+                                        }
                                     };
-                                    let text = format!("{prefix}{} ({})", lc.name, lc.images);
-                                    let btn = egui::Button::new(RichText::new(text).color(fg))
-                                        .fill(bg)
-                                        .stroke(Stroke::new(1.0, palette.border.color32()));
-                                    if ui.add(btn).clicked() {
+                                    let text = format_chip_label(mode, &lc.name, count);
+                                    let mut rt = RichText::new(text).color(fg);
+                                    if mode.is_some() {
+                                        rt = rt.strong();
+                                    }
+                                    let btn = egui::Button::new(rt).fill(bg).stroke(stroke);
+                                    let resp = ui
+                                        .add(btn)
+                                        .on_hover_text(format_chip_tooltip(mode, &lc.name, count));
+                                    if resp.clicked() {
                                         self.filter.cycle_chip(lc.label);
                                         filter_changed = true;
                                     }

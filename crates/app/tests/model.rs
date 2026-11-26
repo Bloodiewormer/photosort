@@ -223,3 +223,45 @@ fn spanish_pluralisation_helpers_handle_zero_one_and_many() {
     assert_eq!(selected_phrase(1), "1 seleccionada");
     assert_eq!(selected_phrase(3), "3 seleccionadas");
 }
+
+#[test]
+fn chip_mode_info_maps_every_mode_to_explicit_text_prefix_and_tooltip() {
+    use app::model::{CHIP_FILTER_HELP, chip_mode_info, format_chip_label, format_chip_tooltip};
+
+    assert!(CHIP_FILTER_HELP.contains("Y"));
+    assert!(CHIP_FILTER_HELP.contains("O"));
+    assert!(CHIP_FILTER_HELP.contains("NO"));
+
+    let inactive = chip_mode_info(None);
+    let req = chip_mode_info(Some(ChipMode::Require));
+    let any = chip_mode_info(Some(ChipMode::Any));
+    let exc = chip_mode_info(Some(ChipMode::Exclude));
+
+    assert_eq!(inactive.prefix, "");
+    assert_eq!(req.prefix, "Y · ");
+    assert_eq!(any.prefix, "O · ");
+    assert_eq!(exc.prefix, "NO · ");
+
+    assert!(!inactive.tooltip.is_empty());
+    assert!(req.tooltip.contains("Y"));
+    assert!(any.tooltip.contains("O"));
+    assert!(exc.tooltip.contains("NO"));
+
+    assert_eq!(format_chip_label(None, "Manga", 12), "Manga (12)");
+    assert_eq!(
+        format_chip_label(Some(ChipMode::Require), "Manga", 12),
+        "Y · Manga (12)"
+    );
+    assert_eq!(
+        format_chip_label(Some(ChipMode::Any), "Manga", 12),
+        "O · Manga (12)"
+    );
+    assert_eq!(
+        format_chip_label(Some(ChipMode::Exclude), "Manga", 12),
+        "NO · Manga (12)"
+    );
+
+    let tip_one = format_chip_tooltip(Some(ChipMode::Require), "Manga", 1);
+    assert!(tip_one.contains("1 imagen"));
+    assert!(tip_one.contains(req.tooltip));
+}

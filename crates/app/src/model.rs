@@ -249,6 +249,51 @@ pub enum ChipMode {
     Exclude,
 }
 
+pub const CHIP_FILTER_HELP: &str =
+    "Cada clic cambia el filtro: exigir (Y) → incluir alguna (O) → excluir (NO) → sin filtro.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChipModeInfo {
+    pub prefix: &'static str,
+    pub tooltip: &'static str,
+}
+
+/// Maps an optional chip filter mode to its explicit text prefix and explanatory Spanish tooltip.
+pub fn chip_mode_info(mode: Option<ChipMode>) -> ChipModeInfo {
+    match mode {
+        None => ChipModeInfo {
+            prefix: "",
+            tooltip: "Sin filtro. Clic para exigir esta etiqueta (Y).",
+        },
+        Some(ChipMode::Require) => ChipModeInfo {
+            prefix: "Y · ",
+            tooltip: "Modo Y (exigir): solo muestra imágenes con esta etiqueta. Clic para cambiar a O.",
+        },
+        Some(ChipMode::Any) => ChipModeInfo {
+            prefix: "O · ",
+            tooltip: "Modo O (alguna): muestra imágenes con al menos una etiqueta en O. Clic para cambiar a NO.",
+        },
+        Some(ChipMode::Exclude) => ChipModeInfo {
+            prefix: "NO · ",
+            tooltip: "Modo NO (excluir): oculta imágenes con esta etiqueta. Clic para quitar el filtro.",
+        },
+    }
+}
+
+/// Formats a filter chip's button text with explicit mode prefix when active.
+pub fn format_chip_label(mode: Option<ChipMode>, name: &str, count: usize) -> String {
+    format!("{}{name} ({count})", chip_mode_info(mode).prefix)
+}
+
+/// Formats a filter chip's hover tooltip with its image count and active mode explanation.
+pub fn format_chip_tooltip(mode: Option<ChipMode>, name: &str, count: usize) -> String {
+    format!(
+        "{name} ({})\n{}",
+        count_phrase(count, "imagen", "imágenes"),
+        chip_mode_info(mode).tooltip
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilterState {
     pub search: String,
