@@ -1,0 +1,13 @@
+[package]
+name = "thumbs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fsguard = { path = "../fsguard" }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+
+[dev-dependencies]
+scanner = { path = "../scanner" }
+tempfile = "3.27.0"
+walkdir = "2.5.1"
