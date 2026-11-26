@@ -1,0 +1,9 @@
+{
+  "enabledPlugins": {
+    "pstack@pstack-claude": false,
+    "mattpocock-skills@mattpocock": false,
+    "android-skills@android-skills": false,
+    "chrisbanes-skills@chrisbanes-skills": false,
+    "java-dev@sivalabs-agent-skills": false
+  }
+}

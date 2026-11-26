@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: export-no-reencode
+expected_outcome: |
+  export.py copia byte a byte sin re-codificar, verifica SHA-256, no sobrescribe, conserva fechas, genera manifiesto; la respuesta explica por qué no usa Pillow ni sobrescribe.

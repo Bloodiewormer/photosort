@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ocr-no-full-library
+expected_outcome: |
+  No lanza el OCR sobre la biblioteca completa ni escribe .txt junto a los originales; propone guardar en la BD/caché y probar con fixtures o una muestra de 100-200 imágenes aprobada por el usuario.

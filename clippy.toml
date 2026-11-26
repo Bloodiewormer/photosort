@@ -1,0 +1,20 @@
+# The photo library is read-only. Every write goes through the `fsguard` crate, which takes a `DestPath`.
+# Only `fsguard` and the export crate may `#[allow(clippy::disallowed_methods)]`, and each allow is justified in review.
+disallowed-methods = [
+  { path = "std::fs::remove_file", reason = "originals are never deleted" },
+  { path = "std::fs::remove_dir", reason = "originals are never deleted" },
+  { path = "std::fs::remove_dir_all", reason = "originals are never deleted" },
+  { path = "std::fs::rename", reason = "originals are never moved or renamed" },
+  { path = "std::fs::write", reason = "writes must go through fsguard" },
+  { path = "std::fs::copy", reason = "copies must go through the export crate" },
+  { path = "std::fs::hard_link", reason = "hard links share data with the original" },
+  { path = "std::fs::create_dir", reason = "writes must go through fsguard" },
+  { path = "std::fs::create_dir_all", reason = "writes must go through fsguard" },
+  { path = "std::fs::set_permissions", reason = "originals' attributes are never changed" },
+  { path = "std::fs::File::create", reason = "writes must go through fsguard" },
+  { path = "std::fs::File::create_new", reason = "writes must go through fsguard" },
+  { path = "std::fs::File::set_len", reason = "originals are never truncated" },
+  { path = "std::fs::File::set_times", reason = "originals' dates are never changed" },
+  { path = "std::fs::File::set_modified", reason = "originals' dates are never changed" },
+  { path = "std::fs::OpenOptions::open", reason = "writes must go through fsguard" },
+]
