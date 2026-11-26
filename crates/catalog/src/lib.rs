@@ -1,5 +1,7 @@
+mod analysis;
 mod labels;
 
+pub use analysis::Pending;
 pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, Source, Status};
 
 use fsguard::{DestPath, LibraryRoot};
@@ -42,6 +44,12 @@ CREATE TABLE IF NOT EXISTS asset_label (
     PRIMARY KEY (asset_id, label_id)
 );
 CREATE INDEX IF NOT EXISTS asset_label_label ON asset_label(label_id);
+CREATE TABLE IF NOT EXISTS analysis (
+    asset_id INTEGER NOT NULL REFERENCES asset(id),
+    stage    TEXT NOT NULL,
+    version  INTEGER NOT NULL,
+    PRIMARY KEY (asset_id, stage)
+);
 ";
 
 #[derive(Debug)]
