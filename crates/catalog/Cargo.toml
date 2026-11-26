@@ -1,0 +1,13 @@
+[package]
+name = "catalog"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fsguard = { path = "../fsguard" }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+scanner = { path = "../scanner" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+walkdir = "2.5.1"

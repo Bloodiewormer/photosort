@@ -12,6 +12,10 @@ impl LibraryRoot {
     pub fn new(path: &Path) -> io::Result<Self> {
         dunce::canonicalize(path).map(Self)
     }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
 /// A path proven to lie outside every library root. The only way to get one is [`ensure_writable`].
