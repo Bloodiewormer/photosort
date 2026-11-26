@@ -1,0 +1,16 @@
+[package]
+name = "rules"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+catalog = { path = "../catalog" }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+kamadak-exif = "0.6.2"
+
+[dev-dependencies]
+dunce = "1.0.5"
+fsguard = { path = "../fsguard" }
+scanner = { path = "../scanner" }
+tempfile = "3.27.0"
+walkdir = "2.5.1"
