@@ -610,7 +610,10 @@ impl PhotosortApp {
                         egui::TextEdit::singleline(&mut self.filter.search)
                             .id(search_id)
                             .desired_width(240.0)
-                            .hint_text("Buscar por ruta o nombre (/ o Ctrl+F)..."),
+                            .hint_text(theme::hint_text(
+                                palette,
+                                "Buscar por ruta o nombre (/ o Ctrl+F)...",
+                            )),
                     );
                     if self.focus_search_next_frame {
                         search_resp.request_focus();
@@ -1439,7 +1442,7 @@ impl PhotosortApp {
                         let edit = ui.add(
                             egui::TextEdit::singleline(&mut self.new_label_text)
                                 .desired_width((ui.available_width() - 78.0).max(80.0))
-                                .hint_text("Nombre..."),
+                                .hint_text(theme::hint_text(palette, "Nombre...")),
                         );
                         let submit = ui.button("Añadir").clicked()
                             || (edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));

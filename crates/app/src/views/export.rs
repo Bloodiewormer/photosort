@@ -134,7 +134,10 @@ fn draw_choose_step(
         let edit = ui.add(
             egui::TextEdit::singleline(&mut path_text)
                 .desired_width(edit_w)
-                .hint_text("Elige una carpeta fuera de tus bibliotecas…"),
+                .hint_text(theme::hint_text(
+                    palette,
+                    "Elige una carpeta fuera de tus bibliotecas…",
+                )),
         );
         if edit.changed() {
             wizard.set_dest(PathBuf::from(path_text.trim()));

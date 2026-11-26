@@ -68,6 +68,7 @@ pub struct Palette {
     pub border: Rgb,
     pub text_primary: Rgb,
     pub text_secondary: Rgb,
+    pub text_hint: Rgb,
     pub accent: Rgb,
     pub accent_bg: Rgb,
     pub chip_require_bg: Rgb,
@@ -91,6 +92,7 @@ pub const DARK_PALETTE: Palette = Palette {
     border: Rgb(58, 65, 78),
     text_primary: Rgb(236, 239, 244),
     text_secondary: Rgb(168, 178, 194),
+    text_hint: Rgb(152, 162, 178),
     accent: Rgb(91, 155, 213),
     accent_bg: Rgb(31, 58, 86),
     chip_require_bg: Rgb(29, 64, 50),
@@ -114,6 +116,7 @@ pub const LIGHT_PALETTE: Palette = Palette {
     border: Rgb(192, 201, 214),
     text_primary: Rgb(26, 30, 36),
     text_secondary: Rgb(72, 82, 98),
+    text_hint: Rgb(84, 94, 110),
     accent: Rgb(31, 95, 168),
     accent_bg: Rgb(220, 235, 250),
     chip_require_bg: Rgb(216, 243, 229),
@@ -136,6 +139,11 @@ pub fn palette_for(ctx: &egui::Context) -> &'static Palette {
     }
 }
 
+/// Builds accessible placeholder text styled with the active palette's `text_hint` colour.
+pub fn hint_text(palette: &Palette, text: &str) -> egui::RichText {
+    egui::RichText::new(text).color(palette.text_hint.color32())
+}
+
 fn build_visuals(dark: bool, p: &Palette) -> Visuals {
     let mut v = if dark {
         Visuals::dark()
@@ -145,8 +153,12 @@ fn build_visuals(dark: bool, p: &Palette) -> Visuals {
     v.panel_fill = p.bg_panel.color32();
     v.window_fill = p.bg_panel.color32();
     v.extreme_bg_color = p.bg_canvas.color32();
+    v.text_edit_bg_color = Some(p.bg_canvas.color32());
     v.faint_bg_color = p.bg_card.color32();
     v.override_text_color = Some(p.text_primary.color32());
+    // egui's TextEdit styles hint_text via visuals.weak_text_color(); setting an opaque
+    // palette colour keeps placeholder text at >= 4.5:1 contrast in both themes.
+    v.weak_text_color = Some(p.text_hint.color32());
     v.selection.bg_fill = p.accent_bg.color32();
     v.selection.stroke = Stroke::new(FOCUS_STROKE_WIDTH, p.accent.color32());
 
@@ -251,6 +263,11 @@ mod tests {
                 secondary >= 4.5,
                 "{name}: text_secondary on {surf_name} contrast {secondary:.2} < 4.5"
             );
+            let hint = p.text_hint.contrast_ratio(bg);
+            assert!(
+                hint >= 4.5,
+                "{name}: text_hint on {surf_name} contrast {hint:.2} < 4.5"
+            );
         }
 
         let pairs = [
@@ -276,6 +293,31 @@ mod tests {
     fn dark_and_light_palettes_meet_wcag_aa_contrast_ratio() {
         assert_palette_accessible("dark", &DARK_PALETTE);
         assert_palette_accessible("light", &LIGHT_PALETTE);
+    }
+
+    #[test]
+    fn text_edit_placeholder_visuals_meet_wcag_aa_contrast_in_both_themes() {
+        for (name, dark, palette) in [
+            ("dark", true, &DARK_PALETTE),
+            ("light", false, &LIGHT_PALETTE),
+        ] {
+            let visuals = build_visuals(dark, palette);
+            let hint = visuals.weak_text_color();
+            let bg = visuals.text_edit_bg_color();
+            assert_eq!(hint, palette.text_hint.color32(), "{name}: weak_text_color");
+            assert_eq!(
+                bg,
+                palette.bg_canvas.color32(),
+                "{name}: text_edit_bg_color"
+            );
+            assert_eq!(hint.a(), 255, "{name}: hint text must be opaque");
+            let ratio =
+                Rgb(hint.r(), hint.g(), hint.b()).contrast_ratio(Rgb(bg.r(), bg.g(), bg.b()));
+            assert!(
+                ratio >= 4.5,
+                "{name}: placeholder hint on actual TextEdit background contrast {ratio:.2} < 4.5"
+            );
+        }
     }
 
     #[test]
