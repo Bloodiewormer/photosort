@@ -288,25 +288,38 @@ impl Catalog {
             .collect::<Result<_, _>>()?)
     }
 
+    // `MIN(path)` is NULL iff the asset has no present location, avoiding a duplicate EXISTS probe.
+    const REVIEW_QUEUE_SQL: &str = "SELECT a.asset_id, a.label_id, l.name, a.confidence,
+                (SELECT MIN(path) FROM location WHERE asset_id = a.asset_id AND missing = 0)
+         FROM asset_label a JOIN label l ON l.id = a.label_id
+         WHERE a.status = 'suggested' AND a.confidence < ?1
+         ORDER BY a.confidence, a.asset_id, a.label_id";
+
+    pub fn explain_review_queue(&self, below: f64) -> Result<Vec<String>, CatalogError> {
+        self.explain_sql(Self::REVIEW_QUEUE_SQL, [below])
+    }
+
     /// Suggestions the user has not decided on and whose confidence is below `below`, lowest first.
     pub fn review_queue(&self, below: f64) -> Result<Vec<ReviewItem>, CatalogError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT a.asset_id, a.label_id, l.name, a.confidence,
-                    (SELECT MIN(path) FROM location WHERE asset_id = a.asset_id AND missing = 0)
-             FROM asset_label a JOIN label l ON l.id = a.label_id
-             WHERE a.status = 'suggested' AND a.confidence < ?1
-               AND EXISTS (SELECT 1 FROM location WHERE asset_id = a.asset_id AND missing = 0)
-             ORDER BY a.confidence, a.asset_id, a.label_id",
-        )?;
+        let mut stmt = self.conn.prepare(Self::REVIEW_QUEUE_SQL)?;
         let rows = stmt.query_map([below], |r| {
-            Ok(ReviewItem {
+            let Some(path) = r.get::<_, Option<String>>(4)? else {
+                return Ok(None);
+            };
+            Ok(Some(ReviewItem {
                 asset: AssetId(r.get(0)?),
                 label: LabelId(r.get(1)?),
                 name: r.get(2)?,
                 confidence: r.get(3)?,
-                path: PathBuf::from(r.get::<_, String>(4)?),
-            })
+                path: PathBuf::from(path),
+            }))
         })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(item) = row? {
+                out.push(item);
+            }
+        }
+        Ok(out)
     }
 }

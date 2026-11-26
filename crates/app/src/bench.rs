@@ -111,6 +111,7 @@ pub struct QueryTiming {
     pub rows: usize,
     pub target_p95_ms: f64,
     pub status: TargetStatus,
+    pub explain_plan: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +384,22 @@ pub fn format_report(report: &BenchReport) -> String {
             q.target_p95_ms,
             q.status.as_str()
         );
+    }
+
+    let warned_plans: Vec<_> = report
+        .queries
+        .iter()
+        .filter_map(|q| q.explain_plan.as_ref().map(|p| (&q.name, p)))
+        .collect();
+    if !warned_plans.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Planes de consulta (EXPLAIN QUERY PLAN) para WARN:");
+        for (name, lines) in warned_plans {
+            let _ = writeln!(out, "  [{name}]");
+            for line in lines {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
     }
 
     let _ = writeln!(out);
@@ -726,14 +743,16 @@ fn seed_realistic_labels(
     Ok((label_ids, assignments))
 }
 
-fn time_query<F>(
+fn time_query<F, E>(
     name: &str,
     runs: usize,
     target_p95_ms: f64,
     mut f: F,
+    mut explain: E,
 ) -> Result<QueryTiming, String>
 where
     F: FnMut() -> Result<usize, String>,
+    E: FnMut() -> Result<Vec<String>, String>,
 {
     let runs = runs.max(1);
     let mut samples = Vec::with_capacity(runs);
@@ -746,6 +765,11 @@ where
     let mean = mean_ms(&samples);
     let p95 = percentile_ms(&samples, 95.0);
     let status = evaluate_target(p95, target_p95_ms);
+    let explain_plan = if status == TargetStatus::Warn {
+        Some(explain()?)
+    } else {
+        None
+    };
     Ok(QueryTiming {
         name: name.to_string(),
         runs,
@@ -754,6 +778,7 @@ where
         rows: last_rows,
         target_p95_ms,
         status,
+        explain_plan,
     })
 }
 
@@ -935,12 +960,21 @@ where
         ("entries (vacío, ModifiedDesc)", Sort::ModifiedDesc),
     ];
     for (name, sort) in sorts {
-        queries.push(time_query(name, runs, TARGET_QUERY_P95_MS, || {
-            Ok(cat
-                .entries(&empty_filter, sort)
-                .map_err(|e| e.to_string())?
-                .len())
-        })?);
+        queries.push(time_query(
+            name,
+            runs,
+            TARGET_QUERY_P95_MS,
+            || {
+                Ok(cat
+                    .entries(&empty_filter, sort)
+                    .map_err(|e| e.to_string())?
+                    .len())
+            },
+            || {
+                cat.explain_entries(&empty_filter, sort)
+                    .map_err(|e| e.to_string())
+            },
+        )?);
     }
 
     let filter_1 = Filter {
@@ -956,6 +990,10 @@ where
                 .entries(&filter_1, Sort::PathAsc)
                 .map_err(|e| e.to_string())?
                 .len())
+        },
+        || {
+            cat.explain_entries(&filter_1, Sort::PathAsc)
+                .map_err(|e| e.to_string())
         },
     )?);
 
@@ -973,6 +1011,10 @@ where
                 .entries(&filter_2, Sort::PathAsc)
                 .map_err(|e| e.to_string())?
                 .len())
+        },
+        || {
+            cat.explain_entries(&filter_2, Sort::PathAsc)
+                .map_err(|e| e.to_string())
         },
     )?);
 
@@ -992,6 +1034,10 @@ where
                 .map_err(|e| e.to_string())?
                 .len())
         },
+        || {
+            cat.explain_entries(&filter_3, Sort::PathAsc)
+                .map_err(|e| e.to_string())
+        },
     )?);
 
     let filter_path = Filter {
@@ -1008,6 +1054,10 @@ where
                 .map_err(|e| e.to_string())?
                 .len())
         },
+        || {
+            cat.explain_entries(&filter_path, Sort::PathAsc)
+                .map_err(|e| e.to_string())
+        },
     )?);
 
     queries.push(time_query(
@@ -1015,6 +1065,7 @@ where
         runs,
         TARGET_QUERY_P95_MS,
         || Ok(cat.labels_in_use().map_err(|e| e.to_string())?.len()),
+        || cat.explain_labels_in_use().map_err(|e| e.to_string()),
     )?);
 
     let mut duplicate_groups = 0usize;
@@ -1026,6 +1077,7 @@ where
             duplicate_groups = cat.duplicate_groups().map_err(|e| e.to_string())?.len();
             Ok(duplicate_groups)
         },
+        || cat.explain_duplicate_groups().map_err(|e| e.to_string()),
     )?);
 
     queries.push(time_query(
@@ -1038,12 +1090,22 @@ where
                 .map_err(|e| e.to_string())?
                 .len())
         },
+        || {
+            cat.explain_review_queue(BENCH_REVIEW_THRESHOLD)
+                .map_err(|e| e.to_string())
+        },
     )?);
 
-    queries.push(time_query("counts", runs, TARGET_QUERY_P95_MS, || {
-        let c = cat.counts().map_err(|e| e.to_string())?;
-        Ok(c.locations.max(0) as usize)
-    })?);
+    queries.push(time_query(
+        "counts",
+        runs,
+        TARGET_QUERY_P95_MS,
+        || {
+            let c = cat.counts().map_err(|e| e.to_string())?;
+            Ok(c.locations.max(0) as usize)
+        },
+        || cat.explain_counts().map_err(|e| e.to_string()),
+    )?);
 
     on_step("consultas", &library_dir);
 
