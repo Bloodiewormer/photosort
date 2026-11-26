@@ -292,3 +292,117 @@ fn the_review_queue_lists_undecided_low_confidence_suggestions_lowest_first() {
     s.cat.accept(chat, meme).unwrap(); // decided: leaves the queue
     assert_eq!(s.cat.review_queue(0.6).unwrap().len(), 1);
 }
+
+#[test]
+fn restore_status_undoes_accept_and_reject_back_to_suggested() {
+    let s = setup();
+    let meme = s.cat.label(LabelKind::Tag, "meme").unwrap();
+    let funny = s.asset("memes/funny.jpg");
+    let chat = s.asset("shots/chat.png");
+    s.cat.suggest(funny, meme, Source::Rules, 0.5).unwrap();
+    s.cat.suggest(chat, meme, Source::Ai, 0.4).unwrap();
+
+    s.cat.accept(funny, meme).unwrap();
+    s.cat.reject(chat, meme).unwrap();
+    assert!(s.cat.review_queue(0.6).unwrap().is_empty());
+
+    assert!(
+        s.cat
+            .restore_status(
+                funny,
+                meme,
+                Source::Rules,
+                0.5,
+                Status::Accepted,
+                Status::Suggested
+            )
+            .unwrap()
+    );
+    assert!(
+        s.cat
+            .restore_status(
+                chat,
+                meme,
+                Source::Ai,
+                0.4,
+                Status::Rejected,
+                Status::Suggested
+            )
+            .unwrap()
+    );
+
+    let a_funny = only(s.cat.labels_of(funny).unwrap());
+    assert_eq!(
+        (a_funny.status, a_funny.source, a_funny.confidence),
+        (Status::Suggested, Source::Rules, 0.5)
+    );
+    let a_chat = only(s.cat.labels_of(chat).unwrap());
+    assert_eq!(
+        (a_chat.status, a_chat.source, a_chat.confidence),
+        (Status::Suggested, Source::Ai, 0.4)
+    );
+    assert_eq!(s.cat.review_queue(0.6).unwrap().len(), 2);
+}
+
+#[test]
+fn restore_status_never_resurrects_a_suggestion_replaced_by_analysis_or_newer_decision() {
+    let s = setup();
+    let meme = s.cat.label(LabelKind::Tag, "meme").unwrap();
+    let funny = s.asset("memes/funny.jpg");
+    s.cat.suggest(funny, meme, Source::Rules, 0.5).unwrap();
+    s.cat.accept(funny, meme).unwrap();
+
+    // If the user changed their decision afterward (e.g. rejected in inspector), undoing the stale
+    // accept must not overwrite the newer rejection.
+    s.cat.reject(funny, meme).unwrap();
+    assert!(
+        !s.cat
+            .restore_status(
+                funny,
+                meme,
+                Source::Rules,
+                0.5,
+                Status::Accepted,
+                Status::Suggested
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        only(s.cat.labels_of(funny).unwrap()).status,
+        Status::Rejected
+    );
+
+    // Restore back to Suggested, then let a newer analysis replace the suggestion with higher
+    // confidence/source. A stale undo targeting the old suggestion must do nothing.
+    assert!(
+        s.cat
+            .restore_status(
+                funny,
+                meme,
+                Source::Rules,
+                0.5,
+                Status::Rejected,
+                Status::Suggested
+            )
+            .unwrap()
+    );
+    s.cat.suggest(funny, meme, Source::Ai, 0.92).unwrap();
+
+    assert!(
+        !s.cat
+            .restore_status(
+                funny,
+                meme,
+                Source::Rules,
+                0.5,
+                Status::Suggested,
+                Status::Accepted
+            )
+            .unwrap()
+    );
+    let current = only(s.cat.labels_of(funny).unwrap());
+    assert_eq!(
+        (current.status, current.source, current.confidence),
+        (Status::Suggested, Source::Ai, 0.92)
+    );
+}
