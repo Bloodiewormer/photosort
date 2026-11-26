@@ -34,3 +34,6 @@ Formato: fecha · decisión · alternativas · porqué.
 - **2026-11-26 · El OCR no descarta texto por puntuación** (y no el filtro de 0,65).
   - En la revisión parcial de fotos reales, el 85 % de las líneas marcadas por debajo de 0,65 eran correctas.
   - La puntuación se guarda como confianza y ordena la revisión.
+- **2026-11-26 · Búsqueda OCR con índice FTS5 `trigram` para consultas de 3+ caracteres y exclusión de barra de estado en consulta** (y no recorrido `instr` puro ni borrado al indexar).
+  - Con 45.000 activos sintéticos y 13 líneas por activo (585.000 líneas), el recorrido `instr` dio p95 de 157–160 ms, por encima del objetivo interactivo de 150 ms; con FTS5 `trigram`, las búsquedas selectivas y sin resultados bajaron a 11,8–13,0 ms p95.
+  - Las líneas de la franja superior (`top_strip`) se guardan íntegras y solo se omiten al buscar si la imagen mantiene la categoría no rechazada `Capturas de pantalla`, de modo que ejecutar reglas después o rechazar la categoría surte efecto sin repetir el OCR.

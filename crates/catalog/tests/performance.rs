@@ -312,7 +312,7 @@ fn optimized_queries_preserve_exact_semantics_for_filters_sorts_labels_review_du
         require: vec![cat_manga],
         any: vec![tag_meme, tag_shot],
         exclude: vec![tag_excl],
-        path_contains: None,
+        ..Default::default()
     };
     assert_eq!(
         s.rel_entries(&s.cat.entries(&f3, Sort::PathAsc).unwrap()),
@@ -442,4 +442,142 @@ fn batched_index_with_commits_across_batch_boundaries_and_stops_cleanly() {
         ),
         (0, 0, 600, 0)
     );
+}
+
+#[test]
+#[ignore = "heavy 45k-asset x 13-line OCR search benchmark; run with --release -- --ignored --nocapture"]
+fn benchmark_ocr_search_45k_assets_13_lines() {
+    use catalog::{SCREENSHOT_CATEGORY, ocr_search_key};
+    use rusqlite::{Connection, params};
+    use std::time::Instant;
+
+    const ASSETS: usize = 45_000;
+    const LINES_PER_ASSET: usize = 13;
+    const ITERS: usize = 20;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db_path = data.join("ocr_bench.sqlite");
+    let db = ensure_writable(&db_path, &[]).unwrap();
+
+    // Initialize schema through Catalog::open
+    let cat = Catalog::open(&db).unwrap();
+    drop(cat);
+
+    // Seed 45,000 synthetic assets + locations + 585,000 OCR lines in one transaction
+    let seed_start = Instant::now();
+    {
+        let mut conn = Connection::open(db.as_path()).unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut ins_asset = tx
+                .prepare("INSERT INTO asset (id, sha256, size) VALUES (?1, ?2, ?3)")
+                .unwrap();
+            let mut ins_loc = tx
+                .prepare(
+                    "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1, 0)",
+                )
+                .unwrap();
+            let mut ins_ocr = tx
+                .prepare(
+                    "INSERT INTO ocr_line
+                         (asset_id, line, text, search_key, score, recognizer, x0, y0, x1, y1, top_strip)
+                     VALUES (?1, ?2, ?3, ?4, 0.92, 'v6', 10.0, 20.0, 200.0, 50.0, ?5)",
+                )
+                .unwrap();
+
+            let sample_lines = [
+                "Crónicas del Relojero Capítulo",
+                "Academia Nebulosa Volumen",
+                "El Jardín de Papel Especial",
+                "Estudio Cometa Traducción",
+                "Isla de Cristal Portada",
+                "Lista de proyectos activos",
+                "Próximo episodio viernes",
+                "Créditos limpieza y edición",
+                "Resumen semanal de lectura",
+                "Notas del traductor página",
+                "Colección ilustrada edición",
+                "Índice general de tomos",
+                "14:32 5G 84%",
+            ];
+            let sample_keys: Vec<String> = sample_lines.iter().map(|s| ocr_search_key(s)).collect();
+
+            for i in 1..=(ASSETS as i64) {
+                let sha = format!("{i:064x}");
+                ins_asset.execute(params![i, sha, 102_400i64]).unwrap();
+                let path = format!("C:/synthetic/folder_{:03}/img_{i:06}.jpg", i % 200);
+                ins_loc
+                    .execute(params![
+                        i,
+                        "C:/synthetic",
+                        path,
+                        102_400i64,
+                        1_700_000_000_000_000_000i64
+                    ])
+                    .unwrap();
+                for (line_idx, raw) in sample_lines.iter().enumerate().take(LINES_PER_ASSET) {
+                    let is_rare = i % 5000 == 0 && line_idx == 4;
+                    let (text, key) = if is_rare {
+                        ("ANDTHEPAPERCROWN", "andthepapercrown".to_string())
+                    } else {
+                        (*raw, format!("{}{}", sample_keys[line_idx], i % 97))
+                    };
+                    let top_strip = i64::from(line_idx == 12);
+                    ins_ocr
+                        .execute(params![i, line_idx as i64, text, key, top_strip])
+                        .unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+    }
+    println!(
+        "Seeded {ASSETS} assets x {LINES_PER_ASSET} lines ({} lines) in {:.2} s",
+        ASSETS * LINES_PER_ASSET,
+        seed_start.elapsed().as_secs_f64()
+    );
+
+    let cat = Catalog::open(&db).unwrap();
+    // Mark ~20% as screenshots to exercise the status-bar exclusion check
+    let shot_label = cat.label(LabelKind::Category, SCREENSHOT_CATEGORY).unwrap();
+    for i in (1..=(ASSETS as i64)).step_by(5) {
+        cat.suggest(AssetId(i), shot_label, Source::Rules, 0.9)
+            .unwrap();
+    }
+
+    let queries = [
+        ("rare_hit (paper crown)", "paper crown"),
+        ("no_hit (zzzyyyxxx)", "zzzyyyxxx"),
+        ("status_bar (84%)", "84%"),
+        ("two_chars_no_hit (zq)", "zq"),
+        ("two_chars_frequent (de)", "de"),
+    ];
+
+    for (name, q) in queries {
+        let filter = Filter {
+            search: Some(q.to_string()),
+            ..Default::default()
+        };
+        let plan = cat.explain_entries(&filter, Sort::PathAsc).unwrap();
+        let mut times_ms = Vec::with_capacity(ITERS);
+        let mut result_count = 0usize;
+        for _ in 0..ITERS {
+            let t0 = Instant::now();
+            let res = cat.entries(&filter, Sort::PathAsc).unwrap();
+            times_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            result_count = res.len();
+        }
+        times_ms.sort_by(f64::total_cmp);
+        let mean = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
+        let p95 = times_ms[((times_ms.len() as f64 * 0.95).ceil() as usize).saturating_sub(1)];
+        println!(
+            "OCR search [{name}]: results={result_count}, mean={mean:.2} ms, p95={p95:.2} ms (target < 150 ms)"
+        );
+        for line in plan {
+            println!("  PLAN: {line}");
+        }
+    }
 }

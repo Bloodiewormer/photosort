@@ -149,6 +149,7 @@ fn grid_layout_computes_columns_rows_and_visible_ranges() {
 fn filter_state_cycles_chips_and_builds_catalog_filter() {
     let mut f = FilterState::default();
     assert_eq!(f.sort, Sort::PathAsc);
+    assert_eq!(f.to_catalog_filter().search, None);
     assert_eq!(f.to_catalog_filter().path_contains, None);
 
     let a = LabelId(1);
@@ -176,11 +177,12 @@ fn filter_state_cycles_chips_and_builds_catalog_filter() {
     assert_eq!(cf.require, vec![a]);
     assert_eq!(cf.any, vec![b]);
     assert_eq!(cf.exclude, vec![c]);
-    assert_eq!(cf.path_contains.as_deref(), Some("manga"));
+    assert_eq!(cf.search.as_deref(), Some("manga"));
+    assert_eq!(cf.path_contains, None);
 
     // Whitespace-only search produces None.
     f.search = "   ".into();
-    assert_eq!(f.to_catalog_filter().path_contains, None);
+    assert_eq!(f.to_catalog_filter().search, None);
 
     f.clear_filters();
     assert!(f.chips.is_empty());

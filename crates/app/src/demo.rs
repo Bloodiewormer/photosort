@@ -1,5 +1,5 @@
 use crate::settings::{self, Settings, Theme};
-use catalog::{Catalog, LabelKind, Source};
+use catalog::{Catalog, LabelKind, OcrLine, OcrRecognizer, Source};
 use fsguard::{DestPath, GuardError, LibraryRoot, ensure_export_dir, ensure_writable};
 use image::codecs::gif::GifEncoder;
 use image::codecs::jpeg::JpegEncoder;
@@ -965,6 +965,11 @@ pub fn prepare_demo(
 
     let duplicate_groups = cat.duplicates().map_err(|e| e.to_string())?.len();
 
+    // Seed synthetic OCR lines on the first sorted image (shown in the gallery inspector)
+    // and a small subset of other demo images, leaving most images pending for the OCR window.
+    // Demo mode never loads ONNX models.
+    seed_demo_ocr(&mut cat, canonical_root, &specs)?;
+
     Ok(DemoSetup {
         base_dir: resolved_base,
         library_dir,
@@ -975,4 +980,88 @@ pub fn prepare_demo(
         seeded_assignments,
         _temp_dir: temp_dir,
     })
+}
+
+fn seed_demo_ocr(
+    cat: &mut Catalog,
+    canonical_root: &Path,
+    specs: &[ImageSpec],
+) -> Result<(), String> {
+    if specs.is_empty() {
+        return Ok(());
+    }
+    let first_sorted_idx = specs
+        .iter()
+        .min_by(|a, b| {
+            a.rel_path
+                .to_string_lossy()
+                .cmp(&b.rel_path.to_string_lossy())
+        })
+        .map(|s| s.index)
+        .unwrap_or(0);
+
+    if let Some(first) = specs.get(first_sorted_idx)
+        && let Some(asset) = cat
+            .asset_of(&canonical_root.join(&first.rel_path))
+            .map_err(|e| e.to_string())?
+    {
+        cat.save_ocr_lines(
+            asset,
+            &[
+                OcrLine {
+                    text: "14:32  5G  84%".to_string(),
+                    score: 0.78,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [12.0, 4.0, 160.0, 18.0],
+                    top_strip: true,
+                },
+                OcrLine {
+                    text: "Crónicas del Relojero — Capítulo 12".to_string(),
+                    score: 0.96,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [20.0, 60.0, 290.0, 88.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "Estudio Cometa · Edición especial".to_string(),
+                    score: 0.52,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [20.0, 100.0, 260.0, 124.0],
+                    top_strip: false,
+                },
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let sample_texts = [
+        ("Academia Nebulosa — Portada", 0.94, OcrRecognizer::V6),
+        ("El Jardín de Papel · Notas", 0.89, OcrRecognizer::V6),
+        ("바람 공주 · 3화", 0.91, OcrRecognizer::Korean),
+        ("Isla de Cristal (boceto)", 0.58, OcrRecognizer::V6),
+    ];
+
+    for (i, spec) in specs.iter().enumerate().take(18) {
+        if spec.index == first_sorted_idx || spec.duplicate_of.is_some() {
+            continue;
+        }
+        if let Some(asset) = cat
+            .asset_of(&canonical_root.join(&spec.rel_path))
+            .map_err(|e| e.to_string())?
+        {
+            let (text, score, rec) = sample_texts[i % sample_texts.len()];
+            cat.save_ocr_lines(
+                asset,
+                &[OcrLine {
+                    text: text.to_string(),
+                    score,
+                    recognizer: rec,
+                    rect: [16.0, 40.0, 200.0, 64.0],
+                    top_strip: false,
+                }],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }

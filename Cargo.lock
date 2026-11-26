@@ -224,10 +224,12 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "dunce",
  "eframe",
  "export",
  "fsguard",
  "image",
+ "ocr",
  "rfd",
  "rules",
  "scanner",
@@ -757,6 +759,7 @@ dependencies = [
  "rusqlite",
  "scanner",
  "tempfile",
+ "unicode-normalization",
  "walkdir",
 ]
 

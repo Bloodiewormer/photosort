@@ -2,7 +2,9 @@
 #![allow(clippy::disallowed_methods)]
 
 use app::analysis_worker::{AnalysisEvent, AnalysisWorker};
+use app::ocr_worker::{OcrEvent, OcrImageReader, OcrScope, OcrWorker};
 use app::worker::{IndexEvent, IndexWorker, PreviewWorker};
+use catalog::{OcrLine, OcrRecognizer};
 use fsguard::{LibraryRoot, ensure_writable};
 use image::{ImageBuffer, Rgba};
 use std::collections::BTreeMap;
@@ -150,6 +152,85 @@ fn analysis_worker_leaves_the_originals_untouched() {
             }
             AnalysisEvent::Failed(e) => panic!("analysis failed: {e}"),
             AnalysisEvent::Progress { .. } => {}
+        }
+    }
+    assert!(finished);
+    assert_eq!(before, snapshot(&library));
+}
+
+#[test]
+fn ocr_worker_leaves_the_originals_untouched() {
+    struct DecodeOnlyReader;
+
+    impl OcrImageReader for DecodeOnlyReader {
+        fn read_image(&self, path: &Path) -> Result<Vec<OcrLine>, String> {
+            let pixels = thumbs::decode(path, u32::MAX)
+                .map_err(|_| "decode failed".to_string())?
+                .to_rgb8();
+            Ok(vec![OcrLine {
+                text: format!("{}x{}", pixels.width(), pixels.height()),
+                score: 0.95,
+                recognizer: OcrRecognizer::V6,
+                rect: [0.0, 0.0, 10.0, 10.0],
+                top_strip: false,
+            }])
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    write_png(&library.join("a.png"), [255, 0, 0, 255]);
+    write_png(&library.join("sub/b.png"), [0, 255, 0, 255]);
+    write_png(&library.join("sub/deep/c.png"), [0, 0, 255, 255]);
+    fs::write(library.join("sub/corrupt.jpg"), b"not an image").unwrap();
+
+    let root = LibraryRoot::new(&library).unwrap();
+    let root_path = root.as_path().to_path_buf();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db_index =
+        ensure_writable(&data.join("catalog.sqlite"), std::slice::from_ref(&root)).unwrap();
+    let db_ocr =
+        ensure_writable(&data.join("catalog.sqlite"), std::slice::from_ref(&root)).unwrap();
+
+    let indexer = IndexWorker::start(db_index, vec![root], None);
+    while let Ok(ev) = indexer.recv() {
+        match ev {
+            IndexEvent::Finished { stopped, .. } => {
+                assert!(!stopped);
+                break;
+            }
+            IndexEvent::Failed(e) => panic!("indexing failed: {e}"),
+            _ => {}
+        }
+    }
+
+    // Settle NTFS lazy directory mtime before capturing the baseline snapshot.
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    let worker = OcrWorker::start_with_loader(
+        db_ocr,
+        OcrScope::Roots(vec![root_path]),
+        || Ok(DecodeOnlyReader),
+        None,
+    );
+    let mut finished = false;
+    while let Ok(ev) = worker.recv() {
+        match ev {
+            OcrEvent::Finished {
+                stopped,
+                processed,
+                errors,
+            } => {
+                assert!(!stopped);
+                assert_eq!(processed, 3);
+                assert_eq!(errors, 1);
+                finished = true;
+                break;
+            }
+            OcrEvent::Failed(e) => panic!("ocr failed: {e}"),
+            _ => {}
         }
     }
     assert!(finished);
