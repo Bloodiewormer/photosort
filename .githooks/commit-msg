@@ -1,0 +1,8 @@
+#!/bin/sh
+# Rejects commit messages with AI co-author trailers or AI tool mentions (see CONTRIBUTING.md).
+# Comment lines (git's template) are ignored.
+msg=$(grep -v '^#' "$1")
+if printf '%s\n' "$msg" | grep -qiE 'co-authored-by|generated (with|by)|claude|anthropic|\bt3\b|t3 ?code|chatgpt|openai|gemini|copilot|cursor ?ai|codex'; then
+  echo "commit-msg: el mensaje menciona una herramienta de IA o un coautor. Ver CONTRIBUTING.md." >&2
+  exit 1
+fi

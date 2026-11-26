@@ -1,0 +1,34 @@
+# Reglas de contribución
+
+Este proyecto trabaja junto a una biblioteca personal de fotos irreemplazable. Por eso todo cambio se trata con el máximo cuidado.
+
+## Commits
+
+1. **Sin coautores ni menciones de herramientas de IA.** Ningún commit lleva líneas `Co-Authored-By`, pies tipo "Generated with…" ni nombres de asistentes, modelos o plataformas de IA (Claude, Anthropic, T3, ChatGPT, OpenAI, Gemini, Copilot, etc.). El autor es únicamente la persona configurada en `git config user.name`.
+2. Un commit hace **un solo cambio lógico**, con un mensaje claro en imperativo que explique *qué* cambia y *por qué*.
+3. Antes de cada commit:
+   - `cargo fmt --check`, `cargo clippy -- -D warnings` y `cargo test` pasan;
+   - el diff se ha revisado línea a línea (`git diff --staged`);
+   - no se incluyen datos personales, rutas de la biblioteca, fotos, catálogos (`*.sqlite`), registros ni secretos (`.env`).
+4. Prohibido `--no-verify`, `--amend` sobre commits ya publicados, y `push --force` a `master`.
+
+## Pull requests
+
+1. Nunca se trabaja directamente en `master`: cada cambio va en una rama y llega por PR.
+2. La descripción del PR explica qué cambia, por qué, y cómo se ha verificado. Debe decir explícitamente si el cambio **afecta a la seguridad de los originales**.
+3. Las mismas prohibiciones del punto 1 de los commits se aplican al título y al cuerpo del PR.
+4. Si un PR toca la lectura de originales, la copia o la exportación:
+   - debe incluir tests de integridad (comprobación de hash antes y después);
+   - debe revisarse antes de fusionarlo.
+5. No se fusiona nada con tests en rojo.
+
+## Seguridad de los originales (regla innegociable)
+
+- El código no puede borrar, mover, renombrar ni modificar archivos de la biblioteca de origen. `tests/safety.rs` y las reglas de `clippy.toml` lo comprueban.
+- Los originales solo se abren en modo lectura (`File::open`), y toda escritura pasa por el guardián de rutas.
+
+## Activar los hooks (una vez por clon)
+
+```sh
+git config core.hooksPath .githooks
+```
