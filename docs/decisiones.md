@@ -24,3 +24,7 @@ Formato: fecha · decisión · alternativas · porqué.
 - **2026-11-26 · No se instalan gsd-pi ni claude-mem.** gsd-pi es un agente autónomo completo con `postinstall` que descarga Chromium y se solapa con Superpowers. Claude-mem captura imágenes por defecto y, según fuentes externas, no ahorra tokens. Memoria entre sesiones: `AGENTS.md` + `docs/decisiones.md`; `graphify` solo sobre `src/` cuando haya código, **nunca sobre carpetas con fotos** (envía imágenes a modelos de visión).
 - **2026-11-26 · Unslop en espera.** Aprobada por el usuario, pero su herramienta audita interfaces web. Se reevalúa cuando exista la interfaz egui.
 - **2026-11-26 · El guardián de rutas se impone con el sistema de tipos.** Las funciones de escritura aceptan solo `DestPath`, que únicamente crea `ensure_writable`; además, `clippy.toml` prohíbe las APIs destructivas de `std::fs`.
+- **2026-11-26 · OCR en evaluación con DirectML** (sustituye `ort` con CUDA para el OCR; todavía no se integra en la app). Ver `docs/ocr-evaluacion.md`.
+  - DirectML se registra en el entorno de ONNX Runtime con error obligatorio, porque `oar-ocr` caería a CPU en silencio.
+  - Se recomienda leer cada línea con los dos reconocedores (y no en cascada), porque el general inventa ideogramas con mucha confianza ante texto coreano.
+  - Pendiente: medir con una muestra real aprobada.
