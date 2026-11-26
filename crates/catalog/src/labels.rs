@@ -105,6 +105,14 @@ impl Source {
 }
 
 impl Status {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Suggested => "suggested",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+        }
+    }
+
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "suggested" => Self::Suggested,
@@ -203,6 +211,37 @@ impl Catalog {
     /// A rejection also sticks when the label was never suggested, so a later analysis cannot bring it back.
     pub fn reject(&self, asset: AssetId, label: LabelId) -> Result<(), CatalogError> {
         self.decide(asset, label, "rejected")
+    }
+
+    /// Restores a label's status from `from` back to `to` only when the row still holds the exact
+    /// `(from, expected_source, expected_confidence)` left by the action being undone. Returns
+    /// `true` if a row was updated, or `false` if it was missing or replaced in the meantime.
+    // shortcut: guards against concurrent analysis replacements by matching (status, source,
+    // confidence) rather than a monotonic revision counter; if a newer analysis can ever write
+    // identical source and confidence after a reset, upgrade by adding a revision column.
+    pub fn restore_status(
+        &self,
+        asset: AssetId,
+        label: LabelId,
+        expected_source: Source,
+        expected_confidence: f64,
+        from: Status,
+        to: Status,
+    ) -> Result<bool, CatalogError> {
+        let changed = self.conn.execute(
+            "UPDATE asset_label SET status = ?6
+             WHERE asset_id = ?1 AND label_id = ?2
+               AND source = ?3 AND confidence = ?4 AND status = ?5",
+            params![
+                asset.0,
+                label.0,
+                expected_source.as_str(),
+                expected_confidence,
+                from.as_str(),
+                to.as_str(),
+            ],
+        )?;
+        Ok(changed > 0)
     }
 
     fn decide(&self, asset: AssetId, label: LabelId, status: &str) -> Result<(), CatalogError> {

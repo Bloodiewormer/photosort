@@ -1,12 +1,18 @@
+use crate::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use crate::model::{
     ChipMode, FilterState, GridLayout, MoveDir, Selection, format_bytes, format_timestamp_utc,
 };
+use crate::review_flow::ReviewFlow;
 use crate::settings::{self, Settings, Theme};
 use crate::theme::{self, Palette};
+use crate::views;
 use crate::worker::{
     IndexEvent, IndexWorker, Notify, PreviewWorker, ThumbPool, ThumbRequest, ThumbnailProvider,
 };
-use catalog::{AssetId, Assignment, Catalog, Counts, Entry, LabelCount, LabelKind, Sort, Status};
+use catalog::{
+    AssetId, Assignment, Catalog, Counts, DuplicateGroup, Entry, LabelCount, LabelKind, Sort,
+    Status,
+};
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Frame, Id, Key, Layout, Margin, Modifiers, RichText,
     ScrollArea, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
@@ -20,14 +26,24 @@ use std::sync::Arc;
 const MAX_THUMB_TEXTURES: usize = 1024;
 const SEARCH_INPUT_ID: &str = "photosort_search_input";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveTab {
+    Gallery,
+    Review,
+    Duplicates,
+}
+
 pub struct PhotosortApp {
     data_dir: PathBuf,
     settings: Settings,
     catalog: Option<Catalog>,
+    active_tab: ActiveTab,
     entries: Vec<Entry>,
     counts: Counts,
     labels_in_use: Vec<LabelCount>,
     pending_review_assets: HashSet<AssetId>,
+    review_flow: ReviewFlow,
+    duplicate_groups: Vec<DuplicateGroup>,
     filter: FilterState,
     selection: Selection,
     last_columns: usize,
@@ -35,6 +51,8 @@ pub struct PhotosortApp {
 
     index_worker: Option<IndexWorker>,
     index_progress: Option<String>,
+    analysis_worker: Option<AnalysisWorker>,
+    analysis_progress: Option<String>,
     status_notice: Option<String>,
     banner_error: Option<String>,
 
@@ -92,6 +110,7 @@ impl PhotosortApp {
             data_dir,
             settings,
             catalog,
+            active_tab: ActiveTab::Gallery,
             entries: Vec::new(),
             counts: Counts {
                 assets: 0,
@@ -100,12 +119,16 @@ impl PhotosortApp {
             },
             labels_in_use: Vec::new(),
             pending_review_assets: HashSet::new(),
+            review_flow: ReviewFlow::new(),
+            duplicate_groups: Vec::new(),
             filter: FilterState::default(),
             selection: Selection::default(),
             last_columns: 1,
             viewer_open: false,
             index_worker: None,
             index_progress: None,
+            analysis_worker: None,
+            analysis_progress: None,
             status_notice: None,
             banner_error,
             thumb_pool: ThumbPool::new(3, thumbs, Some(Arc::clone(&notify))),
@@ -155,6 +178,13 @@ impl PhotosortApp {
         if let Ok(queue) = cat.review_queue(1.1) {
             self.pending_review_assets = queue.into_iter().map(|i| i.asset).collect();
         }
+        if let Err(e) = self.review_flow.reload(cat) {
+            self.banner_error = Some(format!("Error al cargar cola de revisión: {e}"));
+        }
+        match cat.duplicate_groups() {
+            Ok(groups) => self.duplicate_groups = groups,
+            Err(e) => self.banner_error = Some(format!("Error al consultar duplicados: {e}")),
+        }
         self.reload_entries();
     }
 
@@ -200,6 +230,8 @@ impl PhotosortApp {
 
     fn poll_workers(&mut self, ctx: &egui::Context) {
         let mut finished_index = false;
+        let mut index_completed_ok = false;
+        let mut finished_analysis = false;
         let mut needs_reload = false;
         if let Some(worker) = &self.index_worker {
             while let Some(ev) = worker.try_recv() {
@@ -233,6 +265,7 @@ impl PhotosortApp {
                         errors,
                     } => {
                         finished_index = true;
+                        index_completed_ok = !stopped;
                         needs_reload = true;
                         self.index_progress = None;
                         self.status_notice = Some(if stopped {
@@ -255,11 +288,55 @@ impl PhotosortApp {
                 }
             }
         }
+        if let Some(worker) = &self.analysis_worker {
+            while let Some(ev) = worker.try_recv() {
+                match ev {
+                    AnalysisEvent::Progress { analyzed, pending } => {
+                        let total = analyzed.saturating_add(pending);
+                        self.analysis_progress = Some(format!("Analizando {analyzed} / {total}"));
+                    }
+                    AnalysisEvent::Finished {
+                        stopped,
+                        analyzed,
+                        suggestions,
+                        errors,
+                    } => {
+                        finished_analysis = true;
+                        needs_reload = true;
+                        self.analysis_progress = None;
+                        self.status_notice = Some(if stopped {
+                            format!(
+                                "Análisis detenido: {analyzed} analizadas, {suggestions} sugerencias."
+                            )
+                        } else if errors > 0 {
+                            format!(
+                                "Análisis completo: {analyzed} analizadas, {suggestions} sugerencias, {errors} errores."
+                            )
+                        } else {
+                            format!(
+                                "Análisis completo: {analyzed} analizadas, {suggestions} sugerencias."
+                            )
+                        });
+                    }
+                    AnalysisEvent::Failed(err) => {
+                        finished_analysis = true;
+                        self.analysis_progress = None;
+                        self.banner_error = Some(format!("Error durante el análisis: {err}"));
+                    }
+                }
+            }
+        }
         if finished_index {
             self.index_worker = None;
         }
+        if finished_analysis {
+            self.analysis_worker = None;
+        }
         if needs_reload {
             self.reload_catalog();
+        }
+        if index_completed_ok && self.settings.auto_analyze {
+            self.start_analysis(ctx);
         }
 
         while let Some(res) = self.thumb_pool.try_recv() {
@@ -320,6 +397,22 @@ impl PhotosortApp {
         }
     }
 
+    fn start_analysis(&mut self, ctx: &egui::Context) {
+        if self.analysis_worker.is_some() {
+            return;
+        }
+        let roots = self.settings.valid_roots();
+        match settings::db_dest_path(&self.data_dir, &roots) {
+            Ok(db) => {
+                let ctx_clone = ctx.clone();
+                let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
+                self.analysis_progress = Some("Preparando análisis...".into());
+                self.analysis_worker = Some(AnalysisWorker::start(db, Some(notify)));
+            }
+            Err(e) => self.banner_error = Some(e.to_string()),
+        }
+    }
+
     fn pick_and_add_library(&mut self, ctx: &egui::Context) {
         if let Some(folder) = rfd::FileDialog::new()
             .set_title("Elegir carpeta de biblioteca (solo lectura)")
@@ -358,6 +451,9 @@ impl PhotosortApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.active_tab != ActiveTab::Gallery {
+            return;
+        }
         let wants_text = ctx.egui_wants_keyboard_input();
         let mut selection_changed = false;
 
@@ -451,6 +547,44 @@ impl PhotosortApp {
                     );
                     ui.separator();
 
+                    let review_label = if self.review_flow.total_items() > 0 {
+                        format!("Revisión ({})", self.review_flow.total_items())
+                    } else {
+                        "Revisión".to_owned()
+                    };
+                    let dupes_label = if !self.duplicate_groups.is_empty() {
+                        format!("Duplicados ({})", self.duplicate_groups.len())
+                    } else {
+                        "Duplicados".to_owned()
+                    };
+                    for (tab, label) in [
+                        (ActiveTab::Gallery, "Galería"),
+                        (ActiveTab::Review, review_label.as_str()),
+                        (ActiveTab::Duplicates, dupes_label.as_str()),
+                    ] {
+                        let selected = self.active_tab == tab;
+                        let btn = egui::Button::new(
+                            RichText::new(label).color(palette.text_primary.color32()),
+                        )
+                        .fill(if selected {
+                            palette.accent_bg.color32()
+                        } else {
+                            palette.bg_card.color32()
+                        })
+                        .stroke(if selected {
+                            Stroke::new(theme::FOCUS_STROKE_WIDTH, palette.accent.color32())
+                        } else {
+                            Stroke::new(1.0, palette.border.color32())
+                        });
+                        if ui.add(btn).clicked() {
+                            self.active_tab = tab;
+                            if tab != ActiveTab::Gallery {
+                                self.viewer_open = false;
+                            }
+                        }
+                    }
+                    ui.separator();
+
                     let search_id = Id::unique(SEARCH_INPUT_ID);
                     let search_resp = ui.add(
                         egui::TextEdit::singleline(&mut self.filter.search)
@@ -524,6 +658,23 @@ impl PhotosortApp {
                             &self.selection,
                             self.settings.last_export_dir.clone(),
                         ));
+                    }
+
+                    if let Some(worker) = &self.analysis_worker {
+                        if let Some(msg) = &self.analysis_progress {
+                            ui.label(RichText::new(msg).color(palette.text_secondary.color32()));
+                        }
+                        if ui.button("Cancelar análisis").clicked() {
+                            worker.cancel();
+                        }
+                    } else {
+                        let can_analyze = self.catalog.is_some() && self.counts.locations > 0;
+                        if ui
+                            .add_enabled(can_analyze, egui::Button::new("Analizar"))
+                            .clicked()
+                        {
+                            self.start_analysis(ui.ctx());
+                        }
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1409,10 +1560,46 @@ impl eframe::App for PhotosortApp {
         if self.settings.library_roots.is_empty() {
             self.draw_welcome(ui, palette);
         } else {
-            self.draw_sidebar(ui, palette);
-            self.draw_inspector(ui, palette);
-            self.draw_gallery(ui, palette);
-            self.draw_viewer_overlay(&ctx, palette);
+            match self.active_tab {
+                ActiveTab::Gallery => {
+                    self.draw_sidebar(ui, palette);
+                    self.draw_inspector(ui, palette);
+                    self.draw_gallery(ui, palette);
+                    self.draw_viewer_overlay(&ctx, palette);
+                }
+                ActiveTab::Review => {
+                    let outcome = views::review::draw(
+                        ui,
+                        palette,
+                        &mut self.review_flow,
+                        self.catalog.as_ref(),
+                        &self.thumb_pool,
+                        &self.thumb_textures,
+                        &self.thumb_failed,
+                    );
+                    if let Some(err) = outcome.error {
+                        self.banner_error = Some(err);
+                    }
+                    if let Some(notice) = outcome.status_notice {
+                        self.status_notice = Some(notice);
+                    }
+                    if outcome.catalog_mutated {
+                        self.reload_catalog();
+                    }
+                }
+                ActiveTab::Duplicates => {
+                    if let Some(err) = views::duplicates::draw(
+                        ui,
+                        palette,
+                        &self.duplicate_groups,
+                        &self.thumb_pool,
+                        &self.thumb_textures,
+                        &self.thumb_failed,
+                    ) {
+                        self.banner_error = Some(err);
+                    }
+                }
+            }
         }
         crate::views::export::draw_window(
             &ctx,
