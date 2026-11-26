@@ -566,18 +566,15 @@ pub fn bench_set(regime: Regime, fonts: &Fonts) -> Vec<Sample> {
                     let which = (number + i) % 4;
                     let (lang, pool) = (langs[which], &pools[which]);
                     let (text, cap) = match regime {
-                        // The last 12 phrases are single short parts; the Latin ones kept here
-                        // are the romanised words.
+                        // The first characters of a phrase: narrow enough for the smallest
+                        // recognizer tensor.
                         Regime::Fixed => {
-                            let short: Vec<&String> = if lang == Lang::Latin {
-                                pool[pool.len() - 18..]
-                                    .iter()
-                                    .filter(|t| t.chars().count() <= 10)
-                                    .collect()
-                            } else {
-                                pool[36..].iter().collect()
+                            let phrase = &pool[rng.below(pool.len())];
+                            let short: String = match lang {
+                                Lang::Latin => phrase.chars().take(6).collect(),
+                                _ => phrase.chars().take(4).collect(),
                             };
-                            (short[rng.below(short.len())].clone(), 34.0)
+                            (short.trim().to_string(), 34.0)
                         }
                         Regime::Variable => {
                             let parts: Vec<&str> = (0..rng.between(1, 3))
@@ -806,6 +803,11 @@ mod tests {
         for sample in &fixed {
             assert_eq!(sample.image.dimensions(), (960, 960));
             assert_eq!(sample.lines.len(), 6);
+            // Detected boxes are looser than the ink: this leaves them under the 320 px tensor.
+            for line in &sample.lines {
+                let [x0, y0, x1, y1] = line.rect;
+                assert!((x1 - x0) / (y1 - y0) <= 4.6, "{line:?}");
+            }
         }
         let variable = bench_set(Regime::Variable, &fonts);
         let sizes: HashSet<_> = variable.iter().map(|s| s.image.dimensions()).collect();

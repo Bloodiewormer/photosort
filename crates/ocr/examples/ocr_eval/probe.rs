@@ -117,6 +117,7 @@ pub fn nodes(args: &Args) -> Result<(), String> {
     let engine = Engine::load(&args.models()?, &options)?;
     let set = bench_set(Regime::Fixed, &Fonts::load()?);
     let (lines, _) = engine.read(&set[0].image, |_| true, &mut Vec::new())?;
+    println!("ONNX Runtime: {}", ort::info());
     println!("{provider}: {} lines read after loading", lines.len());
     let all = messages.lock().map_err(|e| e.to_string())?;
     println!("{} ONNX Runtime log messages; placement report:", all.len());
