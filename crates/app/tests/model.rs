@@ -188,3 +188,21 @@ fn filter_state_cycles_chips_and_builds_catalog_filter() {
     // Clearing filters preserves sort choice.
     assert_eq!(f.sort, Sort::ModifiedDesc);
 }
+
+#[test]
+fn formatting_helpers_render_sizes_and_utc_dates() {
+    use app::model::{format_bytes, format_timestamp_utc};
+
+    assert_eq!(format_bytes(0), "0 B");
+    assert_eq!(format_bytes(512), "512 B");
+    assert_eq!(format_bytes(1536), "1.5 KB");
+    assert_eq!(format_bytes(2 * 1024 * 1024), "2.00 MB");
+    assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.00 GB");
+
+    assert_eq!(format_timestamp_utc(0), "1970-01-01 00:00 UTC");
+    // 2023-11-14 22:13:20 UTC = 1_700_000_000s
+    assert_eq!(
+        format_timestamp_utc(1_700_000_000_000_000_000),
+        "2023-11-14 22:13 UTC"
+    );
+}

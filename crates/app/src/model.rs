@@ -317,3 +317,42 @@ impl FilterState {
         filter
     }
 }
+
+/// Human-readable byte size for the inspector (e.g. "512 B", "14.2 KB", "3.45 MB").
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if b < MB {
+        format!("{:.1} KB", b / KB)
+    } else if b < GB {
+        format!("{:.2} MB", b / MB)
+    } else {
+        format!("{:.2} GB", b / GB)
+    }
+}
+
+/// Formats a Unix timestamp in nanoseconds as `YYYY-MM-DD HH:MM UTC` without extra date crates.
+pub fn format_timestamp_utc(ns: i64) -> String {
+    let secs = ns.div_euclid(1_000_000_000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+
+    // Howard Hinnant's civil-from-days algorithm (proleptic Gregorian calendar).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
+}
