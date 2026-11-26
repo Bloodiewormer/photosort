@@ -28,7 +28,7 @@ pub struct ExportReport {
     pub manifest_csv: PathBuf,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
     /// Files that would be copied.
     pub files: usize,
@@ -38,6 +38,15 @@ pub struct Preview {
     pub already_present: usize,
     /// Sources that could not be read.
     pub unreadable: usize,
+    /// Available bytes on the destination volume, queried from its nearest existing ancestor.
+    pub free_bytes: Option<u64>,
+}
+
+impl Preview {
+    /// True when the bytes to copy fit in the destination volume's free space (or when unknown).
+    pub fn fits(&self) -> bool {
+        self.free_bytes.is_none_or(|free| self.bytes <= free)
+    }
 }
 
 /// Where a source would go: `same` means the destination already holds identical bytes.
@@ -287,6 +296,7 @@ pub fn preview(items: &[ExportItem], dest: &DestPath) -> io::Result<Preview> {
         renamed: 0,
         already_present: 0,
         unreadable: 0,
+        free_bytes: available_space(dest.as_path()),
     };
     let mut reserved = HashSet::new();
     for item in items {
@@ -311,6 +321,49 @@ pub fn preview(items: &[ExportItem], dest: &DestPath) -> io::Result<Preview> {
         reserved.insert(key(chosen));
     }
     Ok(p)
+}
+
+#[cfg(windows)]
+fn nearest_existing_dir(path: &Path) -> Option<PathBuf> {
+    let mut cur = path;
+    loop {
+        if fs::metadata(cur).is_ok_and(|md| md.is_dir()) {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+}
+
+/// Queries available bytes for the current user on the volume holding `path`'s nearest existing
+/// ancestor directory. Uses `windows-sys` (`GetDiskFreeSpaceExW`), which is already in the
+/// workspace dependency graph (no extra crates added).
+#[cfg(windows)]
+fn available_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let ancestor = nearest_existing_dir(path)?;
+    let wide: Vec<u16> = ancestor
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_to_caller: u64 = 0;
+    // SAFETY: `wide` is null-terminated UTF-16 and `free_to_caller` is a valid out-pointer.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_to_caller,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(free_to_caller)
+}
+
+#[cfg(not(windows))]
+fn available_space(_path: &Path) -> Option<u64> {
+    None
 }
 
 fn lower(value: impl std::fmt::Debug) -> String {

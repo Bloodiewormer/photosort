@@ -316,6 +316,8 @@ fn a_manifest_is_never_overwritten() {
 fn the_preview_counts_files_and_bytes_without_writing_anything() {
     let s = setup();
     let p = preview(&[s.item("a.jpg"), s.item("sub/b.png")], &s.dest).unwrap();
+    assert!(p.free_bytes.is_some());
+    assert!(p.fits());
     assert_eq!(
         p,
         Preview {
@@ -323,7 +325,8 @@ fn the_preview_counts_files_and_bytes_without_writing_anything() {
             bytes: 10,
             renamed: 0,
             already_present: 0,
-            unreadable: 0
+            unreadable: 0,
+            free_bytes: p.free_bytes,
         }
     );
     assert!(
@@ -354,11 +357,52 @@ fn the_preview_predicts_renames_present_files_and_unreadable_sources() {
             bytes: 10,
             renamed: 2,
             already_present: 1,
-            unreadable: 1
+            unreadable: 1,
+            free_bytes: p.free_bytes,
         }
     );
     let before = s.names();
     assert_eq!(before, ["a.jpg", "b.png"], "the preview wrote something");
+}
+
+#[test]
+fn the_preview_reports_free_space_from_nearest_existing_ancestor_for_nested_missing_dest() {
+    let s = setup();
+    let root = LibraryRoot::new(&s.library).unwrap();
+    let nested = ensure_export_dir(&s._tmp.path().join("does/not/exist/yet"), &[root]).unwrap();
+    let p = preview(&[s.item("a.jpg")], &nested).unwrap();
+    assert!(
+        p.free_bytes.is_some_and(|b| b > 0),
+        "expected positive free space on Windows volume, got {:?}",
+        p.free_bytes
+    );
+    assert!(!nested.as_path().exists());
+}
+
+#[test]
+fn preview_fits_compares_bytes_against_free_bytes_when_known() {
+    let fits_exact = Preview {
+        files: 1,
+        bytes: 100,
+        renamed: 0,
+        already_present: 0,
+        unreadable: 0,
+        free_bytes: Some(100),
+    };
+    assert!(fits_exact.fits());
+
+    let too_big = Preview {
+        bytes: 101,
+        ..fits_exact.clone()
+    };
+    assert!(!too_big.fits());
+
+    let unknown = Preview {
+        bytes: u64::MAX,
+        free_bytes: None,
+        ..fits_exact
+    };
+    assert!(unknown.fits());
 }
 
 #[test]
