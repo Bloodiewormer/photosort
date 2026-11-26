@@ -1,0 +1,11 @@
+[package]
+name = "ocr"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+scanner = { path = "../scanner" }
+unicode-normalization = "0.1.26"
+
+[dev-dependencies]
+tempfile = "3.27.0"
