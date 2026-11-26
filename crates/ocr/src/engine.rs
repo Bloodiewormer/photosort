@@ -8,6 +8,7 @@ use oar_ocr::core::config::OrtSessionConfig;
 use oar_ocr::domain::tasks::TextDetectionConfig;
 use oar_ocr::predictors::{TextDetectionPredictor, TextRecognitionPredictor};
 use oar_ocr::processors::BoundingBox;
+use ort::environment::Environment;
 use ort::ep::DirectML;
 use ort::logging::{LogLevel, LoggerFunction};
 use std::fmt;
@@ -88,20 +89,24 @@ impl Default for Options {
 ///
 /// DirectML is registered here, on the environment, with `error_on_failure`. `oar-ocr` 0.11.0
 /// only sets that flag in its private probe: a provider listed in its session config falls back
-/// to the CPU in silence. ONNX Runtime applies the environment's providers to every session.
-fn init_runtime(provider: Provider, log: Option<LoggerFunction>) -> Result<(), String> {
-    static ACTIVE: Mutex<Option<Provider>> = Mutex::new(None);
+/// to the CPU in silence. ONNX Runtime applies the environment's providers to every session, so
+/// both `ocr` and `vision` share this single initialization and its one-provider-per-process rule.
+pub fn init_runtime(
+    provider: Provider,
+    log: Option<LoggerFunction>,
+) -> Result<Environment, String> {
+    static ACTIVE: Mutex<Option<(Provider, Environment)>> = Mutex::new(None);
     let mut active = ACTIVE.lock().map_err(|e| e.to_string())?;
-    if let Some(first) = *active {
-        return if first == provider {
-            Ok(())
+    if let Some((first, env)) = active.as_ref() {
+        return if *first == provider {
+            Ok(env.clone())
         } else {
             Err(format!(
                 "this process already runs on {first}; {provider} needs another process"
             ))
         };
     }
-    let mut builder = ort::init().with_name("photosort-ocr").with_telemetry(false);
+    let mut builder = ort::init().with_name("photosort").with_telemetry(false);
     if let Provider::DirectMl { device } = provider {
         builder = builder.with_execution_providers([DirectML::default()
             .with_device_id(device)
@@ -118,9 +123,10 @@ fn init_runtime(provider: Provider, log: Option<LoggerFunction>) -> Result<(), S
     } else {
         LogLevel::Error
     });
-    oar_ocr::core::inference::set_ort_environment(environment).map_err(|e| e.to_string())?;
-    *active = Some(provider);
-    Ok(())
+    oar_ocr::core::inference::set_ort_environment(environment.clone())
+        .map_err(|e| e.to_string())?;
+    *active = Some((provider, environment.clone()));
+    Ok(environment)
 }
 
 fn session_config(options: &Options) -> OrtSessionConfig {
@@ -179,7 +185,7 @@ impl Engine {
         if options.rec_batch == 0 {
             return Err("rec_batch must be at least 1".into());
         }
-        init_runtime(options.provider, options.log.clone())?;
+        let _ = init_runtime(options.provider, options.log.clone())?;
         let config = session_config(options);
         let detector = TextDetectionPredictor::builder()
             .with_config(TextDetectionConfig {
