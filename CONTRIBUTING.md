@@ -27,6 +27,17 @@ Este proyecto trabaja junto a una biblioteca personal de fotos irreemplazable. P
 - El código no puede borrar, mover, renombrar ni modificar archivos de la biblioteca de origen. `tests/safety.rs` y las reglas de `clippy.toml` lo comprueban.
 - Los originales solo se abren en modo lectura (`File::open`), y toda escritura pasa por el guardián de rutas.
 
+## Flujo de trabajo
+
+1. Cada cambio parte de una **issue**.
+2. Rama desde `master` actualizado: `feat/…`, `fix/…` o `docs/…`. No se apilan ramas sobre otras sin fusionar.
+3. PR hacia `master`. En la descripción, `Closes #N` por cada issue resuelta, para que se cierre al fusionar.
+4. GitHub ejecuta en cada PR:
+   - el control de mensajes, con la misma regla que el hook local, sobre commits, título y descripción;
+   - formato, análisis estático y pruebas en Windows.
+   Las pruebas que necesitan modelos se saltan allí: **hay que ejecutarlas en local** cuando se toque el OCR o el reconocimiento.
+5. Se fusiona cuando todo está en verde.
+
 ## Activar los hooks (una vez por clon)
 
 ```sh

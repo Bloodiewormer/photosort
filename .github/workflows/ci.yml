@@ -1,0 +1,69 @@
+name: Pruebas
+
+on:
+  pull_request:
+    branches: [master]
+  # Also on master, so that pull requests start from its build cache.
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mensajes:
+    name: Mensajes de commit y del PR
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Comprobar con la misma regla que el hook local
+        # Title and body go through the environment, never through the script text.
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          failed=0
+          for commit in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            git log -1 --format=%B "$commit" > message.txt
+            sh .githooks/commit-msg message.txt || { echo "en el commit $commit"; failed=1; }
+          done
+          printf '%s\n\n%s\n' "$TITLE" "$BODY" | sed 's/^#/ #/' > message.txt
+          sh .githooks/commit-msg message.txt || { echo "en el título o la descripción del PR"; failed=1; }
+          exit $failed
+
+  rust:
+    name: Formato, análisis y pruebas
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      # Smaller and faster to link: the runner has little disk space.
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Instalar la versión fijada de Rust
+        run: rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Formato
+        run: cargo fmt --all --check
+      - name: Análisis estático
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Model-dependent tests skip themselves: the models are not part of the repository.
+      - name: Pruebas
+        run: cargo test --workspace --locked

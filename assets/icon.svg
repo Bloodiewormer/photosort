@@ -1,4 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#dc2626"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="32" font-weight="600" fill="#ffffff">P</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="t">
+  <title id="t">photosort</title>
+  <!-- A contact sheet: four proofs, one picked out with a grease pencil. -->
+  <rect x="0.5" y="0.5" width="63" height="63" rx="10" fill="#1c1c1a" stroke="#4a4942"/>
+  <g fill="#5d5b52">
+    <rect x="11" y="17" width="19" height="13" rx="1"/>
+    <rect x="34" y="17" width="19" height="13" rx="1"/>
+    <rect x="11" y="35" width="19" height="13" rx="1"/>
+  </g>
+  <rect x="34" y="35" width="19" height="13" rx="1" fill="#ecebe6"/>
+  <!-- One uneven stroke whose ends cross, as a hand closes a loop. -->
+  <path d="M55.8 39C52.8 33.2 45.6 31 38.6 32.2C31.2 33.6 27.6 38.8 29.6 44.6C31.8 51 38.8 54.2 46.6 53.4C54.4 52.6 59.6 48 59 41.8C58.4 35.2 51.2 29.6 41.4 29.6"
+        fill="none" stroke="#d9a416" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
