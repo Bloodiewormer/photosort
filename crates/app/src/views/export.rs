@@ -2,7 +2,7 @@ use crate::export_flow::{
     ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, layout_description,
     layout_label, open_in_explorer, remember_export_dir,
 };
-use crate::model::format_bytes;
+use crate::model::{count_phrase, format_bytes, plural_word};
 use crate::settings::Settings;
 use crate::theme::{self, Palette};
 use crate::worker::Notify;
@@ -95,11 +95,14 @@ fn draw_header(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
         "de los resultados filtrados actuales"
     };
     let count = wizard.item_count();
-    let plural = if count == 1 { "imagen" } else { "imágenes" };
+    let verb = plural_word(count, "exportará", "exportarán");
     ui.label(
-        RichText::new(format!("Se exportarán {count} {plural} ({origin})."))
-            .size(theme::FONT_BODY)
-            .strong(),
+        RichText::new(format!(
+            "Se {verb} {} ({origin}).",
+            count_phrase(count, "imagen", "imágenes")
+        ))
+        .size(theme::FONT_BODY)
+        .strong(),
     );
     ui.label(
         RichText::new(
@@ -259,7 +262,12 @@ fn draw_preview_ready(
         );
         info_row(ui, palette, "Estructura", layout_label(wizard.layout()));
         ui.separator();
-        info_row(ui, palette, "Archivos a copiar", &preview.files.to_string());
+        info_row(
+            ui,
+            palette,
+            "Archivos a copiar",
+            &count_phrase(preview.files, "archivo", "archivos"),
+        );
         info_row(ui, palette, "Tamaño total", &format_bytes(preview.bytes));
         let free_text = preview
             .free_bytes
@@ -269,20 +277,28 @@ fn draw_preview_ready(
         info_row(
             ui,
             palette,
-            "Se renombrarán por conflicto",
-            &preview.renamed.to_string(),
+            plural_word(
+                preview.renamed,
+                "Se renombrará por conflicto",
+                "Se renombrarán por conflicto",
+            ),
+            &count_phrase(preview.renamed, "archivo", "archivos"),
         );
         info_row(
             ui,
             palette,
-            "Ya presentes (se omitirán)",
-            &preview.already_present.to_string(),
+            plural_word(
+                preview.already_present,
+                "Ya presente (se omitirá)",
+                "Ya presentes (se omitirán)",
+            ),
+            &count_phrase(preview.already_present, "archivo", "archivos"),
         );
         info_row(
             ui,
             palette,
-            "Orígenes ilegibles",
-            &preview.unreadable.to_string(),
+            plural_word(preview.unreadable, "Origen ilegible", "Orígenes ilegibles"),
+            &count_phrase(preview.unreadable, "archivo", "archivos"),
         );
     });
 
@@ -393,14 +409,24 @@ fn draw_done_step(
     ui.add_space(theme::SPACE_XS);
 
     card_frame(palette).show(ui, |ui| {
-        info_row(ui, palette, "Copiados", &summary.copied.to_string());
         info_row(
             ui,
             palette,
-            "Ya presentes",
-            &summary.already_present.to_string(),
+            plural_word(summary.copied, "Copiado", "Copiados"),
+            &count_phrase(summary.copied, "archivo", "archivos"),
         );
-        info_row(ui, palette, "Fallidos", &summary.failed.len().to_string());
+        info_row(
+            ui,
+            palette,
+            plural_word(summary.already_present, "Ya presente", "Ya presentes"),
+            &count_phrase(summary.already_present, "archivo", "archivos"),
+        );
+        info_row(
+            ui,
+            palette,
+            plural_word(summary.failed.len(), "Fallido", "Fallidos"),
+            &count_phrase(summary.failed.len(), "archivo", "archivos"),
+        );
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Manifiestos:").color(palette.text_secondary.color32()));

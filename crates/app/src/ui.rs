@@ -1,6 +1,7 @@
 use crate::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use crate::model::{
-    ChipMode, FilterState, GridLayout, MoveDir, Selection, format_bytes, format_timestamp_utc,
+    ChipMode, FilterState, GridLayout, MoveDir, Selection, count_phrase, format_bytes,
+    format_timestamp_utc, plural_word, selected_phrase,
 };
 use crate::review_flow::ReviewFlow;
 use crate::settings::{self, Settings, Theme};
@@ -269,14 +270,25 @@ impl PhotosortApp {
                         needs_reload = true;
                         self.index_progress = None;
                         self.status_notice = Some(if stopped {
-                            format!("Indexación detenida: {new} nuevas, {changed} actualizadas.")
+                            format!(
+                                "Indexación detenida: {}, {}.",
+                                count_phrase(new, "nueva", "nuevas"),
+                                count_phrase(changed, "actualizada", "actualizadas"),
+                            )
                         } else if errors > 0 {
                             format!(
-                                "Indexación completa: {new} nuevas, {changed} actualizadas, {unchanged} sin cambios, {missing} ausentes, {errors} errores."
+                                "Indexación completa: {}, {}, {unchanged} sin cambios, {}, {}.",
+                                count_phrase(new, "nueva", "nuevas"),
+                                count_phrase(changed, "actualizada", "actualizadas"),
+                                count_phrase(missing, "ausente", "ausentes"),
+                                count_phrase(errors, "error", "errores"),
                             )
                         } else {
                             format!(
-                                "Indexación completa: {new} nuevas, {changed} actualizadas, {unchanged} sin cambios, {missing} ausentes."
+                                "Indexación completa: {}, {}, {unchanged} sin cambios, {}.",
+                                count_phrase(new, "nueva", "nuevas"),
+                                count_phrase(changed, "actualizada", "actualizadas"),
+                                count_phrase(missing, "ausente", "ausentes"),
                             )
                         });
                     }
@@ -306,15 +318,22 @@ impl PhotosortApp {
                         self.analysis_progress = None;
                         self.status_notice = Some(if stopped {
                             format!(
-                                "Análisis detenido: {analyzed} analizadas, {suggestions} sugerencias."
+                                "Análisis detenido: {}, {}.",
+                                count_phrase(analyzed, "analizada", "analizadas"),
+                                count_phrase(suggestions, "sugerencia", "sugerencias"),
                             )
                         } else if errors > 0 {
                             format!(
-                                "Análisis completo: {analyzed} analizadas, {suggestions} sugerencias, {errors} errores."
+                                "Análisis completo: {}, {}, {}.",
+                                count_phrase(analyzed, "analizada", "analizadas"),
+                                count_phrase(suggestions, "sugerencia", "sugerencias"),
+                                count_phrase(errors, "error", "errores"),
                             )
                         } else {
                             format!(
-                                "Análisis completo: {analyzed} analizadas, {suggestions} sugerencias."
+                                "Análisis completo: {}, {}.",
+                                count_phrase(analyzed, "analizada", "analizadas"),
+                                count_phrase(suggestions, "sugerencia", "sugerencias"),
                             )
                         });
                     }
@@ -912,12 +931,28 @@ impl PhotosortApp {
                     ui.add_space(theme::SPACE_SM);
                     ui.label(RichText::new("Resumen").strong());
                     ui.add_space(theme::SPACE_XS);
+                    let assets = self.counts.assets.max(0) as usize;
+                    let locations = self.counts.locations.max(0) as usize;
+                    let missing = self.counts.missing.max(0) as usize;
+                    let selected = self.selection.len();
                     let stats = [
-                        ("Imágenes únicas", self.counts.assets.to_string()),
-                        ("Ubicaciones", self.counts.locations.to_string()),
-                        ("Ausentes", self.counts.missing.to_string()),
+                        (
+                            plural_word(assets, "Imagen única", "Imágenes únicas"),
+                            assets.to_string(),
+                        ),
+                        (
+                            plural_word(locations, "Ubicación", "Ubicaciones"),
+                            locations.to_string(),
+                        ),
+                        (
+                            plural_word(missing, "Ausente", "Ausentes"),
+                            missing.to_string(),
+                        ),
                         ("En vista", self.entries.len().to_string()),
-                        ("Seleccionadas", self.selection.len().to_string()),
+                        (
+                            plural_word(selected, "Seleccionada", "Seleccionadas"),
+                            selected.to_string(),
+                        ),
                     ];
                     for (label, value) in stats {
                         ui.horizontal(|ui| {
@@ -958,9 +993,9 @@ impl PhotosortApp {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!(
-                                "{} imágenes ({} seleccionadas)",
-                                self.entries.len(),
-                                self.selection.len()
+                                "{} ({})",
+                                count_phrase(self.entries.len(), "imagen", "imágenes"),
+                                selected_phrase(self.selection.len()),
                             ))
                             .color(palette.text_secondary.color32()),
                         );

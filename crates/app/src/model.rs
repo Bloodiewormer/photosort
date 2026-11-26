@@ -356,3 +356,18 @@ pub fn format_timestamp_utc(ns: i64) -> String {
     let year = if m <= 2 { y + 1 } else { y };
     format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
 }
+
+/// Returns `singular` when `n == 1`, otherwise `plural` (Spanish number agreement).
+pub fn plural_word<'a>(n: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if n == 1 { singular } else { plural }
+}
+
+/// Formats a Spanish count phrase such as `"1 imagen"` or `"3 imágenes"`.
+pub fn count_phrase(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", plural_word(n, singular, plural))
+}
+
+/// Formats the selected-image count in Spanish (`"1 seleccionada"`, `"0 seleccionadas"`, `"3 seleccionadas"`).
+pub fn selected_phrase(n: usize) -> String {
+    count_phrase(n, "seleccionada", "seleccionadas")
+}

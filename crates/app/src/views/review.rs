@@ -1,3 +1,4 @@
+use crate::model::count_phrase;
 use crate::review_flow::{ReviewDecision, ReviewFlow, THRESHOLD_MAX, THRESHOLD_MIN, UndoOutcome};
 use crate::theme::{self, Palette};
 use crate::worker::{ThumbPool, ThumbRequest};
@@ -99,9 +100,13 @@ pub fn draw(
             );
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new(format!("{} sugerencias pendientes", flow.total_items()))
-                    .size(theme::FONT_SMALL)
-                    .color(palette.text_secondary.color32()),
+                RichText::new(count_phrase(
+                    flow.total_items(),
+                    "sugerencia pendiente",
+                    "sugerencias pendientes",
+                ))
+                .size(theme::FONT_SMALL)
+                .color(palette.text_secondary.color32()),
             );
             ui.add_space(theme::SPACE_SM);
 
@@ -273,8 +278,9 @@ pub fn draw(
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new(format!(
-                                    "¿Confirmas {verb} las {} sugerencias del grupo \"{}\"?",
-                                    pending.count, pending.group_name
+                                    "¿Confirmas {verb} {} del grupo \"{}\"?",
+                                    count_phrase(pending.count, "sugerencia", "sugerencias"),
+                                    pending.group_name
                                 ))
                                 .size(theme::FONT_BODY)
                                 .strong()
@@ -428,7 +434,8 @@ pub fn draw(
             Ok(count) if count > 0 => {
                 outcome.catalog_mutated = true;
                 outcome.status_notice = Some(format!(
-                    "Acción aplicada a {count} sugerencias. Pulsa Ctrl+Z para deshacer."
+                    "Acción aplicada a {}. Pulsa Ctrl+Z para deshacer.",
+                    count_phrase(count, "sugerencia", "sugerencias")
                 ));
             }
             Ok(_) => {}
@@ -463,12 +470,17 @@ fn apply_undo(flow: &mut ReviewFlow, cat: &Catalog, outcome: &mut ReviewViewOutc
                 outcome.catalog_mutated = true;
             }
             outcome.status_notice = Some(if skipped == 0 {
-                format!("Deshecho: {restored} sugerencia(s) restaurada(s).")
+                format!(
+                    "Deshecho: {}.",
+                    count_phrase(restored, "sugerencia restaurada", "sugerencias restauradas")
+                )
             } else if restored == 0 {
                 "No se deshizo ningún cambio porque un análisis o decisión posterior ya modificó la etiqueta.".into()
             } else {
                 format!(
-                    "Deshecho parcialmente: {restored} restaurada(s), {skipped} omitida(s) por cambios posteriores."
+                    "Deshecho parcialmente: {}, {} por cambios posteriores.",
+                    count_phrase(restored, "restaurada", "restauradas"),
+                    count_phrase(skipped, "omitida", "omitidas")
                 )
             });
         }

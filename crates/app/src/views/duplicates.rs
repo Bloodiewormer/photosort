@@ -1,4 +1,4 @@
-use crate::model::{format_bytes, format_timestamp_utc};
+use crate::model::{count_phrase, format_bytes, format_timestamp_utc};
 use crate::theme::{self, Palette};
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::DuplicateGroup;
@@ -62,28 +62,22 @@ pub fn sort_groups(groups: &mut [DuplicateGroup]) {
 }
 
 pub fn format_summary_line(summary: &DuplicatesSummary) -> String {
-    let groups_word = if summary.group_count == 1 {
-        "grupo"
-    } else {
-        "grupos"
-    };
-    let copies_word = if summary.redundant_copies == 1 {
-        "copia redundante"
-    } else {
-        "copias redundantes"
-    };
     format!(
-        "{} {groups_word} · {} {copies_word} · {} de espacio duplicado",
-        summary.group_count,
-        summary.redundant_copies,
+        "{} · {} · {} de espacio duplicado",
+        count_phrase(summary.group_count, "grupo", "grupos"),
+        count_phrase(
+            summary.redundant_copies,
+            "copia redundante",
+            "copias redundantes"
+        ),
         format_bytes(summary.wasted_bytes),
     )
 }
 
 pub fn format_group_heading(group: &DuplicateGroup) -> String {
     format!(
-        "{} copias · {} c/u · {} duplicados",
-        group.entries.len(),
+        "{} · {} c/u · {} duplicados",
+        count_phrase(group.entries.len(), "copia", "copias"),
         format_bytes(group.size),
         format_bytes(group_wasted_bytes(group)),
     )

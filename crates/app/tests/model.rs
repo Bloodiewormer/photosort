@@ -206,3 +206,20 @@ fn formatting_helpers_render_sizes_and_utc_dates() {
         "2023-11-14 22:13 UTC"
     );
 }
+
+#[test]
+fn spanish_pluralisation_helpers_handle_zero_one_and_many() {
+    use app::model::{count_phrase, plural_word, selected_phrase};
+
+    assert_eq!(plural_word(0, "imagen", "imágenes"), "imágenes");
+    assert_eq!(plural_word(1, "imagen", "imágenes"), "imagen");
+    assert_eq!(plural_word(2, "imagen", "imágenes"), "imágenes");
+
+    assert_eq!(count_phrase(0, "imagen", "imágenes"), "0 imágenes");
+    assert_eq!(count_phrase(1, "imagen", "imágenes"), "1 imagen");
+    assert_eq!(count_phrase(160, "imagen", "imágenes"), "160 imágenes");
+
+    assert_eq!(selected_phrase(0), "0 seleccionadas");
+    assert_eq!(selected_phrase(1), "1 seleccionada");
+    assert_eq!(selected_phrase(3), "3 seleccionadas");
+}
