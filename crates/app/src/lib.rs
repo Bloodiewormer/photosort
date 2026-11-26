@@ -1,3 +1,4 @@
+pub mod analysis_worker;
 pub mod model;
 pub mod settings;
 pub mod theme;

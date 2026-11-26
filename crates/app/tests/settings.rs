@@ -129,3 +129,32 @@ fn resolve_data_dir_prefers_cli_override() {
     let p = resolve_data_dir(Some(Path::new("custom-dir")));
     assert_eq!(p, Path::new("custom-dir"));
 }
+
+#[test]
+fn old_settings_without_auto_analyze_loads_with_default_true_and_roundtrips_false() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+
+    assert!(Settings::default().auto_analyze);
+
+    // Simulate an older settings.json written before `auto_analyze` existed.
+    fs::write(
+        data.join("settings.json"),
+        br#"{"library_roots":[],"last_export_dir":null,"theme":"Light"}"#,
+    )
+    .unwrap();
+
+    let loaded = load(&data);
+    assert!(loaded.warning.is_none(), "{:?}", loaded.warning);
+    assert_eq!(loaded.settings.theme, Theme::Light);
+    assert!(loaded.settings.auto_analyze);
+
+    let mut updated = loaded.settings;
+    updated.auto_analyze = false;
+    save(&data, &updated).unwrap();
+
+    let reloaded = load(&data);
+    assert!(reloaded.warning.is_none());
+    assert!(!reloaded.settings.auto_analyze);
+}
