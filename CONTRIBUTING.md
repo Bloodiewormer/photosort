@@ -46,7 +46,7 @@ Están marcadas con `#[ignore]`. Si las pides sin definir las carpetas, fallan: 
 $env:PHOTOSORT_OCR_MODELS = "<carpeta de modelos OCR>"
 $env:PHOTOSORT_VISION_MODELS = "<carpeta que contiene siglip2 y yunet>"
 cargo test -p ocr -p vision -- --include-ignored
-cargo test -p app --test ocr_e2e --test works_e2e --test vision_e2e -- --include-ignored
+cargo test -p app --test ocr_e2e --test works_e2e --test vision_e2e --test review_e2e -- --include-ignored
 ```
 
 Las mediciones de rendimiento también están marcadas con `#[ignore]` y se ejecutan una a una con `--release`.
