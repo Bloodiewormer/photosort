@@ -3,9 +3,14 @@
 
 use app::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use app::ocr_worker::{OcrEvent, OcrImageReader, OcrScope, OcrWorker};
+use app::settings::OcrDevice;
+use app::vision_worker::{
+    TagsApplyEvent, TagsApplyWorker, VisionEvent, VisionImageOutput, VisionReader, VisionScope,
+    VisionWorker,
+};
 use app::worker::{IndexEvent, IndexWorker, PreviewWorker};
 use app::works_worker::{WorksEvent, WorksWorker};
-use catalog::{Catalog, OcrLine, OcrRecognizer};
+use catalog::{Catalog, EMBEDDING_DIM, OcrLine, OcrRecognizer};
 use fsguard::{LibraryRoot, ensure_writable};
 use image::{ImageBuffer, Rgba};
 use std::collections::BTreeMap;
@@ -304,5 +309,111 @@ fn works_worker_leaves_the_originals_untouched() {
         }
     }
     assert!(finished);
+    assert_eq!(before, snapshot(&library));
+}
+
+#[test]
+fn vision_worker_and_tags_apply_leave_the_originals_untouched() {
+    struct DecodeOnlyVisionReader;
+
+    impl VisionReader for DecodeOnlyVisionReader {
+        fn batch_size(&self) -> usize {
+            2
+        }
+
+        fn embed_texts(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let mut v = vec![0.0f32; EMBEDDING_DIM];
+                    v[i % 8] = 1.0;
+                    v
+                })
+                .collect())
+        }
+
+        fn analyze_images(
+            &mut self,
+            images: &[&image::RgbImage],
+        ) -> Result<Vec<VisionImageOutput>, String> {
+            Ok(images
+                .iter()
+                .map(|_| {
+                    let mut v = vec![0.0f32; EMBEDDING_DIM];
+                    v[0] = 1.0;
+                    VisionImageOutput {
+                        embedding: v,
+                        faces: Vec::new(),
+                    }
+                })
+                .collect())
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    write_png(&library.join("a.png"), [255, 0, 0, 255]);
+    write_png(&library.join("sub/b.png"), [0, 255, 0, 255]);
+    fs::write(library.join("sub/corrupt.jpg"), b"not an image").unwrap();
+
+    let root = LibraryRoot::new(&library).unwrap();
+    let root_path = root.as_path().to_path_buf();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db_path = data.join("catalog.sqlite");
+    let db_idx = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+    let db_vis = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+    let db_apply = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+
+    let indexer = IndexWorker::start(db_idx, vec![root], None);
+    while let Ok(ev) = indexer.recv() {
+        if let IndexEvent::Finished { stopped, .. } = ev {
+            assert!(!stopped);
+            break;
+        }
+    }
+
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    let vis = VisionWorker::start_with_loader(
+        db_vis,
+        VisionScope::Roots(vec![root_path]),
+        || Ok(DecodeOnlyVisionReader),
+        None,
+    );
+    while let Ok(ev) = vis.recv() {
+        match ev {
+            VisionEvent::Finished {
+                stopped,
+                processed,
+                errors,
+            } => {
+                assert!(!stopped);
+                assert_eq!(processed, 2);
+                assert_eq!(errors, 1);
+                break;
+            }
+            VisionEvent::Failed(e) => panic!("vision failed: {e}"),
+            _ => {}
+        }
+    }
+
+    let apply = TagsApplyWorker::start(db_apply, None, OcrDevice::Cpu, None);
+    while let Ok(ev) = apply.recv() {
+        match ev {
+            TagsApplyEvent::Finished {
+                stopped, processed, ..
+            } => {
+                assert!(!stopped);
+                assert_eq!(processed, 2);
+                break;
+            }
+            TagsApplyEvent::Failed(e) => panic!("tags apply failed: {e}"),
+            _ => {}
+        }
+    }
+
     assert_eq!(before, snapshot(&library));
 }

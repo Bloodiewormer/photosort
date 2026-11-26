@@ -612,7 +612,9 @@ fn deleting_a_work_removes_only_that_work() {
         labels.sort();
         labels
     };
-    assert_eq!(of(&cat, a), [kept, category]);
+    let mut expected = [kept, category];
+    expected.sort();
+    assert_eq!(of(&cat, a), expected);
     assert_eq!(of(&cat, b), []);
     let works = cat.list_works().unwrap();
     assert_eq!(works.len(), 1);

@@ -199,8 +199,7 @@ pub fn draw_window(
     palette: &Palette,
     dialog: &mut Option<OcrDialog>,
     worker_running: bool,
-    indexing: bool,
-    works_running: bool,
+    other_heavy_task: Option<&str>,
     data_dir: &Path,
     settings: &mut Settings,
     banner_error: &mut Option<String>,
@@ -366,8 +365,8 @@ pub fn draw_window(
 
             ui.add_space(theme::SPACE_MD);
 
-            // 3. Device choice
-            ui.label(RichText::new("Dispositivo").strong());
+            // 3. Shared ONNX Runtime device choice
+            ui.label(RichText::new("Dispositivo (compartido con visión)").strong());
             ui.add_space(theme::SPACE_XS);
             let prev_device = settings.ocr_device;
             ui.horizontal(|ui| {
@@ -381,11 +380,11 @@ pub fn draw_window(
             if settings.ocr_device != prev_device
                 && let Err(e) = settings::save(data_dir, settings)
             {
-                *banner_error = Some(format!("No se pudo guardar el dispositivo OCR: {e}"));
+                *banner_error = Some(format!("No se pudo guardar el dispositivo: {e}"));
             }
             ui.label(
                 RichText::new(
-                    "No hay cambio automático a CPU si falla la GPU. Cambiar de dispositivo tras ejecutar OCR requiere reiniciar la aplicación.",
+                    "OCR y reconocimiento de imágenes comparten un único proveedor ONNX Runtime por sesión. No hay cambio automático a CPU si falla la GPU. Cambiar de dispositivo tras usar cualquiera de ellos requiere reiniciar la aplicación.",
                 )
                 .size(theme::FONT_SMALL)
                 .color(palette.text_secondary.color32()),
@@ -485,14 +484,9 @@ pub fn draw_window(
         ui.separator();
         ui.add_space(theme::SPACE_SM);
 
-        if indexing {
+        if let Some(task_name) = other_heavy_task {
             ui.label(
-                RichText::new("Podrás leer texto cuando termine el indexado.")
-                    .color(palette.text_secondary.color32()),
-            );
-        } else if works_running {
-            ui.label(
-                RichText::new("Podrás leer texto cuando termine la búsqueda de obras.")
+                RichText::new(format!("Podrás leer texto cuando termine {task_name}."))
                     .color(palette.text_secondary.color32()),
             );
         }
@@ -511,8 +505,7 @@ pub fn draw_window(
                 if !running {
                     let models_path = PathBuf::from(dlg.models_input.trim());
                     let scope = dlg.selected_scope();
-                    let can_start = !indexing
-                        && !works_running
+                    let can_start = other_heavy_task.is_none()
                         && !models_path.as_os_str().is_empty()
                         && scope.is_some();
                     let label = match &scope {

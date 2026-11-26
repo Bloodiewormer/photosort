@@ -581,3 +581,154 @@ fn benchmark_ocr_search_45k_assets_13_lines() {
         }
     }
 }
+
+#[test]
+#[ignore = "heavy 45k-asset vision ranking and rule-apply benchmark; run with --release -- --ignored --nocapture"]
+fn benchmark_vision_rank_and_apply_45k_assets() {
+    use catalog::{EMBEDDING_DIM, SIGLIP2_MODEL_ID, encode_embedding};
+    use rusqlite::{Connection, params};
+    use std::time::Instant;
+
+    const ASSETS: usize = 45_000;
+    const RANK_ITERS: usize = 10;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db_path = data.join("vision_bench.sqlite");
+    let db = ensure_writable(&db_path, &[]).unwrap();
+
+    // Initialize schema + built-in vision rules
+    let mut cat = Catalog::open(&db).unwrap();
+    let rules = cat.list_vision_rules().unwrap();
+    let mut text_pairs: Vec<(String, Vec<f32>)> = Vec::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        let mut v = vec![0.0f32; EMBEDDING_DIM];
+        v[idx % 8] = 1.0;
+        for p in &rule.positives {
+            text_pairs.push((p.clone(), v.clone()));
+        }
+        let mut nv = vec![0.0f32; EMBEDDING_DIM];
+        nv[0] = 1.0;
+        for n in &rule.negatives {
+            text_pairs.push((n.clone(), nv.clone()));
+        }
+    }
+    let refs: Vec<(&str, &[f32])> = text_pairs
+        .iter()
+        .map(|(t, v)| (t.as_str(), v.as_slice()))
+        .collect();
+    cat.save_text_embeddings(SIGLIP2_MODEL_ID, &refs).unwrap();
+    drop(cat);
+
+    // Precompute 16 distinct L2-normalized synthetic 768-d blobs so seeding is fast.
+    let mut template_blobs: Vec<Vec<u8>> = Vec::with_capacity(16);
+    for t in 0..16usize {
+        let mut v = vec![0.0f32; EMBEDDING_DIM];
+        v[t % 8] = 0.25;
+        v[(t + 1) % 8] = 0.12;
+        for (j, slot) in v.iter_mut().enumerate().skip(16) {
+            *slot = (((t * 31 + j * 17) % 100) as f32 - 50.0) * 0.002;
+        }
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut v {
+            *x /= norm;
+        }
+        template_blobs.push(encode_embedding(&v).unwrap());
+    }
+
+    let seed_start = Instant::now();
+    {
+        let mut conn = Connection::open(db.as_path()).unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut ins_asset = tx
+                .prepare("INSERT INTO asset (id, sha256, size) VALUES (?1, ?2, ?3)")
+                .unwrap();
+            let mut ins_loc = tx
+                .prepare(
+                    "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1, 0)",
+                )
+                .unwrap();
+            let mut ins_emb = tx
+                .prepare(
+                    "INSERT INTO asset_embedding (asset_id, model, vector) VALUES (?1, ?2, ?3)",
+                )
+                .unwrap();
+            let mut ins_face = tx
+                .prepare(
+                    "INSERT INTO asset_face (asset_id, face_idx, x1, y1, x2, y2, score)
+                     VALUES (?1, 0, 20.0, 20.0, 120.0, 140.0, 0.91)",
+                )
+                .unwrap();
+
+            for i in 1..=(ASSETS as i64) {
+                let sha = format!("{i:064x}");
+                ins_asset.execute(params![i, sha, 102_400i64]).unwrap();
+                let path = format!("C:/synthetic/folder_{:03}/img_{i:06}.jpg", i % 200);
+                ins_loc
+                    .execute(params![
+                        i,
+                        "C:/synthetic",
+                        path,
+                        102_400i64,
+                        1_700_000_000_000_000_000i64
+                    ])
+                    .unwrap();
+                let blob = &template_blobs[(i as usize) % template_blobs.len()];
+                ins_emb
+                    .execute(params![i, SIGLIP2_MODEL_ID, blob.as_slice()])
+                    .unwrap();
+                if i % 7 == 0 {
+                    ins_face.execute([i]).unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+    }
+    println!(
+        "Seeded {ASSETS} vision embeddings in {:.2} s",
+        seed_start.elapsed().as_secs_f64()
+    );
+
+    let mut cat = Catalog::open(&db).unwrap();
+    let mut query = vec![0.0f32; EMBEDDING_DIM];
+    query[2] = 1.0;
+
+    let mut rank_ms = Vec::with_capacity(RANK_ITERS);
+    let mut top_len = 0usize;
+    for _ in 0..RANK_ITERS {
+        let t0 = Instant::now();
+        let ranked = cat
+            .rank_by_embeddings(SIGLIP2_MODEL_ID, &[&query], 200)
+            .unwrap();
+        rank_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        top_len = ranked.len();
+    }
+    rank_ms.sort_by(f64::total_cmp);
+    let mean = rank_ms.iter().sum::<f64>() / rank_ms.len() as f64;
+    let p95 = rank_ms[((rank_ms.len() as f64 * 0.95).ceil() as usize).saturating_sub(1)];
+    println!(
+        "Vision rank top-{top_len} over {ASSETS} embeddings: mean={mean:.2} ms, p95={p95:.2} ms"
+    );
+
+    let (compiled, missing) = cat.compile_vision_rules(SIGLIP2_MODEL_ID).unwrap();
+    assert!(missing.is_empty());
+    let assets: Vec<AssetId> = (1..=(ASSETS as i64)).map(AssetId).collect();
+
+    let apply_start = Instant::now();
+    let mut total_matched = 0usize;
+    let mut total_suggestions = 0usize;
+    for chunk in assets.chunks(500) {
+        let (m, s) = cat.apply_vision_rules_batch(chunk, &compiled).unwrap();
+        total_matched += m;
+        total_suggestions += s;
+    }
+    let apply_secs = apply_start.elapsed().as_secs_f64();
+    println!(
+        "Vision apply all {} rules to {ASSETS} assets: {:.2} s (matched={total_matched}, suggestions={total_suggestions})",
+        compiled.rules.len(),
+        apply_secs
+    );
+}

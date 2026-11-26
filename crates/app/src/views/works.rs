@@ -132,8 +132,7 @@ pub fn draw(
     works: &[WorkSummary],
     cat: Option<&mut Catalog>,
     worker_running: bool,
-    indexing: bool,
-    ocr_running: bool,
+    other_heavy_task: Option<&str>,
 ) -> WorksViewOutcome {
     let mut outcome = WorksViewOutcome::default();
 
@@ -145,7 +144,7 @@ pub fn draw(
     let mut select_changed = false;
     let mut delete_work: Option<LabelId> = None;
     // A running worker would write against the deleted work.
-    let busy = worker_running || indexing || ocr_running;
+    let busy = worker_running || other_heavy_task.is_some();
 
     // Right panel: selected work details & aliases.
     egui::Panel::right("works_detail")
@@ -329,13 +328,11 @@ pub fn draw(
                         outcome.cancel_match = true;
                     }
                 } else {
-                    let can_match = cat.is_some() && !indexing && !ocr_running;
-                    let disabled_tip = if indexing {
-                        "Espera a que termine el indexado antes de buscar obras."
-                    } else if ocr_running {
-                        "Espera a que termine la lectura OCR antes de buscar obras."
+                    let can_match = cat.is_some() && other_heavy_task.is_none();
+                    let disabled_tip = if let Some(task) = other_heavy_task {
+                        format!("Espera a que termine {task} antes de buscar obras.")
                     } else {
-                        "No hay catálogo abierto."
+                        "No hay catálogo abierto.".into()
                     };
                     if ui
                         .add_enabled(

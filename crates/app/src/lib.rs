@@ -11,6 +11,7 @@ pub mod theme;
 pub mod thumb_provider;
 pub mod ui;
 pub mod views;
+pub mod vision_worker;
 pub mod worker;
 pub mod works_worker;
 
