@@ -3401,6 +3401,7 @@ dependencies = [
 name = "ocr"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "image",
  "oar-ocr",
  "ort",
