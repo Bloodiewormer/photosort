@@ -33,9 +33,9 @@ pub enum Strategy {
     Cascade(Thresholds),
 }
 
-/// Kept readings below this score are treated as invented text. Chosen on the synthetic tuning
-/// set (no title or CER lost); unmeasured on real photos.
-pub const MIN_SCORE: f32 = 0.65;
+/// Readings below this score are only highlighted for review, never discarded: it was chosen on
+/// synthetic images, and in the real-photo pilot most marked lines below it were correct.
+pub const REVIEW_BELOW: f32 = 0.65;
 
 /// The recommended thresholds, for [`Strategy::Both`]: H and M from the middle of the range that
 /// ties on the tuning set. T is the cascade's best there; see `docs/ocr-evaluacion.md`.

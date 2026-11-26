@@ -76,7 +76,7 @@ fn text_from_an_image_cannot_become_markup() {
         }),
     }];
     let summary = report::Summary::of(&entries, "cpu".into());
-    let page = report::render(&entries, &summary, MIN_SCORE, 1);
+    let page = report::render(&entries, &summary, REVIEW_BELOW, 1);
     assert!(!page.contains("<img src=x"));
     assert!(!page.contains("alert('x')"));
     assert!(page.contains("&lt;img src=x onerror=&quot;alert(&#39;x&#39;)&quot;&gt;&amp;"));

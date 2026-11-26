@@ -13,7 +13,7 @@ mod report;
 use fsguard::{DestPath, LibraryRoot, ensure_export_dir};
 use ocr::engine::{Engine, Options, Provider};
 use ocr::eval::chosen;
-use ocr::select::{MIN_SCORE, RECOMMENDED, Source, Strategy, choose};
+use ocr::select::{RECOMMENDED, REVIEW_BELOW, Source, Strategy, choose};
 use std::collections::BTreeSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
@@ -252,7 +252,7 @@ fn run(config: &Config, say: &mut dyn Write) -> Result<(), String> {
     }
 
     let summary = report::Summary::of(&entries, config.provider.to_string());
-    report::write(&report_path, &entries, &summary, MIN_SCORE, config.seed)?;
+    report::write(&report_path, &entries, &summary, REVIEW_BELOW, config.seed)?;
     say_line(say, summary.to_string())?;
     say_line(
         say,

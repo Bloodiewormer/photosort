@@ -31,3 +31,6 @@ Formato: fecha · decisión · alternativas · porqué.
 - **2026-11-26 · El piloto de OCR con fotos reales se revisa en un informe local** (y no leyendo los resultados en un servicio externo).
   - La consola de la herramienta solo muestra cantidades y tiempos; el texto leído se queda en el equipo.
   - El filtro de 0,65 contra texto inventado atenúa líneas, no las borra, hasta medirlo en fotos reales.
+- **2026-11-26 · El OCR no descarta texto por puntuación** (y no el filtro de 0,65).
+  - En la revisión parcial de fotos reales, el 85 % de las líneas marcadas por debajo de 0,65 eran correctas.
+  - La puntuación se guarda como confianza y ordena la revisión.

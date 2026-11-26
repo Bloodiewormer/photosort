@@ -177,7 +177,7 @@ pub fn render(entries: &[Entry], summary: &Summary, min_score: f32, seed: u64) -
          Marca cada línea. Una línea <em>inventada</em> es texto donde no había nada escrito. \
          En cada imagen, anota cuántas líneas escritas no aparecen. \
          Las marcas se guardan en este navegador. No hace falta marcarlo todo. \
-         Las líneas atenuadas quedan por debajo del filtro ({min_score}).</p>",
+         Las líneas atenuadas tienen una puntuación menor que {min_score}.</p>",
         esc(&summary.to_string())
     );
     for (n, entry) in entries.iter().enumerate() {

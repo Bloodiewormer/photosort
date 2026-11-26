@@ -303,7 +303,7 @@ Casi todas las lecturas inventadas son de uno o dos caracteres y puntuación baj
 
 ## Sin medir
 
-- **Fotos y escaneos reales.** Hace falta una muestra de 100–200 imágenes aprobada por el usuario, en solo lectura. Aquí no hay compresión JPEG, desenfoque, perspectiva, tramas, manuscrito, tipografías de cartel, texto sobre ilustraciones ni columnas verticales apretadas.
+- **Fotos y escaneos reales,** salvo la revisión parcial del piloto. En las imágenes sintéticas no hay compresión JPEG, desenfoque, perspectiva, tramas, manuscrito, tipografías de cartel, texto sobre ilustraciones ni columnas verticales apretadas.
 - Rotaciones de más de 8° o texto al revés.
 - La asociación de cada título con su portada y las entidades.
 - Consumo y estabilidad en ejecuciones largas, y la GPU compartida con carga.
@@ -314,14 +314,14 @@ Casi todas las lecturas inventadas son de uno o dos caracteres y puntuación baj
 
 ## Filtro por puntuación mínima
 
-Una lectura con puntuación inferior a **0,65** (`select::MIN_SCORE`) se considera texto inventado. El valor se eligió en el conjunto de ajuste: es el más bajo de los probados que deja el mínimo de texto inventado en imágenes sin texto, sin cambiar el CER ni los títulos.
+Con imágenes sintéticas se probó descartar las lecturas con puntuación inferior a **0,65**. **El piloto con fotos reales lo descarta como filtro** (ver abajo); el valor queda solo para atenuar líneas en la revisión (`select::REVIEW_BELOW`). Se eligió en el conjunto de ajuste: es el más bajo de los probados que deja el mínimo de texto inventado en imágenes sin texto, sin cambiar el CER ni los títulos.
 
 | Imágenes sin texto con texto inventado | Sin filtro | Mínimo 0,65 |
 |---|---|---|
 | Ajuste | 7/20 | 1/20 |
 | Reservado | 8/20 | 0/20 |
 
-CER medio y títulos no cambian en ninguno de los dos (0,48 % y 74/78; 0,47 % y 78/78). Medido con DirectML. El texto sintético es limpio y puntúa alto (tampoco se pierde nada con 0,9), así que en fotos reales el filtro podría descartar texto correcto: **sin medir**. El subcomando `eval` imprime las dos tablas completas.
+CER medio y títulos no cambian en ninguno de los dos (0,48 % y 74/78; 0,47 % y 78/78). Medido con DirectML. El texto sintético es limpio y puntúa alto (tampoco se pierde nada con 0,9), por eso estas cifras no mostraban lo que se perdería en fotos reales. El subcomando `eval` imprime las dos tablas completas.
 
 ## Piloto con fotos reales (herramienta `ocr_pilot`)
 
@@ -336,6 +336,25 @@ cargo run --release -p ocr --example ocr_pilot -- --folder <carpeta> --folder <o
 - El informe contiene texto e imágenes privados y no se comparte. Bloquea todo acceso a la red.
 - En el informe se marca cada línea (correcta, parcial, incorrecta o inventada). El botón «Generar resumen» produce solo cantidades, por reconocedor, por puntuación y a cada lado del filtro. El filtro no oculta líneas: las atenúa, para medir qué descartaría.
 - Tras leer cada original se comprueban su SHA-256, tamaño y fechas de modificación y creación. La fecha de **último acceso** no se comprueba: Windows puede actualizarla al leer un archivo, según `fsutil behavior query disablelastaccess`.
+
+## Resultados del piloto con fotos reales
+
+Una ejecución con DirectML sobre 150 imágenes al azar de cuatro carpetas, repartidas por igual: 150 leídas, 0 errores, 111 con texto y 1.897 líneas (8 del reconocedor coreano). OCR por imagen: mediana 166 ms, p90 1.015 ms. La ejecución completa duró 77 s.
+
+El usuario marcó **617 líneas (33 %)**: 602 correctas (97,6 %), 4 parciales, 7 incorrectas y 4 inventadas.
+
+| Puntuación | Marcadas | Correctas |
+|---|---|---|
+| 0,90 o más | 498 | 496 (99,6 %) |
+| 0,80–0,90 | 25 | 25 |
+| 0,65–0,80 | 28 | 25 (89 %) |
+| 0,40–0,65 | 42 | 38 (90 %) |
+| menos de 0,40 | 24 | 18 (75 %) |
+
+- **No se descarta texto por puntuación.** Un mínimo de 0,65 habría quitado 56 líneas correctas (el 9 % de las correctas marcadas) para evitar 10 que no lo eran, entre ellas las 4 inventadas. Por debajo quedan 229 de las 1.897 líneas. La puntuación se guardará como confianza para ordenar la revisión.
+- **Capturas de pantalla:** según el usuario, el texto se lee bien, pero la barra de estado del teléfono (batería, iconos) sale como caracteres extraños. Pendiente de resolver al integrar el OCR.
+
+Límites: es una revisión parcial y las líneas marcadas no se eligieron al azar. El botón «Lo no marcado es correcto» puede inflar los aciertos. No se anotaron líneas sin detectar, lo que **no significa que no las haya**. Hay muy pocas líneas coreanas para juzgar ese reconocedor, y no se evaluó por separado la lectura de títulos en páginas de scanlation.
 
 ## Reproducción independiente
 
