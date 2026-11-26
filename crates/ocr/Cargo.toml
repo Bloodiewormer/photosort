@@ -1,0 +1,27 @@
+[package]
+name = "ocr"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ab_glyph = "0.2.32"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+# `auto-download` (model fetching) and every GPU backend other than DirectML stay disabled.
+oar-ocr = { version = "=0.11.0", default-features = false, features = ["download-binaries", "simd", "directml"] }
+ort = "=2.0.0-rc.15"
+scanner = { path = "../scanner" }
+unicode-normalization = "0.1.26"
+
+[dev-dependencies]
+fsguard = { path = "../fsguard" }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+thumbs = { path = "../thumbs" }
+walkdir = "2.5.1"
+
+[[example]]
+name = "ocr_pilot"
+test = true
+
+[target."cfg(windows)".dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
