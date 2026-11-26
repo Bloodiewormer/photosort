@@ -52,6 +52,8 @@ pub struct PhotosortApp {
     new_label_kind: LabelKind,
     new_label_text: String,
     focus_search_next_frame: bool,
+    screenshot: Option<crate::screenshot::ScreenshotController>,
+    last_thumbs_ready: bool,
 }
 
 impl PhotosortApp {
@@ -117,9 +119,22 @@ impl PhotosortApp {
             new_label_kind: LabelKind::Tag,
             new_label_text: String::new(),
             focus_search_next_frame: false,
+            screenshot: None,
+            last_thumbs_ready: false,
         };
         app.reload_catalog();
         app
+    }
+
+    pub fn with_theme_override(mut self, ctx: &egui::Context, theme: Theme) -> Self {
+        self.settings.theme = theme;
+        theme::apply_theme_preference(ctx, theme);
+        self
+    }
+
+    pub fn with_screenshot(mut self, controller: crate::screenshot::ScreenshotController) -> Self {
+        self.screenshot = Some(controller);
+        self
     }
 
     fn reload_catalog(&mut self) {
@@ -990,6 +1005,7 @@ impl PhotosortApp {
                 );
             });
 
+        self.last_thumbs_ready = !visible_hashes.is_empty() && to_request.is_empty();
         self.thumb_pool.set_visible(&visible_hashes);
         for req in to_request {
             self.thumb_pool.request(req);
@@ -1346,6 +1362,23 @@ impl PhotosortApp {
                     });
             });
     }
+
+    fn step_screenshot(&mut self, ctx: &egui::Context) {
+        let has_entries = !self.entries.is_empty();
+        let has_selection = !self.selection.is_empty();
+        let thumbs_ready = self.last_thumbs_ready;
+        let preview_ready = match &self.preview_requested {
+            None => true,
+            Some(path) => matches!(&self.preview_loaded, Some((p, _)) if p == path),
+        };
+        let select_first = self.screenshot.as_mut().is_some_and(|ctrl| {
+            ctrl.step(ctx, has_entries, has_selection, thumbs_ready, preview_ready)
+        });
+        if select_first && has_entries {
+            self.selection.click(0, self.entries.len());
+            self.sync_inspector(false);
+        }
+    }
 }
 
 impl eframe::App for PhotosortApp {
@@ -1365,6 +1398,8 @@ impl eframe::App for PhotosortApp {
             self.draw_gallery(ui, palette);
             self.draw_viewer_overlay(&ctx, palette);
         }
+
+        self.step_screenshot(&ctx);
     }
 }
 

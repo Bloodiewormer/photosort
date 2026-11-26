@@ -1,4 +1,6 @@
+use app::demo::{self, DemoConfig};
 use app::model::{ChipMode, FilterState, GridLayout, Selection};
+use app::screenshot::{self, ScreenshotController};
 use app::settings::{self, Settings};
 use app::ui::PhotosortApp;
 use app::worker::{
@@ -14,44 +16,19 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-struct Args {
-    self_test: bool,
-    data_dir: Option<PathBuf>,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut args = std::env::args_os().skip(1);
-    let mut self_test = false;
-    let mut data_dir = None;
-    while let Some(arg) = args.next() {
-        if arg == "--self-test" {
-            self_test = true;
-        } else if arg == "--data-dir" {
-            let val = args
-                .next()
-                .ok_or_else(|| "Falta la ruta después de --data-dir".to_string())?;
-            data_dir = Some(PathBuf::from(val));
-        } else if arg == "--help" || arg == "-h" {
-            println!("Uso: photosort [--data-dir <carpeta>] [--self-test]");
-            std::process::exit(0);
-        } else {
-            return Err(format!("Argumento desconocido: {}", arg.to_string_lossy()));
-        }
-    }
-    Ok(Args {
-        self_test,
-        data_dir,
-    })
-}
-
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let args = match screenshot::parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error: {e}");
             return ExitCode::FAILURE;
         }
     };
+
+    if args.help {
+        println!("{}", screenshot::usage_text());
+        return ExitCode::SUCCESS;
+    }
 
     if args.self_test {
         return if run_self_test() {
@@ -61,12 +38,54 @@ fn main() -> ExitCode {
         };
     }
 
-    let data_dir = settings::resolve_data_dir(args.data_dir.as_deref());
+    let _demo_guard;
+    let data_dir = if args.demo {
+        match demo::prepare_demo(
+            args.data_dir.as_deref(),
+            DemoConfig {
+                count: args.demo_count,
+                seed: demo::DEFAULT_SEED,
+            },
+            args.theme,
+        ) {
+            Ok(setup) => {
+                let dir = setup.data_dir.clone();
+                _demo_guard = Some(setup);
+                dir
+            }
+            Err(e) => {
+                eprintln!("No se pudo preparar el modo demo: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        _demo_guard = None;
+        settings::resolve_data_dir(args.data_dir.as_deref())
+    };
+
+    let (screenshot_ctrl, screenshot_handle) = if let Some(out_path) = &args.screenshot {
+        let roots = settings::load(&data_dir).settings.valid_roots();
+        let dest = match screenshot::guard_screenshot_path(out_path, &roots) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Ruta de captura rechazada: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let (ctrl, handle) =
+            ScreenshotController::new(dest, roots, args.screenshot_delay_frames, args.window_size);
+        (Some(ctrl), Some(handle))
+    } else {
+        (None, None)
+    };
+
+    let [win_w, win_h] = args.window_size;
+    let theme_override = args.theme;
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("photosort")
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([840.0, 560.0]),
+            .with_inner_size([win_w as f32, win_h as f32])
+            .with_min_inner_size([840.0_f32.min(win_w as f32), 560.0_f32.min(win_h as f32)]),
         ..Default::default()
     };
 
@@ -74,11 +93,15 @@ fn main() -> ExitCode {
         "photosort",
         native_options,
         Box::new(move |cc| {
-            Ok(Box::new(PhotosortApp::new(
-                cc,
-                data_dir,
-                app::thumb_provider::open_thumbnails,
-            )))
+            let mut photosort =
+                PhotosortApp::new(cc, data_dir, app::thumb_provider::open_thumbnails);
+            if let Some(theme) = theme_override {
+                photosort = photosort.with_theme_override(&cc.egui_ctx, theme);
+            }
+            if let Some(ctrl) = screenshot_ctrl {
+                photosort = photosort.with_screenshot(ctrl);
+            }
+            Ok(Box::new(photosort))
         }),
     );
 
@@ -86,6 +109,21 @@ fn main() -> ExitCode {
         eprintln!("No se pudo iniciar la interfaz gráfica: {e}");
         return ExitCode::FAILURE;
     }
+
+    if let Some(handle) = screenshot_handle {
+        return match handle.take_result() {
+            Some(Ok(_)) => ExitCode::SUCCESS,
+            Some(Err(e)) => {
+                eprintln!("Error al capturar pantalla: {e}");
+                ExitCode::FAILURE
+            }
+            None => {
+                eprintln!("Error: la ventana se cerró antes de completar la captura.");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     ExitCode::SUCCESS
 }
 

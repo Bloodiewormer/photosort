@@ -219,6 +219,7 @@ dependencies = [
  "fsguard",
  "image",
  "rfd",
+ "rules",
  "scanner",
  "serde",
  "serde_json",
