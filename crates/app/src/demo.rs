@@ -193,6 +193,15 @@ pub fn plan_demo_images(count: usize, seed: u64) -> Vec<ImageSpec> {
             PatternKind::Stripes,
         ),
         (
+            "manga",
+            "Lluvia de Estrellas - Capítulo 4 - 01.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::Gradient,
+        ),
+        (
             "capturas",
             "alpha_marco_0004.png",
             220,
@@ -264,8 +273,10 @@ pub fn plan_demo_images(count: usize, seed: u64) -> Vec<ImageSpec> {
     }
 
     // Reserve two early exact duplicates right after the starter set when count allows.
+    let dup_a = starters.len();
+    let dup_b = starters.len() + 1;
     for i in specs.len()..count {
-        if i == 10 && specs.len() > 1 {
+        if i == dup_a && specs.len() > 1 {
             let src = &specs[1];
             specs.push(ImageSpec {
                 index: i,
@@ -279,7 +290,7 @@ pub fn plan_demo_images(count: usize, seed: u64) -> Vec<ImageSpec> {
             });
             continue;
         }
-        if i == 11 && !specs.is_empty() {
+        if i == dup_b && !specs.is_empty() {
             let src = &specs[0];
             specs.push(ImageSpec {
                 index: i,
@@ -969,6 +980,7 @@ pub fn prepare_demo(
     // and a small subset of other demo images, leaving most images pending for the OCR window.
     // Demo mode never loads ONNX models.
     seed_demo_ocr(&mut cat, canonical_root, &specs)?;
+    seed_demo_works(&mut cat)?;
 
     Ok(DemoSetup {
         base_dir: resolved_base,
@@ -1049,6 +1061,51 @@ fn seed_demo_ocr(
             .asset_of(&canonical_root.join(&spec.rel_path))
             .map_err(|e| e.to_string())?
         {
+            if i == 3 {
+                // Synthetic promo page mentioning 3 works + header phrase.
+                cat.save_ocr_lines(
+                    asset,
+                    &[
+                        OcrLine {
+                            text: "PROYECTOS ACTIVOS DE:".to_string(),
+                            score: 0.95,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 20.0, 280.0, 46.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "Academia Nebulosa".to_string(),
+                            score: 0.92,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 120.0, 180.0, 142.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "El Jardín".to_string(),
+                            score: 0.90,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [210.0, 120.0, 310.0, 142.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "de Papel".to_string(),
+                            score: 0.88,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [215.0, 150.0, 305.0, 172.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "Isla de Cristal".to_string(),
+                            score: 0.91,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 220.0, 160.0, 242.0],
+                            top_strip: false,
+                        },
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+                continue;
+            }
             let (text, score, rec) = sample_texts[i % sample_texts.len()];
             cat.save_ocr_lines(
                 asset,
@@ -1062,6 +1119,34 @@ fn seed_demo_ocr(
             )
             .map_err(|e| e.to_string())?;
         }
+    }
+    Ok(())
+}
+
+fn seed_demo_works(cat: &mut Catalog) -> Result<(), String> {
+    let demo_aliases: &[(&str, &[&str])] = &[
+        (
+            "Crónicas del Relojero",
+            &["Clockmaker Chronicles", "Relojero"],
+        ),
+        ("Academia Nebulosa", &["Nebula Academy"]),
+        ("El Jardín de Papel", &["Paper Garden"]),
+        ("Estudio Cometa", &["Cometa Scans"]),
+        ("Isla de Cristal", &["Crystal Island"]),
+    ];
+
+    for &(work_name, aliases) in demo_aliases {
+        let id = cat.create_work(work_name).map_err(|e| e.to_string())?;
+        for &alias in aliases {
+            cat.add_work_alias(id, alias).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let matcher = cat.load_work_matcher().map_err(|e| e.to_string())?;
+    let assets = cat.assets_with_ocr().map_err(|e| e.to_string())?;
+    for asset in assets {
+        cat.apply_work_matches(asset, &matcher)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

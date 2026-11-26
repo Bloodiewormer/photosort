@@ -219,6 +219,14 @@ impl OcrWorker {
                 }
             };
 
+            let matcher = match cat.load_work_matcher() {
+                Ok(m) => m,
+                Err(e) => {
+                    emit(OcrEvent::Failed(e.to_string()));
+                    return;
+                }
+            };
+
             let started = Instant::now();
             let mut processed = 0usize;
             let mut errors = 0usize;
@@ -245,8 +253,11 @@ impl OcrWorker {
                 .unwrap_or_else(|_| Err("error interno al leer la imagen".into()));
 
                 let saved_asset = match outcome {
-                    Ok(lines) => match cat.save_ocr_lines(item.asset, &lines) {
-                        Ok(()) => {
+                    Ok(lines) => match cat
+                        .save_ocr_lines(item.asset, &lines)
+                        .and_then(|()| cat.apply_work_matches(item.asset, &matcher))
+                    {
+                        Ok(_) => {
                             processed += 1;
                             Some(item.asset)
                         }

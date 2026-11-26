@@ -4,7 +4,8 @@
 use app::analysis_worker::{AnalysisEvent, AnalysisWorker};
 use app::ocr_worker::{OcrEvent, OcrImageReader, OcrScope, OcrWorker};
 use app::worker::{IndexEvent, IndexWorker, PreviewWorker};
-use catalog::{OcrLine, OcrRecognizer};
+use app::works_worker::{WorksEvent, WorksWorker};
+use catalog::{Catalog, OcrLine, OcrRecognizer};
 use fsguard::{LibraryRoot, ensure_writable};
 use image::{ImageBuffer, Rgba};
 use std::collections::BTreeMap;
@@ -231,6 +232,75 @@ fn ocr_worker_leaves_the_originals_untouched() {
             }
             OcrEvent::Failed(e) => panic!("ocr failed: {e}"),
             _ => {}
+        }
+    }
+    assert!(finished);
+    assert_eq!(before, snapshot(&library));
+}
+
+#[test]
+fn works_worker_leaves_the_originals_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    let img_path = library.join("promo.png");
+    write_png(&img_path, [120, 40, 200, 255]);
+
+    let root = LibraryRoot::new(&library).unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db_path = data.join("catalog.sqlite");
+
+    let db_index = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+    let db_setup = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+    let db_works = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+
+    let indexer = IndexWorker::start(db_index, vec![root], None);
+    while let Ok(ev) = indexer.recv() {
+        if let IndexEvent::Finished { stopped, .. } = ev {
+            assert!(!stopped);
+            break;
+        }
+    }
+
+    let mut cat = Catalog::open(&db_setup).unwrap();
+    cat.create_work("Academia Nebulosa").unwrap();
+    let asset = cat
+        .asset_of(&dunce::canonicalize(&img_path).unwrap())
+        .unwrap()
+        .unwrap();
+    cat.save_ocr_lines(
+        asset,
+        &[OcrLine {
+            text: "Academia Nebulosa".into(),
+            score: 0.92,
+            recognizer: OcrRecognizer::V6,
+            rect: [10.0, 10.0, 180.0, 32.0],
+            top_strip: false,
+        }],
+    )
+    .unwrap();
+
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    let worker = WorksWorker::start(db_works, None);
+    let mut finished = false;
+    while let Ok(ev) = worker.recv() {
+        match ev {
+            WorksEvent::Finished {
+                stopped,
+                processed,
+                matched_assets,
+                ..
+            } => {
+                assert!(!stopped);
+                assert_eq!(processed, 1);
+                assert_eq!(matched_assets, 1);
+                finished = true;
+                break;
+            }
+            WorksEvent::Failed(e) => panic!("works worker failed: {e}"),
+            WorksEvent::Progress { .. } => {}
         }
     }
     assert!(finished);

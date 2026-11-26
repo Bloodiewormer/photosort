@@ -12,5 +12,6 @@ pub mod thumb_provider;
 pub mod ui;
 pub mod views;
 pub mod worker;
+pub mod works_worker;
 
 pub use worker::{NoThumbnails, ThumbnailProvider};
