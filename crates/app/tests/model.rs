@@ -290,3 +290,16 @@ fn gallery_cell_and_sidebar_tooltip_helpers_format_full_name_and_folder() {
     );
     assert_eq!(library_display_name(Path::new(r"C:\")), r"C:\");
 }
+
+#[test]
+fn truncate_middle_keeps_start_and_end() {
+    use app::model::truncate_middle;
+    assert_eq!(truncate_middle("corto", 10), "corto");
+    assert_eq!(truncate_middle("exacto", 6), "exacto");
+    assert_eq!(truncate_middle("abcdefghij", 7), "abc…hij");
+    assert_eq!(truncate_middle("abcdefghij", 6), "abc…ij");
+    assert_eq!(truncate_middle("abcdefghij", 2), "a…");
+    assert_eq!(truncate_middle("abcdefghij", 1), "…");
+    assert_eq!(truncate_middle("abcdefghij", 0), "");
+    assert_eq!(truncate_middle("ñandú_árbol_ü", 7), "ñan…l_ü");
+}
