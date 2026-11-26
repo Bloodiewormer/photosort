@@ -9,5 +9,6 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 scanner = { path = "../scanner" }
 
 [dev-dependencies]
+dunce = "1.0.5"
 tempfile = "3.27.0"
 walkdir = "2.5.1"

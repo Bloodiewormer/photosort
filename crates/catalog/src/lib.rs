@@ -1,3 +1,7 @@
+mod labels;
+
+pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, Source, Status};
+
 use fsguard::{DestPath, LibraryRoot};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fmt;
@@ -23,6 +27,21 @@ CREATE TABLE IF NOT EXISTS location (
     missing  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS location_asset ON location(asset_id);
+CREATE TABLE IF NOT EXISTS label (
+    id   INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('category', 'tag', 'entity')),
+    name TEXT NOT NULL COLLATE NOCASE,
+    UNIQUE (kind, name)
+);
+CREATE TABLE IF NOT EXISTS asset_label (
+    asset_id   INTEGER NOT NULL REFERENCES asset(id),
+    label_id   INTEGER NOT NULL REFERENCES label(id),
+    source     TEXT NOT NULL CHECK (source IN ('ai', 'ocr', 'rules', 'user')),
+    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    status     TEXT NOT NULL CHECK (status IN ('suggested', 'accepted', 'rejected')),
+    PRIMARY KEY (asset_id, label_id)
+);
+CREATE INDEX IF NOT EXISTS asset_label_label ON asset_label(label_id);
 ";
 
 #[derive(Debug)]
