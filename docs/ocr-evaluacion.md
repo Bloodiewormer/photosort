@@ -312,6 +312,47 @@ Casi todas las lecturas inventadas son de uno o dos caracteres y puntuación baj
 - **Indra OCR no se descargó ni se midió:** descargar sus pesos implica aceptar su licencia, y eso solo puede hacerlo el propietario.
 - Tampoco se usaron SigLIP, WD Tagger ni CUDA.
 
+## Reproducción independiente
+
+Segunda ejecución completa en el mismo equipo, en otra sesión (`eval` con CPU y DirectML, y `matrix` con 48 procesos).
+
+- **Precisión:** las cifras del conjunto reservado coinciden (S1: CER medio 0,47 %, títulos 78/78, insignias 78/78, coreano 87,5 % de líneas exactas, 8/20 imágenes sin texto con texto inventado). La salida con DirectML solo difiere de la de CPU en las líneas de tiempos.
+- **Texto:** idéntico entre CPU y DirectML en todas las líneas de los cuatro conjuntos de la medición.
+- **DirectML estricto:** pedir el dispositivo 99 termina con error.
+
+Mediana por imagen en régimen estable, en ms (3 procesos; se toma la mejor configuración de CPU):
+
+| Formas, lote | CPU | DirectML |
+|---|---|---|
+| Fijas, 1 | 303 | 114 |
+| Fijas, 6 | 280 | 76 |
+| Variables, 1 | **629** | 720 |
+| Variables, 6 | 1061 | 351 |
+
+La mejor combinación frente a la mejor: DirectML es unas 3,7 veces más rápido con formas fijas y 1,8 veces con variables (CPU con lote 1: 629 ms; DirectML con lote 6: 351 ms). Con formas variables y lote 1 gana la CPU, y en la CPU el lote 6 empeora las formas variables.
+
+## Alcance de las imágenes sintéticas
+
+Las páginas promocionales sintéticas son **más fáciles que las reales**: las portadas son formas abstractas sin texto ni dibujo, y los títulos van separados sobre un fondo que no compite con ellos. Estas cifras sirven para comparar configuraciones y detectar fallos de los modelos; **no predicen los aciertos en fotos o escaneos reales**.
+
+## Indra OCR frente a PP-OCR (comparación documental, sin descarga ni medición)
+
+| | PP-OCRv6 + coreano PP-OCRv5 | Indra OCR |
+|---|---|---|
+| Licencia de los pesos | Apache-2.0 según los repositorios de origen | `datalab-openrail-m` (OpenRAIL-M modificada); el código es Apache-2.0 |
+| Idiomas | PP-OCRv6: latín, japonés, chino. Coreano con un segundo modelo | Un clasificador de escritura elige entre varios reconocedores, con CJK y latín |
+| Selección de reconocedor | La hace photosort (esta evaluación) | Automática |
+| Japonés vertical | Probado solo en un caso fácil | Declarado, sin cifras publicadas |
+| Aceleración | DirectML medido aquí | Se presenta como «CPU primero»; no menciona DirectML |
+| Tamaño | 43 MB | Unos 76 MB el núcleo; 129 MB el repositorio |
+| Memoria | Ver tablas de recursos | Unos 3 GB de RAM con un proceso (cifra de sus autores) |
+
+Condiciones relevantes de su licencia (resumen no jurídico; manda el [texto](https://huggingface.co/datalab-to/indra-ocr/blob/main/LICENSE)): descargar implica aceptarla; permite uso personal y de investigación; limita el uso comercial por encima de 5 millones de USD de ingresos o financiación; prohíbe usarlo en productos que compitan con los del licenciante; las restricciones deben acompañar a cualquier redistribución; y una cláusula de «share-alike» menciona también la salida generada, lo que habría que aclarar antes de usarlo.
+
+## Posibilidades posteriores (no descargadas)
+
+Quedan como opciones a decidir **después** de revisar estos resultados, cada una con autorización previa: **SigLIP 2** (etiquetas generales), **WD Tagger v3** (anime, manga e ilustración) y **CUDA** como proveedor alternativo si DirectML resultara insuficiente. Ninguna se ha descargado ni instalado.
+
 ## Cómo reproducirlo
 
 En PowerShell, desde la raíz del repositorio. Los cinco modelos deben estar ya en una carpeta; **ningún comando los descarga**. La primera compilación descarga las crates y el paquete de ONNX Runtime.
