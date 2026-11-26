@@ -200,6 +200,7 @@ pub fn draw_window(
     dialog: &mut Option<OcrDialog>,
     worker_running: bool,
     indexing: bool,
+    works_running: bool,
     data_dir: &Path,
     settings: &mut Settings,
     banner_error: &mut Option<String>,
@@ -489,6 +490,11 @@ pub fn draw_window(
                 RichText::new("Podrás leer texto cuando termine el indexado.")
                     .color(palette.text_secondary.color32()),
             );
+        } else if works_running {
+            ui.label(
+                RichText::new("Podrás leer texto cuando termine la búsqueda de obras.")
+                    .color(palette.text_secondary.color32()),
+            );
         }
 
         // 5. Footer buttons
@@ -505,8 +511,10 @@ pub fn draw_window(
                 if !running {
                     let models_path = PathBuf::from(dlg.models_input.trim());
                     let scope = dlg.selected_scope();
-                    let can_start =
-                        !indexing && !models_path.as_os_str().is_empty() && scope.is_some();
+                    let can_start = !indexing
+                        && !works_running
+                        && !models_path.as_os_str().is_empty()
+                        && scope.is_some();
                     let label = match &scope {
                         Some((_, n)) => format!("Leer texto ({n})"),
                         None => "Leer texto".to_string(),

@@ -3,6 +3,7 @@ mod browse;
 mod dupes;
 mod labels;
 mod ocr;
+mod works;
 
 pub use analysis::Pending;
 pub use browse::{Entry, LabelCount, Sort};
@@ -11,6 +12,10 @@ pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, So
 pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
     ocr_search_key,
+};
+pub use works::{
+    AssetWorkMatches, PROMO_CATEGORY, WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal,
+    WorkSummary, extract_work_title_from_stem, work_match_key,
 };
 
 use fsguard::{DestPath, LibraryRoot};
@@ -104,6 +109,13 @@ CREATE TRIGGER IF NOT EXISTS ocr_line_au AFTER UPDATE ON ocr_line BEGIN
     VALUES ('delete', old.id, old.search_key);
     INSERT INTO ocr_line_fts(rowid, search_key) VALUES (new.id, new.search_key);
 END;
+CREATE TABLE IF NOT EXISTS work_alias (
+    label_id INTEGER NOT NULL REFERENCES label(id),
+    alias    TEXT NOT NULL,
+    key      TEXT NOT NULL,
+    UNIQUE (label_id, key)
+);
+CREATE INDEX IF NOT EXISTS work_alias_label ON work_alias(label_id);
 ";
 
 #[derive(Debug)]

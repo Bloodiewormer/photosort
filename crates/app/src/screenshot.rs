@@ -28,6 +28,7 @@ pub enum CaptureView {
     Gallery,
     Review,
     Duplicates,
+    Works,
     Export,
     Ocr,
 }
@@ -67,7 +68,7 @@ pub fn usage_text() -> &'static str {
     "Uso: photosort [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
      [--screenshot <salida.png>] [--screenshot-delay-frames <N>] \
      [--window-size <Ancho>x<Alto>] [--theme dark|light] \
-     [--view gallery|review|duplicates|export|ocr]"
+     [--view gallery|review|duplicates|works|export|ocr]"
 }
 
 pub fn parse_window_size(raw: &str) -> Result<[u32; 2], String> {
@@ -115,13 +116,15 @@ pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
         Ok(CaptureView::Review)
     } else if raw.eq_ignore_ascii_case("duplicates") {
         Ok(CaptureView::Duplicates)
+    } else if raw.eq_ignore_ascii_case("works") {
+        Ok(CaptureView::Works)
     } else if raw.eq_ignore_ascii_case("export") {
         Ok(CaptureView::Export)
     } else if raw.eq_ignore_ascii_case("ocr") {
         Ok(CaptureView::Ocr)
     } else {
         Err(format!(
-            "Vista inválida para --view: '{raw}' (usa 'gallery', 'review', 'duplicates', 'export' u 'ocr')"
+            "Vista inválida para --view: '{raw}' (usa 'gallery', 'review', 'duplicates', 'works', 'export' u 'ocr')"
         ))
     }
 }
@@ -330,6 +333,7 @@ impl CaptureState {
                         !signals.has_entries || (signals.thumbs_ready && signals.preview_ready)
                     }
                     CaptureView::Review | CaptureView::Duplicates => signals.thumbs_ready,
+                    CaptureView::Works => true,
                     CaptureView::Export => {
                         !signals.has_entries || (signals.thumbs_ready && signals.export_ready)
                     }
@@ -363,6 +367,9 @@ impl CaptureState {
                             CaptureView::Duplicates => {
                                 "Tiempo de espera agotado esperando las miniaturas de la pestaña Duplicados."
                                     .into()
+                            }
+                            CaptureView::Works => {
+                                "Tiempo de espera agotado esperando la pestaña Obras.".into()
                             }
                             CaptureView::Export => {
                                 "Tiempo de espera agotado esperando la vista previa del asistente de exportación."
