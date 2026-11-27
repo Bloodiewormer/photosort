@@ -350,7 +350,7 @@ pub fn draw(
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     let (thumb_rect, thumb_resp) =
-                                        ui.allocate_exact_size(REVIEW_THUMB_SIZE, Sense::click());
+                                        ui.allocate_exact_size(REVIEW_THUMB_SIZE, Sense::CLICK);
                                     if thumb_resp.clicked() {
                                         row_clicked = Some(idx);
                                     }
@@ -420,7 +420,8 @@ pub fn draw(
                                     });
                                 });
                             });
-                        if card_resp.response.interact(Sense::click()).clicked() {
+                        // Pointer only: the arrow keys move between rows.
+                        if card_resp.response.interact(Sense::CLICK).clicked() {
                             row_clicked = Some(idx);
                         }
                         ui.add_space(theme::SPACE_SM);

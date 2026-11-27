@@ -135,14 +135,20 @@ fn draw_choose_step(
     let mut picked_folder: Option<PathBuf> = None;
     ui.horizontal(|ui| {
         let edit_w = (ui.available_width() - 148.0).max(180.0);
-        let edit = ui.add(
-            egui::TextEdit::singleline(&mut path_text)
-                .desired_width(edit_w)
-                .hint_text(theme::hint_text(
-                    palette,
-                    "Elige una carpeta fuera de tus bibliotecas…",
-                )),
+        let edit = theme::named(
+            ui.add(
+                egui::TextEdit::singleline(&mut path_text)
+                    .desired_width(edit_w)
+                    .hint_text(theme::hint_text(
+                        palette,
+                        "Elige una carpeta fuera de tus bibliotecas…",
+                    )),
+            ),
+            "Carpeta de destino",
         );
+        if wizard.take_focus_dest() {
+            edit.request_focus();
+        }
         if edit.changed() {
             wizard.set_dest(PathBuf::from(path_text.trim()));
         }
@@ -172,7 +178,7 @@ fn draw_choose_step(
     ui.add_space(theme::SPACE_XS);
 
     let mut chosen_layout = wizard.layout();
-    egui::ComboBox::from_id_salt("export_layout_combo")
+    let export_layout_combo_response = egui::ComboBox::from_id_salt("export_layout_combo")
         .selected_text(layout_label(chosen_layout))
         .width(220.0)
         .show_ui(ui, |ui| {
@@ -180,7 +186,9 @@ fn draw_choose_step(
                 ui.selectable_value(&mut chosen_layout, option, layout_label(option))
                     .on_hover_text(layout_description(option));
             }
-        });
+        })
+        .response;
+    theme::named(export_layout_combo_response, "Estructura de carpetas");
     if chosen_layout != wizard.layout() {
         wizard.set_layout(chosen_layout);
     }

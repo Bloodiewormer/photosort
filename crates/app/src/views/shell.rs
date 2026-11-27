@@ -89,6 +89,7 @@ pub fn draw_top_bar(
                             .hint_text(theme::hint_text(palette, "Buscar en texto o ruta (/)")),
                     )
                     .on_hover_text("Busca en el texto leído y en la ruta (/ o Ctrl+F)");
+                let search_resp = theme::named(search_resp, "Buscar en texto o ruta");
                 if *focus_search_next_frame {
                     search_resp.request_focus();
                     *focus_search_next_frame = false;
@@ -621,7 +622,11 @@ fn nav_row(
     }
 
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, active, label.to_string())
+        let name = match count {
+            Some(n) => format!("{label}, {n}"),
+            None => label.to_string(),
+        };
+        egui::WidgetInfo::selected(egui::Role::Button, true, active, name)
     });
 
     ui.add_space(2.0);
@@ -731,11 +736,12 @@ fn draw_category_tree_group(
     .default_open(true)
     .show(ui, |ui| {
         if rows.len() > LONG_FILTER_GROUP_THRESHOLD {
-            ui.add(
+            let query = ui.add(
                 egui::TextEdit::singleline(group_query)
                     .desired_width(ui.available_width())
                     .hint_text(theme::hint_text(palette, "Filtrar…")),
             );
+            theme::named(query, "Filtrar categorías");
             ui.add_space(theme::SPACE_XS);
         } else if !group_query.is_empty() {
             group_query.clear();
@@ -826,11 +832,12 @@ fn draw_flat_filter_group(
     .default_open(default_open)
     .show(ui, |ui| {
         if group.len() > LONG_FILTER_GROUP_THRESHOLD {
-            ui.add(
+            let query = ui.add(
                 egui::TextEdit::singleline(group_query)
                     .desired_width(ui.available_width())
                     .hint_text(theme::hint_text(palette, "Filtrar…")),
             );
+            theme::named(query, &format!("Filtrar {}", heading.to_lowercase()));
             ui.add_space(theme::SPACE_XS);
         } else if !group_query.is_empty() {
             group_query.clear();
@@ -912,7 +919,16 @@ fn draw_toggle_chip(
         .fill(bg)
         .stroke(stroke)
         .corner_radius(CornerRadius::same(theme::RADIUS_SM));
-    ui.add(btn)
+    let resp = ui.add(btn);
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::Role::Button,
+            true,
+            active,
+            format!("{label} ({count})"),
+        )
+    });
+    resp
 }
 
 fn draw_media_type_filter_group(

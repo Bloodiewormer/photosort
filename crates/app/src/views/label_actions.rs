@@ -295,10 +295,13 @@ impl LabelActionModal {
                             );
                             ui.add_space(theme::SPACE_SM);
                         }
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(name)
-                                .desired_width(ui.available_width())
-                                .hint_text(theme::hint_text(palette, "Nombre de la categoría")),
+                        let resp = theme::named(
+                            ui.add(
+                                egui::TextEdit::singleline(name)
+                                    .desired_width(ui.available_width())
+                                    .hint_text(theme::hint_text(palette, "Nombre de la categoría")),
+                            ),
+                            "Nombre de la categoría",
                         );
                         if self.focus_input {
                             resp.request_focus();
@@ -330,10 +333,13 @@ impl LabelActionModal {
                         });
                     }
                     ModalKind::CreateTag { name } => {
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(name)
-                                .desired_width(ui.available_width())
-                                .hint_text(theme::hint_text(palette, "Nombre de la etiqueta")),
+                        let resp = theme::named(
+                            ui.add(
+                                egui::TextEdit::singleline(name)
+                                    .desired_width(ui.available_width())
+                                    .hint_text(theme::hint_text(palette, "Nombre de la etiqueta")),
+                            ),
+                            "Nombre de la etiqueta",
                         );
                         if self.focus_input {
                             resp.request_focus();
@@ -376,9 +382,12 @@ impl LabelActionModal {
                                 .color(palette.text_secondary.color32()),
                         );
                         ui.add_space(theme::SPACE_SM);
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(draft)
-                                .desired_width(ui.available_width()),
+                        let resp = theme::named(
+                            ui.add(
+                                egui::TextEdit::singleline(draft)
+                                    .desired_width(ui.available_width()),
+                            ),
+                            "Nuevo nombre",
                         );
                         if self.focus_input {
                             resp.request_focus();
@@ -537,10 +546,13 @@ impl LabelActionModal {
                             .color(palette.text_secondary.color32()),
                         );
                         ui.add_space(theme::SPACE_SM);
-                        ui.add(
-                            egui::TextEdit::singleline(query)
-                                .desired_width(ui.available_width())
-                                .hint_text(theme::hint_text(palette, "Filtrar destino…")),
+                        theme::named(
+                            ui.add(
+                                egui::TextEdit::singleline(query)
+                                    .desired_width(ui.available_width())
+                                    .hint_text(theme::hint_text(palette, "Filtrar destino…")),
+                            ),
+                            "Filtrar destino",
                         );
                         ui.add_space(theme::SPACE_XS);
                         let q = query.trim().to_lowercase();

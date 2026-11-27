@@ -101,10 +101,13 @@ pub fn draw_naming_card(
                     }
 
                     ui.horizontal(|ui| {
-                        let text_edit = ui.add(
-                            egui::TextEdit::singleline(&mut state.naming_input)
-                                .hint_text(theme::hint_text(palette, "Nombre de la persona"))
-                                .desired_width(200.0),
+                        let text_edit = theme::named(
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.naming_input)
+                                    .hint_text(theme::hint_text(palette, "Nombre de la persona"))
+                                    .desired_width(200.0),
+                            ),
+                            "Nombre de la persona",
                         );
 
                         let enter_pressed = text_edit.lost_focus()
@@ -247,10 +250,13 @@ pub fn draw(
                         outcome.filter_changed = true;
                     }
                     ui.add_space(theme::SPACE_MD);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.filter)
-                            .hint_text(theme::hint_text(palette, "Filtrar personas..."))
-                            .desired_width(180.0),
+                    theme::named(
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.filter)
+                                .hint_text(theme::hint_text(palette, "Filtrar personas..."))
+                                .desired_width(180.0),
+                        ),
+                        "Filtrar personas",
                     );
                 });
             });
@@ -487,17 +493,22 @@ fn draw_person_card(
                         let mut cancel = false;
                         let mut save = false;
                         ui.horizontal(|ui| {
-                            let edit = ui.add(
-                                egui::TextEdit::singleline(&mut name_buf)
-                                    .hint_text("Nombre...")
-                                    .desired_width(120.0),
+                            let edit = theme::named(
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut name_buf)
+                                        .hint_text("Nombre...")
+                                        .desired_width(120.0),
+                                ),
+                                "Nombre de la persona",
                             );
                             if (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                                 || ui.button("OK").clicked()
                             {
                                 save = true;
                             }
-                            if ui.button("✕").clicked() {
+                            if theme::named(ui.button("✕"), "Cancelar el cambio de nombre")
+                                .clicked()
+                            {
                                 cancel = true;
                             }
                         });
@@ -535,13 +546,14 @@ fn draw_person_card(
                             outcome.toggled_hidden = Some((person.id, !person.hidden));
                         }
                         let mut mark = selected;
-                        if ui
-                            .checkbox(&mut mark, "Misma persona")
-                            .on_hover_text(
-                                "Marca dos o más tarjetas que sean la misma persona y pulsa «Unir»",
-                            )
-                            .changed()
-                        {
+                        let same = ui.checkbox(&mut mark, "Misma persona").on_hover_text(
+                            "Marca dos o más tarjetas que sean la misma persona y pulsa «Unir»",
+                        );
+                        // Every card has this box: the name says whose it is.
+                        let who = person.name.as_deref().unwrap_or("Sin nombre");
+                        let changed = same.changed();
+                        theme::named(same, &format!("Misma persona: {who}"));
+                        if changed {
                             if mark {
                                 state.selected.push(person.id);
                             } else {

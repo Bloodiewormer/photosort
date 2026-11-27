@@ -309,9 +309,15 @@ pub struct ExportWizard {
     preview_gen: u64,
     preview_rx: Option<mpsc::Receiver<(u64, Result<Preview, String>)>>,
     export_worker: Option<ExportWorker>,
+    focus_dest: bool,
 }
 
 impl ExportWizard {
+    /// True once, in the first frame of the window: the keyboard focus starts inside it.
+    pub fn take_focus_dest(&mut self) -> bool {
+        std::mem::take(&mut self.focus_dest)
+    }
+
     pub fn open(
         catalog: &Catalog,
         entries: &[Entry],
@@ -351,6 +357,7 @@ impl ExportWizard {
             preview_gen: 0,
             preview_rx: None,
             export_worker: None,
+            focus_dest: true,
         }
     }
 
