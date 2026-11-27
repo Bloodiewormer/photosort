@@ -5,7 +5,7 @@
 //! unnamed persons. User-assigned faces are permanent and never overridden by analysis.
 
 use crate::{AssetId, Catalog, CatalogError};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use std::path::PathBuf;
 
 pub const SFACE_SIMILARITY_THRESHOLD: f32 = 0.5;
@@ -140,30 +140,48 @@ fn recompute_person_centroid(
 }
 
 impl Catalog {
-    /// Lists all persons in the catalog, ordered by photo count descending, then name/id.
-    pub fn list_persons(&self, include_hidden: bool) -> Result<Vec<Person>, CatalogError> {
-        let sql = if include_hidden {
+    /// Lists the persons with a face in a present photo under `roots`, ordered by photo count
+    /// descending, then name/id. Counts and covers only use those photos.
+    pub fn list_persons_in_roots(
+        &self,
+        include_hidden: bool,
+        roots: &[PathBuf],
+    ) -> Result<Vec<Person>, CatalogError> {
+        let filter = if include_hidden { "1" } else { "p.hidden = 0" };
+        self.persons_in_roots(roots, filter, 1, "photo_count DESC, p.name ASC, p.id ASC")
+    }
+
+    fn persons_in_roots(
+        &self,
+        roots: &[PathBuf],
+        filter: &str,
+        min_photos: usize,
+        order: &str,
+    ) -> Result<Vec<Person>, CatalogError> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = root_marks(roots);
+        let seen = face_in_roots("af", &marks);
+        let cover_seen = face_in_roots("af2", &marks);
+        let sql = format!(
             "SELECT p.id, p.name, p.hidden, p.ignored,
                     COUNT(DISTINCT af.asset_id) as photo_count,
-                    (SELECT af2.id FROM asset_face af2 WHERE af2.person_id = p.id ORDER BY af2.score DESC LIMIT 1) as cover_face_id,
-                    (SELECT af2.asset_id FROM asset_face af2 WHERE af2.person_id = p.id ORDER BY af2.score DESC LIMIT 1) as cover_asset_id
+                    (SELECT af2.id FROM asset_face af2
+                     WHERE af2.person_id = p.id AND {cover_seen}
+                     ORDER BY af2.score DESC, af2.id ASC LIMIT 1) as cover_face_id,
+                    (SELECT af2.asset_id FROM asset_face af2
+                     WHERE af2.person_id = p.id AND {cover_seen}
+                     ORDER BY af2.score DESC, af2.id ASC LIMIT 1) as cover_asset_id
              FROM person p
-             LEFT JOIN asset_face af ON af.person_id = p.id
+             JOIN asset_face af ON af.person_id = p.id
+             WHERE {filter} AND {seen}
              GROUP BY p.id
-             ORDER BY photo_count DESC, p.name ASC, p.id ASC"
-        } else {
-            "SELECT p.id, p.name, p.hidden, p.ignored,
-                    COUNT(DISTINCT af.asset_id) as photo_count,
-                    (SELECT af2.id FROM asset_face af2 WHERE af2.person_id = p.id ORDER BY af2.score DESC LIMIT 1) as cover_face_id,
-                    (SELECT af2.asset_id FROM asset_face af2 WHERE af2.person_id = p.id ORDER BY af2.score DESC LIMIT 1) as cover_asset_id
-             FROM person p
-             LEFT JOIN asset_face af ON af.person_id = p.id
-             WHERE p.hidden = 0
-             GROUP BY p.id
-             ORDER BY photo_count DESC, p.name ASC, p.id ASC"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([], |r| {
+             HAVING photo_count >= {min_photos}
+             ORDER BY {order}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(root_keys(roots)), |r| {
             Ok(Person {
                 id: PersonId(r.get(0)?),
                 name: r.get(1)?,
@@ -384,36 +402,19 @@ impl Catalog {
         Ok(())
     }
 
-    /// Returns unnamed, non-ignored, non-hidden persons that appear in `>= min_photos` distinct photos.
-    pub fn unnamed_persons_with_min_photos(
+    /// Returns unnamed, non-ignored, non-hidden persons that appear in `>= min_photos` distinct
+    /// present photos under `roots`.
+    pub fn unnamed_persons_with_min_photos_in_roots(
         &self,
         min_photos: usize,
+        roots: &[PathBuf],
     ) -> Result<Vec<Person>, CatalogError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.name, p.hidden, p.ignored, COUNT(DISTINCT af.asset_id) as photo_count,
-                    (SELECT af2.id FROM asset_face af2 WHERE af2.person_id = p.id ORDER BY af2.score DESC LIMIT 1) as cover_face_id,
-                    (SELECT af2.asset_id FROM asset_face af2 WHERE af2.person_id = p.id ORDER BY af2.score DESC LIMIT 1) as cover_asset_id
-             FROM person p
-             JOIN asset_face af ON af.person_id = p.id
-             WHERE (p.name IS NULL OR trim(p.name) = '')
-               AND p.ignored = 0
-               AND p.hidden = 0
-             GROUP BY p.id
-             HAVING photo_count >= ?1
-             ORDER BY photo_count DESC, p.id ASC",
-        )?;
-        let rows = stmt.query_map([min_photos as i64], |r| {
-            Ok(Person {
-                id: PersonId(r.get(0)?),
-                name: r.get(1)?,
-                hidden: r.get::<_, i64>(2)? == 1,
-                ignored: r.get::<_, i64>(3)? == 1,
-                photo_count: r.get::<_, i64>(4)? as usize,
-                cover_face_id: r.get(5)?,
-                cover_asset_id: r.get::<_, Option<i64>>(6)?.map(AssetId),
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        self.persons_in_roots(
+            roots,
+            "(p.name IS NULL OR trim(p.name) = '') AND p.ignored = 0 AND p.hidden = 0",
+            min_photos,
+            "photo_count DESC, p.id ASC",
+        )
     }
 
     /// Returns face details for all faces in `asset`, with person name and user_assigned status.
@@ -447,42 +448,60 @@ impl Catalog {
         Ok(set.into_iter().collect())
     }
 
-    /// Returns face details for all faces belonging to `person`.
-    pub fn person_faces(&self, person: PersonId) -> Result<Vec<FaceDetail>, CatalogError> {
-        let mut stmt = self.conn.prepare(
+    /// Returns face details for the faces of `person` in present photos under `roots`.
+    pub fn person_faces_in_roots(
+        &self,
+        person: PersonId,
+        roots: &[PathBuf],
+    ) -> Result<Vec<FaceDetail>, CatalogError> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let seen = face_in_roots("af", &root_marks(roots));
+        let sql = format!(
             "SELECT af.id, af.asset_id, af.face_idx, af.x1, af.y1, af.x2, af.y2, af.score,
                     af.landmarks, af.person_id, p.name, af.user_assigned, af.similarity,
                     af.embedding IS NOT NULL, max(a.width, a.height)
              FROM asset_face af
              JOIN asset a ON a.id = af.asset_id
              JOIN person p ON p.id = af.person_id
-             WHERE af.person_id = ?1
+             WHERE af.person_id = {} AND {seen}
              ORDER BY af.score DESC, af.id ASC",
-        )?;
-        let rows = stmt.query_map([person.0], face_detail_from_row)?;
+            person.0
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(root_keys(roots)), face_detail_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The cover face of every person that has one, picked as `list_persons` picks it, with the
-    /// path of a present copy of its photo and the photo's SHA-256. One query for all persons.
-    pub fn person_covers(
+    /// The cover face of every person visible under `roots`, picked as `list_persons_in_roots`
+    /// picks it, with the path of a present copy of its photo under `roots` and the photo's
+    /// SHA-256. One query for all persons.
+    pub fn person_covers_in_roots(
         &self,
+        roots: &[PathBuf],
     ) -> Result<Vec<(FaceDetail, Option<PathBuf>, String)>, CatalogError> {
-        let mut stmt = self.conn.prepare(
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = root_marks(roots);
+        let cover_seen = face_in_roots("af2", &marks);
+        let sql = format!(
             "SELECT af.id, af.asset_id, af.face_idx, af.x1, af.y1, af.x2, af.y2, af.score,
                     af.landmarks, af.person_id, p.name, af.user_assigned, af.similarity,
                     af.embedding IS NOT NULL, max(a.width, a.height),
                     (SELECT l.path FROM location l
-                     WHERE l.asset_id = af.asset_id AND l.missing = 0
+                     WHERE l.asset_id = af.asset_id AND l.missing = 0 AND l.root IN ({marks})
                      ORDER BY l.path ASC LIMIT 1),
                     a.sha256
              FROM person p
              JOIN asset_face af ON af.id = (SELECT af2.id FROM asset_face af2
-                                            WHERE af2.person_id = p.id
-                                            ORDER BY af2.score DESC LIMIT 1)
-             JOIN asset a ON a.id = af.asset_id",
-        )?;
-        let rows = stmt.query_map([], |r| {
+                                            WHERE af2.person_id = p.id AND {cover_seen}
+                                            ORDER BY af2.score DESC, af2.id ASC LIMIT 1)
+             JOIN asset a ON a.id = af.asset_id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(root_keys(roots)), |r| {
             Ok((
                 face_detail_from_row(r)?,
                 r.get::<_, Option<String>>(15)?.map(PathBuf::from),
@@ -634,7 +653,25 @@ impl Catalog {
     }
 }
 
-/// Reads the first 15 columns that `asset_face_details` and `person_faces` select.
+/// Numbered placeholders for `roots`, so one query can repeat them and bind each root once.
+fn root_marks(roots: &[PathBuf]) -> String {
+    let marks: Vec<String> = (1..=roots.len()).map(|i| format!("?{i}")).collect();
+    marks.join(",")
+}
+
+fn root_keys(roots: &[PathBuf]) -> impl Iterator<Item = String> + '_ {
+    roots.iter().map(|r| r.to_string_lossy().into_owned())
+}
+
+/// SQL condition: the photo of face `face` has a present copy under the roots bound to `marks`.
+fn face_in_roots(face: &str, marks: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM location l WHERE l.asset_id = {face}.asset_id \
+                 AND l.missing = 0 AND l.root IN ({marks}))"
+    )
+}
+
+/// Reads the first 15 columns that `asset_face_details` and `person_faces_in_roots` select.
 fn face_detail_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FaceDetail> {
     let lm_str: Option<String> = r.get(8)?;
     let landmarks = lm_str

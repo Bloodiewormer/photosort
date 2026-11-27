@@ -412,7 +412,7 @@ impl PhotosortApp {
         if let Ok(n) = cat.count_assets_with_vision_in_roots(&roots) {
             self.vision_analyzed_count = n;
         }
-        match cat.list_persons(true) {
+        match cat.list_persons_in_roots(true, &roots) {
             Ok(p) => self.persons = p,
             Err(e) => self.banner_error = Some(format!("Error al cargar personas: {e}")),
         }
@@ -505,8 +505,11 @@ impl PhotosortApp {
 
     fn reload_person_cards(&mut self) {
         if let Some(cat) = &self.catalog {
-            self.person_cards =
-                views::persons::PersonCards::load(cat, &self.persons_view.postponed_persons);
+            self.person_cards = views::persons::PersonCards::load(
+                cat,
+                &self.settings.library_roots,
+                &self.persons_view.postponed_persons,
+            );
         }
     }
 

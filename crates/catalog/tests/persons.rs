@@ -46,6 +46,10 @@ fn setup(files: &[(&str, &[u8])]) -> Setup {
 }
 
 impl Setup {
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![self._root.as_path().to_path_buf()]
+    }
+
     fn asset(&self, rel: &str) -> AssetId {
         let p = dunce::canonicalize(self.library.join(rel)).unwrap();
         self.cat.asset_of(&p).unwrap().unwrap()
@@ -135,7 +139,7 @@ fn incremental_grouping_assigns_same_person_above_threshold_and_creates_new_belo
     let person2 = s.cat.get_person(p3).unwrap().unwrap();
     assert_eq!(person2.photo_count, 1);
 
-    let all_persons = s.cat.list_persons(true).unwrap();
+    let all_persons = s.cat.list_persons_in_roots(true, &s.roots()).unwrap();
     assert_eq!(all_persons.len(), 2);
 }
 
@@ -308,28 +312,48 @@ fn unnamed_persons_with_min_photos_proposal_logic() {
     s.cat.assign_face_to_person(f2, p_unnamed, false).unwrap();
 
     // With 2 photos, not yet proposed for min_photos = 3
-    let candidates = s.cat.unnamed_persons_with_min_photos(3).unwrap();
+    let candidates = s
+        .cat
+        .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+        .unwrap();
     assert!(candidates.is_empty());
 
     // Add 3rd photo
     s.cat.assign_face_to_person(f3, p_unnamed, false).unwrap();
-    let candidates = s.cat.unnamed_persons_with_min_photos(3).unwrap();
+    let candidates = s
+        .cat
+        .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+        .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].id, p_unnamed);
     assert_eq!(candidates[0].photo_count, 3);
 
     // If ignored, must not propose
     s.cat.set_person_ignored(p_unnamed, true).unwrap();
-    let candidates = s.cat.unnamed_persons_with_min_photos(3).unwrap();
+    let candidates = s
+        .cat
+        .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+        .unwrap();
     assert!(candidates.is_empty());
 
     // Un-ignore
     s.cat.set_person_ignored(p_unnamed, false).unwrap();
-    assert_eq!(s.cat.unnamed_persons_with_min_photos(3).unwrap().len(), 1);
+    assert_eq!(
+        s.cat
+            .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+            .unwrap()
+            .len(),
+        1
+    );
 
     // Once named, must not propose
     s.cat.rename_person(p_unnamed, Some("David")).unwrap();
-    assert!(s.cat.unnamed_persons_with_min_photos(3).unwrap().is_empty());
+    assert!(
+        s.cat
+            .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -356,7 +380,12 @@ fn clear_face_grouping_data_resets_only_face_grouping_and_keeps_other_data() {
     s.cat.clear_face_grouping_data().unwrap();
 
     // Persons table is empty
-    assert!(s.cat.list_persons(true).unwrap().is_empty());
+    assert!(
+        s.cat
+            .list_persons_in_roots(true, &s.roots())
+            .unwrap()
+            .is_empty()
+    );
 
     // Faces still exist in asset_face, but grouping fields are cleared
     let faces_after = s.cat.asset_face_details(a).unwrap();
@@ -545,18 +574,34 @@ fn multiple_faces_of_same_person_in_one_photo_count_as_one_photo_and_hidden_not_
 
     // 3 faces in 1 photo = 1 distinct photo, NOT 3 -> must NOT propose naming
     assert_eq!(s.cat.get_person(p0).unwrap().unwrap().photo_count, 1);
-    assert!(s.cat.unnamed_persons_with_min_photos(3).unwrap().is_empty());
+    assert!(
+        s.cat
+            .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+            .unwrap()
+            .is_empty()
+    );
 
     // Add 2 more distinct photos -> now 3 distinct photos -> proposed
     let fb = s.cat.asset_face_details(b).unwrap()[0].id;
     let fc = s.cat.asset_face_details(c).unwrap()[0].id;
     s.cat.group_face(fb, &e0, 0.363).unwrap();
     s.cat.group_face(fc, &e0, 0.363).unwrap();
-    assert_eq!(s.cat.unnamed_persons_with_min_photos(3).unwrap().len(), 1);
+    assert_eq!(
+        s.cat
+            .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+            .unwrap()
+            .len(),
+        1
+    );
 
     // Hidden person must NOT be proposed
     s.cat.set_person_hidden(p0, true).unwrap();
-    assert!(s.cat.unnamed_persons_with_min_photos(3).unwrap().is_empty());
+    assert!(
+        s.cat
+            .unnamed_persons_with_min_photos_in_roots(3, &s.roots())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -668,7 +713,7 @@ fn person_covers_give_each_persons_best_face_with_its_photo_in_one_query() {
     s.cat.assign_face_to_person(face_a, p, true).unwrap();
     s.cat.assign_face_to_person(face_b, p, true).unwrap();
 
-    let covers = s.cat.person_covers().unwrap();
+    let covers = s.cat.person_covers_in_roots(&s.roots()).unwrap();
 
     assert_eq!(covers.len(), 1, "a person without faces has no cover");
     let (face, path, sha256) = &covers[0];
@@ -678,4 +723,65 @@ fn person_covers_give_each_persons_best_face_with_its_photo_in_one_query() {
     let entry = s.cat.entry_for(b).unwrap().unwrap();
     assert_eq!(path.as_ref(), Some(&entry.path));
     assert_eq!(sha256, &entry.sha256);
+}
+
+#[test]
+fn persons_only_show_what_the_registered_folders_hold() {
+    let mut s = setup(&[("a.jpg", b"1")]);
+    let other = s._tmp.path().join("other");
+    write_file(&other, "b.jpg", b"2");
+    write_file(&other, "c.jpg", b"3");
+    let other = LibraryRoot::new(&other).unwrap();
+    s.cat.index(&other).unwrap();
+    let first = s.roots();
+    let both = vec![first[0].clone(), other.as_path().to_path_buf()];
+
+    let asset_in_other = |s: &Setup, rel: &str| {
+        let path = other.as_path().join(rel);
+        s.cat.asset_of(&path).unwrap().unwrap()
+    };
+    let a = s.asset("a.jpg");
+    let b = asset_in_other(&s, "b.jpg");
+    let c = asset_in_other(&s, "c.jpg");
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    // The best face of the first person is in the second folder.
+    for (asset, score) in [(a, 0.92), (b, 0.99), (c, 0.95)] {
+        let face = [DetectedFace::new([10.0, 10.0, 100.0, 100.0], score)];
+        s.cat
+            .save_vision_result(asset, SIGLIP2_MODEL_ID, &emb, &face)
+            .unwrap();
+    }
+    let ana = s.cat.create_person(Some("Ana")).unwrap();
+    let luis = s.cat.create_person(Some("Luis")).unwrap();
+    for (asset, person) in [(a, ana), (b, ana), (c, luis)] {
+        let face = s.cat.asset_face_details(asset).unwrap()[0].id;
+        s.cat.assign_face_to_person(face, person, true).unwrap();
+    }
+
+    let persons = s.cat.list_persons_in_roots(true, &first).unwrap();
+    assert_eq!(persons.len(), 1);
+    assert_eq!(persons[0].id, ana);
+    assert_eq!(persons[0].photo_count, 1);
+    assert_eq!(persons[0].cover_asset_id, Some(a));
+    let covers = s.cat.person_covers_in_roots(&first).unwrap();
+    assert_eq!(covers.len(), 1);
+    assert_eq!(covers[0].0.asset_id, a);
+    assert!(covers[0].1.as_ref().unwrap().starts_with(&first[0]));
+    assert_eq!(s.cat.person_faces_in_roots(ana, &first).unwrap().len(), 1);
+    assert!(
+        s.cat
+            .person_faces_in_roots(luis, &first)
+            .unwrap()
+            .is_empty()
+    );
+
+    let persons = s.cat.list_persons_in_roots(true, &both).unwrap();
+    assert_eq!(persons.len(), 2);
+    assert_eq!(persons[0].photo_count, 2);
+    assert_eq!(persons[0].cover_asset_id, Some(b));
+    assert_eq!(persons[1].name.as_deref(), Some("Luis"));
+
+    assert!(s.cat.list_persons_in_roots(true, &[]).unwrap().is_empty());
+    assert!(s.cat.person_covers_in_roots(&[]).unwrap().is_empty());
+    assert!(s.cat.person_faces_in_roots(ana, &[]).unwrap().is_empty());
 }

@@ -521,7 +521,8 @@ fn persons_view_reuses_what_it_loaded_until_the_app_changes_the_catalog() {
     let mut cat = catalog::Catalog::open(&db).expect("catálogo");
 
     // The demo's unnamed person is in two photos; the naming card asks from three.
-    let persons = cat.list_persons(true).expect("personas");
+    let roots = app::settings::load(&setup.data_dir).settings.library_roots;
+    let persons = cat.list_persons_in_roots(true, &roots).expect("personas");
     let unnamed = persons
         .iter()
         .find(|p| p.name.is_none())
@@ -530,7 +531,7 @@ fn persons_view_reuses_what_it_loaded_until_the_app_changes_the_catalog() {
         .iter()
         .find(|p| p.name.as_deref() == Some("Alex"))
         .expect("Alex");
-    let face = cat.person_faces(alex.id).expect("rostros")[0].id;
+    let face = cat.person_faces_in_roots(alex.id, &roots).expect("rostros")[0].id;
     cat.assign_face_to_person(face, unnamed.id, false)
         .expect("asignar");
 
