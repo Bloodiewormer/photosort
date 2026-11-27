@@ -1,12 +1,16 @@
 use crate::settings::Theme;
-use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals};
+use eframe::egui::{
+    self, Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Sense, Shadow, Stroke, TextStyle,
+    Vec2, Visuals,
+};
 
-// Spacing scale (px)
+// Spacing scale (px) — strict 4 px grid
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
 pub const SPACE_MD: f32 = 12.0;
 pub const SPACE_LG: f32 = 16.0;
 pub const SPACE_XL: f32 = 24.0;
+pub const SPACE_2XL: f32 = 32.0;
 
 // Typography scale (px). Minimum readable font size is 13 px.
 pub const FONT_SMALL: f32 = 13.0;
@@ -14,22 +18,51 @@ pub const FONT_BODY: f32 = 14.0;
 pub const FONT_HEADING: f32 = 16.0;
 pub const FONT_TITLE: f32 = 20.0;
 
-// Layout dimensions (px)
-pub const TOP_BAR_HEIGHT: f32 = 44.0;
-pub const SIDEBAR_WIDTH: f32 = 268.0;
-pub const INSPECTOR_WIDTH: f32 = 348.0;
-pub const CELL_WIDTH: f32 = 172.0;
-pub const CELL_HEIGHT: f32 = 206.0;
+// Layout dimensions (px) — multiples of 4
+pub const TOP_BAR_HEIGHT: f32 = 48.0;
+pub const SIDEBAR_WIDTH: f32 = 240.0;
+pub const INSPECTOR_WIDTH: f32 = 328.0;
+pub const CELL_WIDTH: f32 = 176.0;
+pub const CELL_HEIGHT: f32 = 208.0;
 pub const CELL_THUMB_HEIGHT: f32 = 148.0;
-pub const CELL_SPACING: f32 = 10.0;
+pub const CELL_SPACING: f32 = 12.0;
 pub const PREVIEW_MAX_EDGE: u32 = 1200;
 
 // Radii & borders
 pub const RADIUS_SM: u8 = 4;
-pub const RADIUS_MD: u8 = 6;
+pub const RADIUS_MD: u8 = 8;
+pub const RADIUS_LG: u8 = 12;
 pub const FOCUS_STROKE_WIDTH: f32 = 2.0;
 
-#[derive(Debug, Clone, Copy)]
+const ICON_PNG_BYTES: &[u8] = include_bytes!("../../../assets/icon.png");
+
+/// Decodes the embedded 256 px application icon into RGBA8 pixels + `(width, height)`.
+pub fn load_app_icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    let img = image::load_from_memory(ICON_PNG_BYTES).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    Some((img.into_raw(), w, h))
+}
+
+/// Builds `egui::IconData` for the native window titlebar / taskbar icon.
+pub fn window_icon() -> Option<egui::IconData> {
+    let (rgba, width, height) = load_app_icon_rgba()?;
+    Some(egui::IconData {
+        rgba,
+        width,
+        height,
+    })
+}
+
+/// Loads the embedded logo as an egui `ColorImage` for the sidebar and welcome screen.
+pub fn logo_color_image() -> Option<egui::ColorImage> {
+    let (rgba, width, height) = load_app_icon_rgba()?;
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [width as usize, height as usize],
+        &rgba,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 impl Rgb {
@@ -59,6 +92,7 @@ impl Rgb {
     }
 }
 
+/// Exact palette from `docs/diseno.md`: warm graphite neutrals + grease-pencil ochre accent.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub bg_canvas: Rgb,
@@ -71,6 +105,9 @@ pub struct Palette {
     pub text_hint: Rgb,
     pub accent: Rgb,
     pub accent_bg: Rgb,
+    pub primary_btn_bg: Rgb,
+    pub primary_btn_fg: Rgb,
+    pub mark_ochre: Rgb,
     pub chip_require_bg: Rgb,
     pub chip_require_fg: Rgb,
     pub chip_any_bg: Rgb,
@@ -84,52 +121,61 @@ pub struct Palette {
     pub status_suggested_fg: Rgb,
 }
 
+pub const OCHRE_MARK: Rgb = Rgb(0xd9, 0xa4, 0x16);
+pub const OCHRE_INK: Rgb = Rgb(0x1c, 0x16, 0x08);
+
 pub const DARK_PALETTE: Palette = Palette {
-    bg_canvas: Rgb(18, 20, 23),
-    bg_panel: Rgb(25, 28, 33),
-    bg_card: Rgb(34, 38, 45),
-    bg_elevated: Rgb(43, 48, 58),
-    border: Rgb(58, 65, 78),
-    text_primary: Rgb(236, 239, 244),
-    text_secondary: Rgb(168, 178, 194),
-    text_hint: Rgb(152, 162, 178),
-    accent: Rgb(91, 155, 213),
-    accent_bg: Rgb(31, 58, 86),
-    chip_require_bg: Rgb(29, 64, 50),
-    chip_require_fg: Rgb(184, 242, 214),
-    chip_any_bg: Rgb(29, 55, 82),
-    chip_any_fg: Rgb(197, 226, 255),
-    chip_exclude_bg: Rgb(76, 34, 40),
-    chip_exclude_fg: Rgb(255, 208, 214),
-    review_badge_bg: Rgb(89, 64, 16),
-    review_badge_fg: Rgb(255, 231, 168),
-    status_accepted_fg: Rgb(142, 230, 184),
-    status_rejected_fg: Rgb(255, 155, 166),
-    status_suggested_fg: Rgb(255, 210, 125),
+    bg_canvas: Rgb(0x15, 0x15, 0x14),
+    bg_panel: Rgb(0x1c, 0x1c, 0x1a),
+    bg_card: Rgb(0x24, 0x24, 0x22),
+    bg_elevated: Rgb(0x2f, 0x2f, 0x2b),
+    border: Rgb(0x3d, 0x3c, 0x37),
+    text_primary: Rgb(0xec, 0xeb, 0xe6),
+    text_secondary: Rgb(0xb6, 0xb4, 0xaa),
+    text_hint: Rgb(0xa0, 0x9e, 0x93),
+    accent: Rgb(0xd9, 0xa4, 0x16),
+    accent_bg: Rgb(0x3a, 0x30, 0x18),
+    primary_btn_bg: OCHRE_MARK,
+    primary_btn_fg: OCHRE_INK,
+    mark_ochre: OCHRE_MARK,
+    chip_require_bg: Rgb(0x2d, 0x35, 0x20),
+    chip_require_fg: Rgb(0xd6, 0xe2, 0xae),
+    chip_any_bg: Rgb(0x3a, 0x30, 0x18),
+    chip_any_fg: Rgb(0xf0, 0xd3, 0x8a),
+    chip_exclude_bg: Rgb(0x3f, 0x24, 0x1d),
+    chip_exclude_fg: Rgb(0xf2, 0xc3, 0xb4),
+    review_badge_bg: Rgb(0x3a, 0x30, 0x18),
+    review_badge_fg: Rgb(0xf0, 0xd3, 0x8a),
+    status_accepted_fg: Rgb(0xa3, 0xb8, 0x70),
+    status_rejected_fg: Rgb(0xe8, 0x95, 0x7d),
+    status_suggested_fg: Rgb(0xd9, 0xa4, 0x16),
 };
 
 pub const LIGHT_PALETTE: Palette = Palette {
-    bg_canvas: Rgb(241, 243, 246),
-    bg_panel: Rgb(248, 249, 251),
-    bg_card: Rgb(255, 255, 255),
-    bg_elevated: Rgb(229, 233, 240),
-    border: Rgb(192, 201, 214),
-    text_primary: Rgb(26, 30, 36),
-    text_secondary: Rgb(72, 82, 98),
-    text_hint: Rgb(84, 94, 110),
-    accent: Rgb(31, 95, 168),
-    accent_bg: Rgb(220, 235, 250),
-    chip_require_bg: Rgb(216, 243, 229),
-    chip_require_fg: Rgb(15, 76, 48),
-    chip_any_bg: Rgb(217, 233, 250),
-    chip_any_fg: Rgb(18, 60, 110),
-    chip_exclude_bg: Rgb(251, 220, 224),
-    chip_exclude_fg: Rgb(122, 22, 34),
-    review_badge_bg: Rgb(253, 239, 199),
-    review_badge_fg: Rgb(92, 61, 0),
-    status_accepted_fg: Rgb(15, 92, 56),
-    status_rejected_fg: Rgb(154, 28, 42),
-    status_suggested_fg: Rgb(122, 78, 0),
+    bg_canvas: Rgb(0xf2, 0xf1, 0xec),
+    bg_panel: Rgb(0xfa, 0xf9, 0xf5),
+    bg_card: Rgb(0xff, 0xff, 0xff),
+    bg_elevated: Rgb(0xe9, 0xe7, 0xdf),
+    border: Rgb(0xcd, 0xc9, 0xbb),
+    text_primary: Rgb(0x1d, 0x1c, 0x19),
+    text_secondary: Rgb(0x4c, 0x4a, 0x42),
+    text_hint: Rgb(0x5c, 0x59, 0x4f),
+    accent: Rgb(0x76, 0x55, 0x00),
+    accent_bg: Rgb(0xf4, 0xe7, 0xbd),
+    primary_btn_bg: OCHRE_MARK,
+    primary_btn_fg: OCHRE_INK,
+    mark_ochre: OCHRE_MARK,
+    chip_require_bg: Rgb(0xe3, 0xeb, 0xc9),
+    chip_require_fg: Rgb(0x34, 0x46, 0x0f),
+    chip_any_bg: Rgb(0xf4, 0xe7, 0xbd),
+    chip_any_fg: Rgb(0x5c, 0x42, 0x00),
+    chip_exclude_bg: Rgb(0xf6, 0xd9, 0xcf),
+    chip_exclude_fg: Rgb(0x6f, 0x24, 0x13),
+    review_badge_bg: Rgb(0xf4, 0xe7, 0xbd),
+    review_badge_fg: Rgb(0x5c, 0x42, 0x00),
+    status_accepted_fg: Rgb(0x4a, 0x5e, 0x1e),
+    status_rejected_fg: Rgb(0x97, 0x38, 0x1f),
+    status_suggested_fg: Rgb(0x76, 0x55, 0x00),
 };
 
 pub fn palette_for(ctx: &egui::Context) -> &'static Palette {
@@ -144,7 +190,116 @@ pub fn hint_text(palette: &Palette, text: &str) -> egui::RichText {
     egui::RichText::new(text).color(palette.text_hint.color32())
 }
 
-fn build_visuals(dark: bool, p: &Palette) -> Visuals {
+/// Builds the primary ochre button (`#d9a416` fill with `#1c1608` text in both themes).
+pub fn primary_button<'a>(palette: &Palette, text: impl Into<String>) -> egui::Button<'a> {
+    egui::Button::new(
+        egui::RichText::new(text.into())
+            .color(palette.primary_btn_fg.color32())
+            .size(FONT_BODY),
+    )
+    .fill(palette.primary_btn_bg.color32())
+    .stroke(Stroke::new(1.0, palette.primary_btn_bg.color32()))
+    .corner_radius(CornerRadius::same(RADIUS_MD))
+}
+
+/// Accessible on/off switch painted in the warm graphite + ochre palette.
+pub fn toggle_switch(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    on: &mut bool,
+    accessible_name: &str,
+) -> egui::Response {
+    let desired = Vec2::new(40.0, 22.0);
+    let (rect, mut resp) = ui.allocate_exact_size(desired, Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Switch, ui.is_enabled(), *on, accessible_name)
+    });
+
+    if ui.is_rect_visible(rect) {
+        let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
+        let radius = rect.height() * 0.5;
+        let bg = if *on {
+            palette.primary_btn_bg.color32()
+        } else if resp.hovered() {
+            palette.bg_elevated.color32()
+        } else {
+            palette.bg_card.color32()
+        };
+        let border = if resp.has_focus() {
+            Stroke::new(FOCUS_STROKE_WIDTH, palette.accent.color32())
+        } else if *on {
+            Stroke::new(1.0, palette.primary_btn_bg.color32())
+        } else {
+            Stroke::new(1.0, palette.border.color32())
+        };
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(radius.round() as u8),
+            bg,
+            border,
+            egui::StrokeKind::Inside,
+        );
+        let knob_r = radius - 3.0;
+        let cx = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+        let knob_color = if *on {
+            palette.primary_btn_fg.color32()
+        } else {
+            palette.text_secondary.color32()
+        };
+        ui.painter()
+            .circle_filled(Pos2::new(cx, rect.center().y), knob_r, knob_color);
+    }
+    resp
+}
+
+/// Paints the signature grease-pencil uneven loop in ochre (`#d9a416`), inspired by `assets/icon.svg`,
+/// with a dark contrasting outline underneath so it remains legible on any photo.
+pub fn paint_reviewed_mark(painter: &egui::Painter, rect: Rect, palette: &Palette) {
+    // Normalized points along an uneven hand-drawn loop whose ends slightly cross (like icon.svg).
+    const NORM_PTS: &[(f32, f32)] = &[
+        (0.84, 0.36),
+        (0.74, 0.16),
+        (0.50, 0.10),
+        (0.24, 0.17),
+        (0.09, 0.36),
+        (0.11, 0.62),
+        (0.26, 0.82),
+        (0.52, 0.89),
+        (0.77, 0.82),
+        (0.91, 0.62),
+        (0.90, 0.38),
+        (0.76, 0.18),
+        (0.46, 0.12),
+    ];
+    let pts: Vec<Pos2> = NORM_PTS
+        .iter()
+        .map(|&(nx, ny)| {
+            Pos2::new(
+                rect.left() + nx * rect.width(),
+                rect.top() + ny * rect.height(),
+            )
+        })
+        .collect();
+
+    let outline_w = (rect.width() * 0.22).clamp(3.6, 5.2);
+    let stroke_w = (rect.width() * 0.12).clamp(2.0, 3.0);
+
+    // Contrasting dark graphite halo so the ochre stroke reads clearly over light or busy photos.
+    painter.add(egui::Shape::line(
+        pts.clone(),
+        Stroke::new(outline_w, Color32::from_rgba_unmultiplied(21, 21, 20, 210)),
+    ));
+    painter.add(egui::Shape::line(
+        pts,
+        Stroke::new(stroke_w, palette.mark_ochre.color32()),
+    ));
+}
+
+pub(crate) fn build_visuals(dark: bool, p: &Palette) -> Visuals {
     let mut v = if dark {
         Visuals::dark()
     } else {
@@ -152,17 +307,45 @@ fn build_visuals(dark: bool, p: &Palette) -> Visuals {
     };
     v.panel_fill = p.bg_panel.color32();
     v.window_fill = p.bg_panel.color32();
+    v.window_stroke = Stroke::new(1.0, p.border.color32());
     v.extreme_bg_color = p.bg_canvas.color32();
     v.text_edit_bg_color = Some(p.bg_canvas.color32());
     v.faint_bg_color = p.bg_card.color32();
+    v.code_bg_color = p.bg_elevated.color32();
     v.override_text_color = Some(p.text_primary.color32());
     // egui's TextEdit styles hint_text via visuals.weak_text_color(); setting an opaque
     // palette colour keeps placeholder text at >= 4.5:1 contrast in both themes.
     v.weak_text_color = Some(p.text_hint.color32());
+    v.hyperlink_color = p.accent.color32();
+    v.warn_fg_color = p.accent.color32();
+    v.error_fg_color = p.status_rejected_fg.color32();
     v.selection.bg_fill = p.accent_bg.color32();
     v.selection.stroke = Stroke::new(FOCUS_STROKE_WIDTH, p.accent.color32());
+    v.slider_trailing_fill = true;
 
-    let radius = CornerRadius::same(RADIUS_SM);
+    // Dark theme uses surface steps + hairlines (no shadows). Light theme uses soft neutral shadows.
+    if dark {
+        v.window_shadow = Shadow::NONE;
+        v.popup_shadow = Shadow::NONE;
+    } else {
+        v.window_shadow = Shadow {
+            offset: [0, 4],
+            blur: 12,
+            spread: 0,
+            color: Color32::from_black_alpha(18),
+        };
+        v.popup_shadow = Shadow {
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
+            color: Color32::from_black_alpha(16),
+        };
+    }
+
+    let radius = CornerRadius::same(RADIUS_MD);
+    v.window_corner_radius = CornerRadius::same(RADIUS_LG);
+    v.menu_corner_radius = CornerRadius::same(RADIUS_MD);
+
     v.widgets.noninteractive.bg_fill = p.bg_panel.color32();
     v.widgets.noninteractive.weak_bg_fill = p.bg_card.color32();
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border.color32());
@@ -196,13 +379,14 @@ fn build_visuals(dark: bool, p: &Palette) -> Visuals {
     v
 }
 
-/// Configures typography (>= 13 px), consistent spacing, and accessible Dark/Light visuals.
+/// Configures typography (>= 13 px), 4 px spacing grid, and accessible Dark/Light visuals.
 pub fn configure_styles(ctx: &egui::Context, preference: Theme) {
     let apply_style = |style: &mut egui::Style, dark: bool, p: &Palette| {
         style.visuals = build_visuals(dark, p);
         style.spacing.item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
         style.spacing.button_padding = egui::vec2(SPACE_MD, SPACE_XS + 2.0);
-        style.spacing.window_margin = egui::Margin::same(SPACE_MD as i8);
+        style.spacing.window_margin = egui::Margin::same(SPACE_LG as i8);
+        style.spacing.menu_margin = egui::Margin::same(SPACE_XS as i8);
         style.text_styles.insert(
             TextStyle::Small,
             FontId::new(FONT_SMALL, FontFamily::Proportional),
@@ -253,35 +437,30 @@ mod tests {
             ("bg_elevated", p.bg_elevated),
         ];
         for (surf_name, bg) in surfaces {
-            let primary = p.text_primary.contrast_ratio(bg);
-            assert!(
-                primary >= 4.5,
-                "{name}: text_primary on {surf_name} contrast {primary:.2} < 4.5"
-            );
-            let secondary = p.text_secondary.contrast_ratio(bg);
-            assert!(
-                secondary >= 4.5,
-                "{name}: text_secondary on {surf_name} contrast {secondary:.2} < 4.5"
-            );
-            let hint = p.text_hint.contrast_ratio(bg);
-            assert!(
-                hint >= 4.5,
-                "{name}: text_hint on {surf_name} contrast {hint:.2} < 4.5"
-            );
+            for (role, fg) in [
+                ("text_primary", p.text_primary),
+                ("text_secondary", p.text_secondary),
+                ("text_hint", p.text_hint),
+                ("accent", p.accent),
+                ("status_accepted_fg", p.status_accepted_fg),
+                ("status_rejected_fg", p.status_rejected_fg),
+                ("status_suggested_fg", p.status_suggested_fg),
+            ] {
+                let ratio = fg.contrast_ratio(bg);
+                assert!(
+                    ratio >= 4.5,
+                    "{name}: {role} on {surf_name} contrast {ratio:.2} < 4.5"
+                );
+            }
         }
 
         let pairs = [
             ("text_primary on accent_bg", p.text_primary, p.accent_bg),
+            ("primary_btn", p.primary_btn_fg, p.primary_btn_bg),
             ("chip_require", p.chip_require_fg, p.chip_require_bg),
             ("chip_any", p.chip_any_fg, p.chip_any_bg),
             ("chip_exclude", p.chip_exclude_fg, p.chip_exclude_bg),
             ("review_badge", p.review_badge_fg, p.review_badge_bg),
-            ("accepted on card", p.status_accepted_fg, p.bg_card),
-            ("rejected on card", p.status_rejected_fg, p.bg_card),
-            ("suggested on card", p.status_suggested_fg, p.bg_card),
-            ("accepted on panel", p.status_accepted_fg, p.bg_panel),
-            ("rejected on panel", p.status_rejected_fg, p.bg_panel),
-            ("suggested on panel", p.status_suggested_fg, p.bg_panel),
         ];
         for (label, fg, bg) in pairs {
             let ratio = fg.contrast_ratio(bg);
@@ -289,10 +468,56 @@ mod tests {
         }
     }
 
+    fn is_blue_or_violet(c: Color32) -> bool {
+        // Every palette color in photosort is warm graphite, ochre, olive, or rust (b <= r and b <= g,
+        // or neutral grey). Any color where blue noticeably exceeds both red and green is a stray
+        // egui default blue/violet.
+        let r = i32::from(c.r());
+        let g = i32::from(c.g());
+        let b = i32::from(c.b());
+        b > r + 10 && b > g + 10
+    }
+
     #[test]
     fn dark_and_light_palettes_meet_wcag_aa_contrast_ratio() {
         assert_palette_accessible("dark", &DARK_PALETTE);
         assert_palette_accessible("light", &LIGHT_PALETTE);
+    }
+
+    #[test]
+    fn visuals_have_no_stray_blue_or_violet_in_either_theme() {
+        for (name, dark, palette) in [
+            ("dark", true, &DARK_PALETTE),
+            ("light", false, &LIGHT_PALETTE),
+        ] {
+            let v = build_visuals(dark, palette);
+            let colors = [
+                ("panel_fill", v.panel_fill),
+                ("window_fill", v.window_fill),
+                ("extreme_bg_color", v.extreme_bg_color),
+                ("faint_bg_color", v.faint_bg_color),
+                ("code_bg_color", v.code_bg_color),
+                ("hyperlink_color", v.hyperlink_color),
+                ("warn_fg_color", v.warn_fg_color),
+                ("error_fg_color", v.error_fg_color),
+                ("selection.bg_fill", v.selection.bg_fill),
+                ("selection.stroke", v.selection.stroke.color),
+                ("noninteractive.bg", v.widgets.noninteractive.bg_fill),
+                ("inactive.bg", v.widgets.inactive.bg_fill),
+                ("hovered.bg", v.widgets.hovered.bg_fill),
+                ("hovered.stroke", v.widgets.hovered.bg_stroke.color),
+                ("active.bg", v.widgets.active.bg_fill),
+                ("active.stroke", v.widgets.active.bg_stroke.color),
+                ("open.bg", v.widgets.open.bg_fill),
+                ("open.stroke", v.widgets.open.bg_stroke.color),
+            ];
+            for (label, c) in colors {
+                assert!(
+                    !is_blue_or_violet(c),
+                    "{name}: {label} has stray blue/violet color {c:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -328,5 +553,13 @@ mod tests {
             assert!(FONT_HEADING >= FONT_BODY);
             assert!(FONT_TITLE >= FONT_HEADING);
         }
+    }
+
+    #[test]
+    fn embedded_icon_decodes_cleanly() {
+        let icon = window_icon().expect("embedded icon.png should decode");
+        assert_eq!(icon.width, 256);
+        assert_eq!(icon.height, 256);
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 }

@@ -305,3 +305,21 @@ fn truncate_middle_keeps_start_and_end() {
     assert_eq!(truncate_middle("abcdefghij", 0), "");
     assert_eq!(truncate_middle("ñandú_árbol_ü", 7), "ñan…l_ü");
 }
+
+#[test]
+fn right_click_selects_unselected_and_preserves_multiselection() {
+    let mut sel = Selection::default();
+    sel.click(1, 5);
+    sel.ctrl_click(3, 5);
+    assert_eq!(sel.selected_indices(), vec![1, 3]);
+
+    // Right-clicking an already-selected item preserves the multi-selection and moves cursor.
+    sel.right_click(1, 5);
+    assert_eq!(sel.selected_indices(), vec![1, 3]);
+    assert_eq!(sel.primary(), Some(1));
+
+    // Right-clicking an unselected item selects ONLY that item.
+    sel.right_click(4, 5);
+    assert_eq!(sel.selected_indices(), vec![4]);
+    assert_eq!(sel.primary(), Some(4));
+}

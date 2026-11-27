@@ -28,15 +28,11 @@ fn extract_promo_titles(sample: &Sample) -> Vec<String> {
 /// Real-engine end-to-end test on the held-out synthetic promo pages (`ocr::synth`).
 /// Creates works from the held-out ground-truth titles PLUS distractor works from the Tune split,
 /// runs real OCR and work matching, and reports recall and false positives.
-/// Skips cleanly when `PHOTOSORT_OCR_MODELS` is not set.
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn real_engine_held_out_promo_pages_recall_and_false_positives() {
-    let Some(models_dir) = std::env::var_os("PHOTOSORT_OCR_MODELS").map(PathBuf::from) else {
-        eprintln!(
-            "skipping real_engine_held_out_promo_pages_recall_and_false_positives: PHOTOSORT_OCR_MODELS not set"
-        );
-        return;
-    };
+    let models_dir =
+        PathBuf::from(std::env::var_os("PHOTOSORT_OCR_MODELS").expect("set PHOTOSORT_OCR_MODELS"));
 
     let fonts = Fonts::load().unwrap();
     let held_out_promos: Vec<Sample> = generate(Split::HeldOut, &fonts)

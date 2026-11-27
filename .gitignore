@@ -4,6 +4,10 @@
 *.log
 target/
 out/
+# local tooling, not part of the project
+.claude/settings.local.json
+.claude/skills/unslop/
+graphify-out/
 # model weights are downloaded, not versioned
 *.onnx
 models/

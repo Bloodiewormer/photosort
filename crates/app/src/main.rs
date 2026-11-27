@@ -124,11 +124,16 @@ fn main() -> ExitCode {
     let [win_w, win_h] = args.window_size;
     let theme_override = args.theme;
     let initial_view = args.view;
+    let is_demo = args.demo;
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("photosort")
+        .with_inner_size([win_w as f32, win_h as f32])
+        .with_min_inner_size([840.0_f32.min(win_w as f32), 560.0_f32.min(win_h as f32)]);
+    if let Some(icon) = app::theme::window_icon() {
+        viewport = viewport.with_icon(Arc::new(icon));
+    }
     let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("photosort")
-            .with_inner_size([win_w as f32, win_h as f32])
-            .with_min_inner_size([840.0_f32.min(win_w as f32), 560.0_f32.min(win_h as f32)]),
+        viewport,
         ..Default::default()
     };
 
@@ -136,9 +141,13 @@ fn main() -> ExitCode {
         "photosort",
         native_options,
         Box::new(move |cc| {
-            let mut photosort =
-                PhotosortApp::new(cc, data_dir, app::thumb_provider::open_thumbnails)
-                    .with_initial_view(initial_view, preset_export_dir);
+            let mut photosort = PhotosortApp::new_with_mode(
+                cc,
+                data_dir,
+                is_demo,
+                app::thumb_provider::open_thumbnails,
+            )
+            .with_initial_view(initial_view, preset_export_dir);
             if let Some(theme) = theme_override {
                 photosort = photosort.with_theme_override(&cc.egui_ctx, theme);
             }

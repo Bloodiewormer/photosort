@@ -338,8 +338,11 @@ fn prepare_demo_leaves_no_files_outside_its_base_dir() {
     )
     .unwrap();
     let temp_base = temp_setup.base_dir.clone();
-    assert!(temp_setup.library_dir.starts_with(&temp_base));
-    assert!(temp_setup.data_dir.starts_with(&temp_base));
+    // The other paths come out of the path guard fully resolved. The temp folder may not be: on
+    // some machines `TEMP` is a short 8.3 name or goes through a link.
+    let resolved_base = dunce::canonicalize(&temp_base).unwrap();
+    assert!(temp_setup.library_dir.starts_with(&resolved_base));
+    assert!(temp_setup.data_dir.starts_with(&resolved_base));
     assert!(fs::metadata(&temp_base).is_ok());
     drop(temp_setup);
     assert!(

@@ -732,3 +732,126 @@ fn benchmark_vision_rank_and_apply_45k_assets() {
         apply_secs
     );
 }
+
+#[test]
+#[ignore = "heavy 45k-asset reviewed filter & counts benchmark; run with --release -- --ignored --nocapture"]
+fn benchmark_reviewed_filter_and_counts_45k_assets() {
+    use catalog::{
+        OCR_STAGE, OCR_VERSION, ReviewedFilter, StageSpec, VISION_STAGE, VISION_VERSION,
+    };
+    use rusqlite::{Connection, params};
+    use std::time::Instant;
+
+    const ASSETS: usize = 45_000;
+    const ITERS: usize = 10;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db = ensure_writable(&data.join("reviewed_bench.sqlite"), &[]).unwrap();
+
+    let cat = Catalog::open(&db).unwrap();
+    drop(cat);
+
+    let seed_start = Instant::now();
+    {
+        let mut conn = Connection::open(db.as_path()).unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut ins_asset = tx
+                .prepare("INSERT INTO asset (id, sha256, size) VALUES (?1, ?2, ?3)")
+                .unwrap();
+            let mut ins_loc = tx
+                .prepare(
+                    "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1, 0)",
+                )
+                .unwrap();
+            let mut ins_an = tx
+                .prepare("INSERT INTO analysis (asset_id, stage, version) VALUES (?1, ?2, ?3)")
+                .unwrap();
+
+            for i in 1..=(ASSETS as i64) {
+                let sha = format!("{i:064x}");
+                ins_asset.execute(params![i, sha, 102_400i64]).unwrap();
+                let path = format!("C:/synthetic/folder_{:03}/img_{i:06}.jpg", i % 200);
+                ins_loc
+                    .execute(params![
+                        i,
+                        "C:/synthetic",
+                        path,
+                        102_400i64,
+                        1_700_000_000_000_000_000i64
+                    ])
+                    .unwrap();
+                // Half have all 3 stages, a quarter have 2, a quarter have 1.
+                ins_an.execute(params![i, "rules", 1i64]).unwrap();
+                if i % 4 != 0 {
+                    ins_an
+                        .execute(params![i, VISION_STAGE, i64::from(VISION_VERSION)])
+                        .unwrap();
+                }
+                if i % 2 == 0 {
+                    ins_an
+                        .execute(params![i, OCR_STAGE, i64::from(OCR_VERSION)])
+                        .unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+    }
+    println!(
+        "Seeded {ASSETS} assets with 3 analysis stages in {:.2} s",
+        seed_start.elapsed().as_secs_f64()
+    );
+
+    let cat = Catalog::open(&db).unwrap();
+    let stages = vec![
+        StageSpec::new("rules", 1),
+        StageSpec::new(VISION_STAGE, VISION_VERSION),
+        StageSpec::new(OCR_STAGE, OCR_VERSION),
+    ];
+    let roots = vec![PathBuf::from("C:/synthetic")];
+
+    // 1. reviewed_counts
+    let mut count_ms = Vec::with_capacity(ITERS);
+    let mut counts_res = catalog::ReviewedCounts::default();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        counts_res = cat.reviewed_counts(&stages, Some(&roots)).unwrap();
+        count_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+    }
+    count_ms.sort_by(f64::total_cmp);
+    let c_mean = count_ms.iter().sum::<f64>() / count_ms.len() as f64;
+    let c_p95 = count_ms[((count_ms.len() as f64 * 0.95).ceil() as usize).saturating_sub(1)];
+    println!(
+        "reviewed_counts (3 stages, 45k): all={}, pending={}, reviewed={} | mean={c_mean:.2} ms, p95={c_p95:.2} ms",
+        counts_res.all, counts_res.pending, counts_res.reviewed
+    );
+    assert_eq!(counts_res.all, ASSETS);
+    assert_eq!(counts_res.pending + counts_res.reviewed, ASSETS);
+
+    // 2. entries with ReviewedFilter::Pending and ReviewedFilter::Reviewed
+    for (name, mode) in [
+        ("Pending", ReviewedFilter::Pending),
+        ("Reviewed", ReviewedFilter::Reviewed),
+    ] {
+        let filter = Filter {
+            roots: Some(roots.clone()),
+            reviewed: Some((mode, stages.clone())),
+            ..Default::default()
+        };
+        let mut times = Vec::with_capacity(ITERS);
+        let mut n = 0usize;
+        for _ in 0..ITERS {
+            let t0 = Instant::now();
+            let list = cat.entries(&filter, Sort::PathAsc).unwrap();
+            times.push(t0.elapsed().as_secs_f64() * 1000.0);
+            n = list.len();
+        }
+        times.sort_by(f64::total_cmp);
+        let mean = times.iter().sum::<f64>() / times.len() as f64;
+        let p95 = times[((times.len() as f64 * 0.95).ceil() as usize).saturating_sub(1)];
+        println!("entries({name}, 3 stages, 45k): rows={n} | mean={mean:.2} ms, p95={p95:.2} ms");
+    }
+}

@@ -6,10 +6,13 @@ mod ocr;
 mod vision;
 mod works;
 
-pub use analysis::Pending;
+pub use analysis::{Pending, ReviewedCounts};
 pub use browse::{Entry, LabelCount, Sort};
 pub use dupes::DuplicateGroup;
-pub use labels::{AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, Source, Status};
+pub use labels::{
+    AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, ReviewedFilter, Source, StageSpec,
+    Status,
+};
 pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
     ocr_search_key,
@@ -57,6 +60,7 @@ CREATE TABLE IF NOT EXISTS location (
 CREATE INDEX IF NOT EXISTS location_asset ON location(asset_id);
 CREATE INDEX IF NOT EXISTS location_missing_asset ON location(missing, asset_id);
 CREATE INDEX IF NOT EXISTS location_asset_missing ON location(asset_id, missing);
+CREATE INDEX IF NOT EXISTS location_root_missing ON location(root, missing, asset_id);
 CREATE TABLE IF NOT EXISTS label (
     id   INTEGER PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('category', 'tag', 'entity')),
@@ -420,6 +424,50 @@ impl Catalog {
                 missing: r.get(2)?,
             })
         })?)
+    }
+
+    /// Counts restricted to locations under the given registered `roots`.
+    pub fn counts_in_roots(&self, roots: &[PathBuf]) -> Result<Counts, CatalogError> {
+        if roots.is_empty() {
+            return Ok(Counts {
+                assets: 0,
+                locations: 0,
+                missing: 0,
+            });
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT
+                (SELECT COUNT(DISTINCT asset_id) FROM location WHERE missing = 0 AND root IN ({marks})),
+                (SELECT COUNT(*) FROM location WHERE missing = 0 AND root IN ({marks})),
+                (SELECT COUNT(*) FROM location WHERE missing = 1 AND root IN ({marks}))"
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(roots.len() * 3);
+        for _ in 0..3 {
+            for r in roots {
+                args.push(Box::new(r.to_string_lossy().into_owned()));
+            }
+        }
+        Ok(self
+            .conn
+            .query_row(&sql, rusqlite::params_from_iter(args.iter()), |r| {
+                Ok(Counts {
+                    assets: r.get(0)?,
+                    locations: r.get(1)?,
+                    missing: r.get(2)?,
+                })
+            })?)
+    }
+
+    /// Count of present image locations indexed under `root`.
+    pub fn count_images_in_root(&self, root: &std::path::Path) -> Result<usize, CatalogError> {
+        let root_key = root.to_string_lossy().into_owned();
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM location WHERE missing = 0 AND root = ?1",
+            [root_key],
+            |r| r.get(0),
+        )?;
+        Ok(count.max(0) as usize)
     }
 
     /// Groups of paths that hold exactly the same bytes. Only for review: nothing is ever deleted.

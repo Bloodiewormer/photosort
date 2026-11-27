@@ -417,3 +417,97 @@ fn vision_worker_and_tags_apply_leave_the_originals_untouched() {
 
     assert_eq!(before, snapshot(&library));
 }
+
+#[test]
+fn review_engine_and_folder_removal_leave_originals_untouched() {
+    use app::review_engine::{
+        EnginePhase, OcrLoader, ReviewConfig, ReviewEngine, ReviewEngineEvent, VisionLoader,
+    };
+    use app::settings::Settings;
+    use std::time::{Duration, Instant};
+
+    struct ReadOnlyVision;
+    impl VisionReader for ReadOnlyVision {
+        fn batch_size(&self) -> usize {
+            2
+        }
+        fn embed_texts(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts.iter().map(|_| vec![0.0f32; EMBEDDING_DIM]).collect())
+        }
+        fn analyze_images(
+            &mut self,
+            images: &[&image::RgbImage],
+        ) -> Result<Vec<VisionImageOutput>, String> {
+            Ok(images
+                .iter()
+                .map(|_| VisionImageOutput {
+                    embedding: vec![0.0f32; EMBEDDING_DIM],
+                    faces: Vec::new(),
+                })
+                .collect())
+        }
+    }
+
+    struct ReadOnlyOcr;
+    impl OcrImageReader for ReadOnlyOcr {
+        fn read_image(&self, path: &Path) -> Result<Vec<OcrLine>, String> {
+            let _ = thumbs::decode(path, u32::MAX).map_err(|e| e.to_string())?;
+            Ok(vec![OcrLine {
+                text: "texto".into(),
+                score: 0.9,
+                recognizer: OcrRecognizer::V6,
+                rect: [0.0, 0.0, 10.0, 10.0],
+                top_strip: false,
+            }])
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    write_png(&library.join("Screenshot_01.png"), [255, 0, 0, 255]);
+    write_png(&library.join("sub/photo.png"), [0, 255, 0, 255]);
+    let root = LibraryRoot::new(&library).unwrap();
+    let root_path = root.as_path().to_path_buf();
+
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db = ensure_writable(&data.join("catalog.sqlite"), std::slice::from_ref(&root)).unwrap();
+
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    let vision_loader: VisionLoader = Box::new(|_, _| Ok(Box::new(ReadOnlyVision)));
+    let ocr_loader: OcrLoader = Box::new(|_, _| Ok(Box::new(ReadOnlyOcr)));
+    let cfg = ReviewConfig {
+        enabled: true,
+        rules: true,
+        vision: true,
+        ocr: true,
+        roots: vec![root_path.clone()],
+        chunk_size: 4,
+        ..Default::default()
+    };
+
+    let engine = ReviewEngine::start_with_loaders(db, cfg, vision_loader, ocr_loader, None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut idle = false;
+    while Instant::now() < deadline {
+        if let Ok(ReviewEngineEvent::Status(s)) = engine.recv_timeout(Duration::from_millis(50))
+            && matches!(s.phase, EnginePhase::Idle)
+        {
+            idle = true;
+            break;
+        }
+    }
+    assert!(idle, "review engine should finish and go idle");
+    drop(engine);
+
+    // Also remove folder from Settings and save: must change nothing on disk in the library.
+    let mut settings = Settings::default();
+    settings.add_library_root(&library, &data).unwrap();
+    app::settings::save(&data, &settings).unwrap();
+    assert!(settings.remove_library_root(&root_path));
+    app::settings::save(&data, &settings).unwrap();
+
+    assert_eq!(before, snapshot(&library));
+}

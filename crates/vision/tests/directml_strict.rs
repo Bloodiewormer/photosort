@@ -4,10 +4,9 @@ mod common;
 use vision::{Provider, SessionOptions, SigLip2Vision};
 
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn a_directml_device_that_cannot_register_is_an_error_not_a_cpu_fallback() {
-    let Some(models) = common::vision_models_dir() else {
-        return;
-    };
+    let models = common::vision_models_dir();
     let options = SessionOptions {
         provider: Provider::DirectMl { device: 99 },
         ..SessionOptions::default()

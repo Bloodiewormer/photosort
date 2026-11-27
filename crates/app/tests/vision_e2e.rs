@@ -48,15 +48,13 @@ fn snapshot(root: &Path) -> Snapshot {
 }
 
 /// Real-engine end-to-end test on the 4 synthetic scene mocks (SigLIP 2 + YuNet + catalog rules).
-/// Skips cleanly when `PHOTOSORT_VISION_MODELS` is not set. Uses one provider per test process.
+/// Uses one provider per test process.
 #[test]
+#[ignore = "necesita los modelos: ver CONTRIBUTING.md"]
 fn real_engine_recognizes_synthetic_scene_mocks_and_leaves_originals_untouched() {
-    let Some(models_dir) = std::env::var_os("PHOTOSORT_VISION_MODELS").map(PathBuf::from) else {
-        eprintln!(
-            "skipping real_engine_recognizes_synthetic_scene_mocks: PHOTOSORT_VISION_MODELS not set"
-        );
-        return;
-    };
+    let models_dir = PathBuf::from(
+        std::env::var_os("PHOTOSORT_VISION_MODELS").expect("set PHOTOSORT_VISION_MODELS"),
+    );
 
     let scenes: Vec<_> = verification_set()
         .into_iter()

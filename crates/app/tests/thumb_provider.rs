@@ -29,7 +29,9 @@ fn real_thumbnails_are_made_in_the_data_dir_cache() {
     assert_eq!(warning, None);
 
     let thumb = provider.get(&source, SHA).unwrap();
-    assert!(thumb.starts_with(data.join("cache")), "{thumb:?}");
+    // The cache path comes out of the path guard fully resolved; `TEMP` may not be.
+    let cache = dunce::canonicalize(data.join("cache")).unwrap();
+    assert!(thumb.starts_with(cache), "{thumb:?}");
     let img = image::open(&thumb).unwrap();
     assert_eq!((img.width(), img.height()), (256, 128));
 }

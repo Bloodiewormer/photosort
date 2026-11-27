@@ -1,2 +1,8 @@
-# Shell hooks must keep LF endings or `sh` fails on Windows checkouts.
-.githooks/* text eol=lf
+# One line ending everywhere, so that diffs and hooks behave the same on any checkout.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.webp binary
+*.gif binary

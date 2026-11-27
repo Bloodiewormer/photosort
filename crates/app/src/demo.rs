@@ -929,6 +929,12 @@ pub fn prepare_demo(
     if let Some(t) = theme {
         cfg.theme = t;
     }
+    // Demo showcases a realistic mix of reviewed (rules + vision seeded on the first 36 images)
+    // and pending photos without ever loading models or starting real background work.
+    cfg.background_review = true;
+    cfg.stage_rules = true;
+    cfg.stage_vision = true;
+    cfg.stage_ocr = false;
     cfg.add_library_root(&library_dir, &data_dir)
         .map_err(|e| e.to_string())?;
     settings::save(&data_dir, &cfg).map_err(|e| e.to_string())?;
@@ -1231,8 +1237,21 @@ fn seed_demo_vision(
     cat.save_text_embeddings(SIGLIP2_MODEL_ID, &refs)
         .map_err(|e| e.to_string())?;
 
+    let first_sorted_idx = specs
+        .iter()
+        .min_by(|a, b| {
+            a.rel_path
+                .to_string_lossy()
+                .cmp(&b.rel_path.to_string_lossy())
+        })
+        .map(|s| s.index)
+        .unwrap_or(0);
+
     let mut analyzed_assets = Vec::new();
-    for (i, spec) in specs.iter().enumerate().take(36) {
+    for (i, spec) in specs.iter().enumerate() {
+        if i >= 36 && spec.index != first_sorted_idx {
+            continue;
+        }
         if spec.duplicate_of.is_some() {
             continue;
         }

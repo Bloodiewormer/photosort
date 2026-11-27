@@ -42,6 +42,31 @@ pub struct Assignment {
     pub status: Status,
 }
 
+/// Identifies an analysis stage and its current version.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StageSpec {
+    pub stage: String,
+    pub version: u32,
+}
+
+impl StageSpec {
+    pub fn new(stage: impl Into<String>, version: u32) -> Self {
+        Self {
+            stage: stage.into(),
+            version,
+        }
+    }
+}
+
+/// Filter over whether an image has completed every enabled analysis stage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ReviewedFilter {
+    #[default]
+    All,
+    Pending,
+    Reviewed,
+}
+
 /// Every condition must hold. Rejected labels never match.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Filter {
@@ -56,6 +81,11 @@ pub struct Filter {
     /// The path contains this text (ignoring case) OR some searchable OCR line's normalized key
     /// contains the normalized query.
     pub search: Option<String>,
+    /// When `Some`, only locations whose `root` is in this list match (empty list matches nothing).
+    pub roots: Option<Vec<PathBuf>>,
+    /// When `Some((mode, stages))`, filters by whether every stage in `stages` is done.
+    /// With `stages` empty, nothing counts as `Reviewed` and everything counts as `Pending`.
+    pub reviewed: Option<(ReviewedFilter, Vec<StageSpec>)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -203,6 +233,57 @@ pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, fi
             args.push(Box::new(text.clone()));
             args.push(Box::new(key));
             args.push(Box::new(crate::ocr::SCREENSHOT_CATEGORY.to_string()));
+        }
+    }
+    if let Some(roots) = &filter.roots {
+        if roots.is_empty() {
+            sql.push_str(" AND 0");
+        } else {
+            let marks = vec!["?"; roots.len()].join(",");
+            sql.push_str(&format!(" AND l.root IN ({marks})"));
+            for root in roots {
+                args.push(Box::new(root.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    if let Some((mode, stages)) = &filter.reviewed {
+        match mode {
+            ReviewedFilter::All => {}
+            ReviewedFilter::Reviewed => {
+                if stages.is_empty() {
+                    sql.push_str(" AND 0");
+                } else {
+                    for s in stages {
+                        sql.push_str(
+                            " AND EXISTS (SELECT 1 FROM analysis an \
+                                          WHERE an.asset_id = l.asset_id \
+                                            AND an.stage = ? \
+                                            AND an.version >= ?)",
+                        );
+                        args.push(Box::new(s.stage.clone()));
+                        args.push(Box::new(i64::from(s.version)));
+                    }
+                }
+            }
+            ReviewedFilter::Pending => {
+                if !stages.is_empty() {
+                    sql.push_str(" AND (");
+                    for (idx, s) in stages.iter().enumerate() {
+                        if idx > 0 {
+                            sql.push_str(" OR ");
+                        }
+                        sql.push_str(
+                            "NOT EXISTS (SELECT 1 FROM analysis an \
+                                         WHERE an.asset_id = l.asset_id \
+                                           AND an.stage = ? \
+                                           AND an.version >= ?)",
+                        );
+                        args.push(Box::new(s.stage.clone()));
+                        args.push(Box::new(i64::from(s.version)));
+                    }
+                    sql.push(')');
+                }
+            }
         }
     }
 }
@@ -353,6 +434,51 @@ impl Catalog {
     pub fn review_queue(&self, below: f64) -> Result<Vec<ReviewItem>, CatalogError> {
         let mut stmt = self.conn.prepare(Self::REVIEW_QUEUE_SQL)?;
         let rows = stmt.query_map([below], |r| {
+            let Some(path) = r.get::<_, Option<String>>(4)? else {
+                return Ok(None);
+            };
+            Ok(Some(ReviewItem {
+                asset: AssetId(r.get(0)?),
+                label: LabelId(r.get(1)?),
+                name: r.get(2)?,
+                confidence: r.get(3)?,
+                path: PathBuf::from(path),
+            }))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(item) = row? {
+                out.push(item);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Suggestions restricted to assets with at least one present location under `roots`.
+    pub fn review_queue_in_roots(
+        &self,
+        below: f64,
+        roots: &[PathBuf],
+    ) -> Result<Vec<ReviewItem>, CatalogError> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT a.asset_id, a.label_id, l.name, a.confidence,
+                    (SELECT MIN(path) FROM location
+                     WHERE asset_id = a.asset_id AND missing = 0 AND root IN ({marks}))
+             FROM asset_label a JOIN label l ON l.id = a.label_id
+             WHERE a.status = 'suggested' AND a.confidence < ?
+             ORDER BY a.confidence, a.asset_id, a.label_id"
+        );
+        let mut args: Vec<Box<dyn ToSql>> = Vec::with_capacity(roots.len() + 1);
+        for root in roots {
+            args.push(Box::new(root.to_string_lossy().into_owned()));
+        }
+        args.push(Box::new(below));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
             let Some(path) = r.get::<_, Option<String>>(4)? else {
                 return Ok(None);
             };

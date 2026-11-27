@@ -426,7 +426,7 @@ impl Drop for VisionWorker {
     }
 }
 
-fn compile_or_embed_rules(
+pub(crate) fn compile_or_embed_rules(
     cat: &mut Catalog,
     mut embed: impl FnMut(&[&str]) -> Result<Vec<Vec<f32>>, String>,
 ) -> Result<catalog::CompiledVisionRules, String> {
@@ -513,7 +513,7 @@ impl TagsApplyWorker {
             let compiled = match compile_or_embed_rules(&mut cat, |missing| {
                 let Some(dir) = models_dir.as_deref() else {
                     return Err(
-                        "Faltan descripciones por codificar y no hay carpeta de modelos de visión configurada. Configúrala en «Reconocer imágenes…»."
+                        "Faltan descripciones por codificar y no hay carpeta de modelos de visión configurada. Configúrala en Configuración."
                             .into(),
                     );
                 };
@@ -645,6 +645,7 @@ impl VisionRankWorker {
         db: DestPath,
         models_dir: Option<PathBuf>,
         device: OcrDevice,
+        roots: Vec<PathBuf>,
         title: String,
         texts: Vec<String>,
         threshold: Option<f32>,
@@ -699,7 +700,7 @@ impl VisionRankWorker {
             if !missing_indices.is_empty() {
                 let Some(dir) = models_dir.as_deref() else {
                     send(VisionRankResult::Failed(
-                        "Configura primero la carpeta de modelos de visión en «Reconocer imágenes…» para codificar esta descripción."
+                        "Configura primero la carpeta de modelos de visión en Configuración para codificar esta descripción."
                             .into(),
                     ));
                     return;
@@ -739,7 +740,12 @@ impl VisionRankWorker {
 
             let vecs: Vec<Vec<f32>> = cached_vecs.into_iter().flatten().collect();
             let refs: Vec<&[f32]> = vecs.iter().map(Vec::as_slice).collect();
-            match cat.rank_by_embeddings(SIGLIP2_MODEL_ID, &refs, limit) {
+            let rank_res = if roots.is_empty() {
+                cat.rank_by_embeddings(SIGLIP2_MODEL_ID, &refs, limit)
+            } else {
+                cat.rank_by_embeddings_in_roots(SIGLIP2_MODEL_ID, &refs, &roots, limit)
+            };
+            match rank_res {
                 Ok(ranked) => send(VisionRankResult::Ready {
                     title,
                     threshold,
