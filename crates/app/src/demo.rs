@@ -1411,6 +1411,8 @@ fn seed_demo_vision(
         .unwrap_or(0);
 
     let mut analyzed_assets = Vec::new();
+    let mut near_pair_a: Option<Vec<f32>> = None;
+    let mut near_pair_b: Option<Vec<f32>> = None;
     for (i, spec) in specs.iter().enumerate() {
         if i >= 36 && spec.index != first_sorted_idx {
             continue;
@@ -1445,11 +1447,72 @@ fn seed_demo_vision(
             "documentos" => (5, None, Vec::new()),
             _ => (1, None, Vec::new()),
         };
-        let emb = synth_unit_vec(primary_dim, secondary_dim, i + 1);
+        let emb = if i == 6
+            && let Some(base) = &near_pair_a
+        {
+            // Slightly perturbed copy of starter #5 so demo shows a ~97% near-duplicate pair.
+            let mut v = base.clone();
+            v[200] += 0.22;
+            l2_norm(&mut v);
+            v
+        } else if i == 10
+            && let Some(base) = &near_pair_b
+        {
+            // Slightly perturbed copy of starter #9 so demo shows a second ~96% near-duplicate pair.
+            let mut v = base.clone();
+            v[201] += 0.25;
+            l2_norm(&mut v);
+            v
+        } else {
+            let v = synth_unit_vec(primary_dim, secondary_dim, i + 1);
+            if i == 5 {
+                near_pair_a = Some(v.clone());
+            } else if i == 9 {
+                near_pair_b = Some(v.clone());
+            }
+            v
+        };
         cat.save_vision_result(asset, SIGLIP2_MODEL_ID, &emb, &faces)
             .map_err(|e| e.to_string())?;
         analyzed_assets.push(asset);
+
+        // Seed synthetic EXIF capture dates on a few demo images so the inspector and "Año de captura"
+        // filter group are populated out of the box.
+        if i == first_sorted_idx || matches!(i, 0 | 1 | 2 | 5 | 6 | 12) {
+            let (date_str, _label) = match i % 3 {
+                0 => ("2024:08:15 14:30:00", 2024),
+                1 => ("2023:11:04 09:15:00", 2023),
+                _ => ("2022:05:21 18:45:00", 2022),
+            };
+            if let Some((ns, year)) = rules::parse_exif_datetime_ns(date_str) {
+                let fmt = match spec.format {
+                    DemoFormat::Png => "PNG",
+                    DemoFormat::Jpeg => "JPEG",
+                    DemoFormat::Gif => "GIF",
+                };
+                cat.set_asset_metadata(
+                    asset,
+                    Some(spec.width),
+                    Some(spec.height),
+                    Some(fmt),
+                    Some(ns),
+                    Some(year),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
     }
+
+    // Precompute cached near-duplicate groups for --demo so the "Parecidos" section is populated.
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let roots = vec![canonical_root.to_path_buf()];
+    let _ = cat.compute_and_save_near_duplicates_in_roots(
+        SIGLIP2_MODEL_ID,
+        &roots,
+        catalog::DEFAULT_NEAR_DUPLICATE_THRESHOLD,
+        &cancel,
+        &|_| {},
+    );
 
     let (compiled, _) = cat
         .compile_vision_rules(SIGLIP2_MODEL_ID)

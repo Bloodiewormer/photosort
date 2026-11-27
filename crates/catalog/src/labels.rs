@@ -67,6 +67,14 @@ pub enum ReviewedFilter {
     Reviewed,
 }
 
+/// Image orientation derived from stored pixel dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Orientation {
+    Landscape,
+    Portrait,
+    Square,
+}
+
 /// Every condition must hold. Rejected labels never match.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Filter {
@@ -86,6 +94,12 @@ pub struct Filter {
     /// When `Some((mode, stages))`, filters by whether every stage in `stages` is done.
     /// With `stages` empty, nothing counts as `Reviewed` and everything counts as `Pending`.
     pub reviewed: Option<(ReviewedFilter, Vec<StageSpec>)>,
+    /// When non-empty, only assets whose normalized format (e.g. `"JPEG"`, `"PNG"`) is in this list match.
+    pub formats: Vec<String>,
+    /// When non-empty, only assets matching one of these orientations match.
+    pub orientations: Vec<Orientation>,
+    /// When non-empty, only assets whose EXIF capture year is in this list match.
+    pub capture_years: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +337,40 @@ pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, fi
             }
         }
     }
+    if !filter.formats.is_empty() {
+        let marks = vec!["?"; filter.formats.len()].join(",");
+        sql.push_str(&format!(" AND a.format IN ({marks})"));
+        for fmt in &filter.formats {
+            args.push(Box::new(fmt.clone()));
+        }
+    }
+    if !filter.orientations.is_empty() {
+        sql.push_str(" AND (");
+        for (idx, orient) in filter.orientations.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(" OR ");
+            }
+            match orient {
+                Orientation::Landscape => {
+                    sql.push_str("(a.width > a.height AND a.width > 0 AND a.height > 0)");
+                }
+                Orientation::Portrait => {
+                    sql.push_str("(a.height > a.width AND a.width > 0 AND a.height > 0)");
+                }
+                Orientation::Square => {
+                    sql.push_str("(a.width = a.height AND a.width > 0)");
+                }
+            }
+        }
+        sql.push(')');
+    }
+    if !filter.capture_years.is_empty() {
+        let marks = vec!["?"; filter.capture_years.len()].join(",");
+        sql.push_str(&format!(" AND a.captured_year IN ({marks})"));
+        for &year in &filter.capture_years {
+            args.push(Box::new(i64::from(year)));
+        }
+    }
 }
 
 impl Catalog {
@@ -445,7 +493,9 @@ impl Catalog {
     }
 
     pub fn find(&self, filter: &Filter) -> Result<Vec<PathBuf>, CatalogError> {
-        let mut sql = String::from("SELECT l.path FROM location l WHERE l.missing = 0");
+        let mut sql = String::from(
+            "SELECT l.path FROM location l JOIN asset a ON a.id = l.asset_id WHERE l.missing = 0",
+        );
         let mut args: Vec<Box<dyn ToSql>> = Vec::new();
         append_filter(&mut sql, &mut args, filter);
         sql.push_str(" ORDER BY l.path");

@@ -7,11 +7,16 @@ mod vision;
 mod works;
 
 pub use analysis::{Pending, ReviewedCounts, StageErrorRecord, sanitize_stage_error_reason};
-pub use browse::{Entry, LabelCount, Sort};
-pub use dupes::DuplicateGroup;
+pub use browse::{
+    Entry, FormatCount, LabelCount, MetadataFacets, OrientationCount, Sort, YearCount,
+};
+pub use dupes::{
+    DEFAULT_NEAR_DUPLICATE_THRESHOLD, DuplicateGroup, NearDuplicateGroup, NearDuplicateMeta,
+    NearDuplicateProgress, compute_near_duplicate_groups,
+};
 pub use labels::{
-    AssetId, Assignment, Filter, LabelId, LabelKind, LabelNode, RenameOutcome, ReviewItem,
-    ReviewedFilter, Source, StageSpec, Status,
+    AssetId, Assignment, Filter, LabelId, LabelKind, LabelNode, Orientation, RenameOutcome,
+    ReviewItem, ReviewedFilter, Source, StageSpec, Status,
 };
 pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
@@ -46,9 +51,14 @@ PRAGMA temp_store = MEMORY;
 PRAGMA cache_size = -32000;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS asset (
-    id     INTEGER PRIMARY KEY,
-    sha256 TEXT NOT NULL UNIQUE,
-    size   INTEGER NOT NULL
+    id             INTEGER PRIMARY KEY,
+    sha256         TEXT NOT NULL UNIQUE,
+    size           INTEGER NOT NULL,
+    width          INTEGER,
+    height         INTEGER,
+    format         TEXT,
+    captured_at_ns INTEGER,
+    captured_year  INTEGER
 );
 CREATE TABLE IF NOT EXISTS location (
     id       INTEGER PRIMARY KEY,
@@ -194,6 +204,16 @@ CREATE TABLE IF NOT EXISTS stage_error (
     PRIMARY KEY (asset_id, stage)
 );
 CREATE INDEX IF NOT EXISTS stage_error_stage ON stage_error(stage, asset_id);
+CREATE TABLE IF NOT EXISTS near_duplicate_group (
+    id         INTEGER PRIMARY KEY,
+    similarity REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS near_duplicate_member (
+    group_id INTEGER NOT NULL REFERENCES near_duplicate_group(id) ON DELETE CASCADE,
+    asset_id INTEGER NOT NULL REFERENCES asset(id),
+    PRIMARY KEY (group_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS near_duplicate_member_asset ON near_duplicate_member(asset_id);
 ";
 
 #[derive(Debug)]
@@ -274,6 +294,7 @@ impl Catalog {
         conn.execute_batch(SCHEMA)?;
         let mut cat = Self { conn };
         cat.migrate_label_parent()?;
+        cat.migrate_asset_metadata()?;
         cat.seed_builtin_vision_rules()?;
         Ok(cat)
     }
@@ -331,6 +352,76 @@ impl Catalog {
             )
             .optional()?
             .is_some())
+    }
+
+    /// Adds metadata columns to existing `asset` tables without losing data.
+    /// Does not acquire a write lock when the columns already exist.
+    fn migrate_asset_metadata(&mut self) -> Result<(), CatalogError> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(asset)")?;
+        let existing: std::collections::HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+
+        let required: &[(&str, &str)] = &[
+            ("width", "INTEGER"),
+            ("height", "INTEGER"),
+            ("format", "TEXT"),
+            ("captured_at_ns", "INTEGER"),
+            ("captured_year", "INTEGER"),
+        ];
+        let missing: Vec<(&str, &str)> = required
+            .iter()
+            .copied()
+            .filter(|(col, _)| !existing.contains(*col))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Re-check inside the write transaction in case another connection migrated concurrently.
+        let mut check = tx.prepare("PRAGMA table_info(asset)")?;
+        let now_existing: std::collections::HashSet<String> = check
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+        drop(check);
+        for (col, ty) in missing {
+            if !now_existing.contains(col) {
+                tx.execute(&format!("ALTER TABLE asset ADD COLUMN {col} {ty}"), [])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stores read-only image metadata (dimensions, normalized format, EXIF capture timestamp and
+    /// year) on an asset. Never touches labels or user decisions.
+    pub fn set_asset_metadata(
+        &self,
+        asset: AssetId,
+        width: Option<u32>,
+        height: Option<u32>,
+        format: Option<&str>,
+        captured_at_ns: Option<i64>,
+        captured_year: Option<i32>,
+    ) -> Result<(), CatalogError> {
+        self.conn.execute(
+            "UPDATE asset
+             SET width = ?2, height = ?3, format = ?4, captured_at_ns = ?5, captured_year = ?6
+             WHERE id = ?1",
+            params![
+                asset.0,
+                width.map(i64::from),
+                height.map(i64::from),
+                format,
+                captured_at_ns,
+                captured_year.map(i64::from),
+            ],
+        )?;
+        Ok(())
     }
 
     /// Adds new and changed images and flags the ones that disappeared. A file is only read again when

@@ -1,5 +1,5 @@
 use crate::labels::{append_filter, unexpected};
-use crate::{AssetId, Catalog, CatalogError, Filter, LabelId, LabelKind};
+use crate::{AssetId, Catalog, CatalogError, Filter, LabelId, LabelKind, Orientation};
 use rusqlite::{OptionalExtension, Row, ToSql, params_from_iter};
 use std::path::PathBuf;
 
@@ -10,6 +10,10 @@ pub struct Entry {
     pub sha256: String,
     pub size: u64,
     pub modified_ns: Option<i64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub format: Option<String>,
+    pub captured_at_ns: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +24,10 @@ pub enum Sort {
     SizeDesc,
     ModifiedAsc,
     ModifiedDesc,
+    CapturedAsc,
+    CapturedDesc,
+    PixelsAsc,
+    PixelsDesc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +36,31 @@ pub struct LabelCount {
     pub kind: LabelKind,
     pub name: String,
     pub images: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatCount {
+    pub format: String,
+    pub images: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrientationCount {
+    pub orientation: Orientation,
+    pub images: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YearCount {
+    pub year: i32,
+    pub images: i64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MetadataFacets {
+    pub formats: Vec<FormatCount>,
+    pub orientations: Vec<OrientationCount>,
+    pub years: Vec<YearCount>,
 }
 
 impl Sort {
@@ -39,18 +72,36 @@ impl Sort {
             Self::SizeDesc => "ORDER BY l.size DESC, l.path ASC",
             Self::ModifiedAsc => "ORDER BY l.mtime_ns ASC NULLS LAST, l.path ASC",
             Self::ModifiedDesc => "ORDER BY l.mtime_ns DESC NULLS LAST, l.path ASC",
+            Self::CapturedAsc => {
+                "ORDER BY COALESCE(a.captured_at_ns, l.mtime_ns) ASC NULLS LAST, l.path ASC"
+            }
+            Self::CapturedDesc => {
+                "ORDER BY COALESCE(a.captured_at_ns, l.mtime_ns) DESC NULLS LAST, l.path ASC"
+            }
+            Self::PixelsAsc => {
+                "ORDER BY (CASE WHEN a.width IS NOT NULL AND a.height IS NOT NULL THEN a.width * a.height END) ASC NULLS LAST, l.path ASC"
+            }
+            Self::PixelsDesc => {
+                "ORDER BY (CASE WHEN a.width IS NOT NULL AND a.height IS NOT NULL THEN a.width * a.height END) DESC NULLS LAST, l.path ASC"
+            }
         }
     }
 }
 
-fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
+pub(crate) fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
     let size: i64 = r.get(3)?;
+    let width: Option<i64> = r.get(5)?;
+    let height: Option<i64> = r.get(6)?;
     Ok(Entry {
         asset: AssetId(r.get(0)?),
         path: PathBuf::from(r.get::<_, String>(1)?),
         sha256: r.get(2)?,
         size: size.max(0) as u64,
         modified_ns: r.get(4)?,
+        width: width.and_then(|v| u32::try_from(v).ok()),
+        height: height.and_then(|v| u32::try_from(v).ok()),
+        format: r.get(7)?,
+        captured_at_ns: r.get(8)?,
     })
 }
 
@@ -70,7 +121,8 @@ const LABELS_IN_USE_SQL: &str = "SELECT lb.id, lb.kind, lb.name, c.images
 
 fn build_entries_sql(filter: &Filter, sort: Sort) -> (String, Vec<Box<dyn ToSql>>) {
     let mut sql = String::from(
-        "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+        "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
+                a.width, a.height, a.format, a.captured_at_ns
          FROM location l JOIN asset a ON a.id = l.asset_id
          WHERE l.missing = 0",
     );
@@ -161,7 +213,8 @@ impl Catalog {
         Ok(self
             .conn
             .query_row(
-                "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+                "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
+                        a.width, a.height, a.format, a.captured_at_ns
                  FROM location l JOIN asset a ON a.id = l.asset_id
                  WHERE l.asset_id = ?1 AND l.missing = 0
                  ORDER BY l.path ASC
@@ -183,7 +236,8 @@ impl Catalog {
         }
         let marks = vec!["?"; roots.len()].join(",");
         let sql = format!(
-            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
+                    a.width, a.height, a.format, a.captured_at_ns
              FROM location l JOIN asset a ON a.id = l.asset_id
              WHERE l.asset_id = ? AND l.missing = 0 AND l.root IN ({marks})
              ORDER BY l.path ASC
@@ -198,5 +252,93 @@ impl Catalog {
             .conn
             .query_row(&sql, params_from_iter(args.iter()), entry_from_row)
             .optional()?)
+    }
+
+    /// Counts distinct present assets under `roots` grouped by format, orientation, and capture year.
+    pub fn metadata_facets_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<MetadataFacets, CatalogError> {
+        if roots.is_empty() {
+            return Ok(MetadataFacets::default());
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let args: Vec<Box<dyn ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn ToSql>)
+            .collect();
+
+        let exists_clause = format!(
+            "EXISTS (SELECT 1 FROM location l WHERE l.asset_id = a.id AND l.missing = 0 AND l.root IN ({marks}))"
+        );
+
+        let fmt_sql = format!(
+            "SELECT a.format, COUNT(*)
+             FROM asset a
+             WHERE a.format IS NOT NULL AND {exists_clause}
+             GROUP BY a.format
+             ORDER BY COUNT(*) DESC, a.format ASC"
+        );
+        let mut stmt = self.conn.prepare(&fmt_sql)?;
+        let formats = stmt
+            .query_map(params_from_iter(args.iter()), |r| {
+                Ok(FormatCount {
+                    format: r.get(0)?,
+                    images: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let orient_sql = format!(
+            "SELECT
+                 CASE
+                     WHEN a.width > a.height THEN 'landscape'
+                     WHEN a.height > a.width THEN 'portrait'
+                     ELSE 'square'
+                 END AS orient,
+                 COUNT(*)
+             FROM asset a
+             WHERE a.width > 0 AND a.height > 0 AND {exists_clause}
+             GROUP BY orient"
+        );
+        let mut stmt = self.conn.prepare(&orient_sql)?;
+        let mut raw_orients: Vec<OrientationCount> = stmt
+            .query_map(params_from_iter(args.iter()), |r| {
+                let tag: String = r.get(0)?;
+                let orientation = match tag.as_str() {
+                    "landscape" => Orientation::Landscape,
+                    "portrait" => Orientation::Portrait,
+                    _ => Orientation::Square,
+                };
+                Ok(OrientationCount {
+                    orientation,
+                    images: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        raw_orients.sort_by_key(|o| o.orientation);
+
+        let year_sql = format!(
+            "SELECT a.captured_year, COUNT(*)
+             FROM asset a
+             WHERE a.captured_year IS NOT NULL AND {exists_clause}
+             GROUP BY a.captured_year
+             ORDER BY a.captured_year DESC"
+        );
+        let mut stmt = self.conn.prepare(&year_sql)?;
+        let years = stmt
+            .query_map(params_from_iter(args.iter()), |r| {
+                Ok(YearCount {
+                    year: r.get::<_, i64>(0)? as i32,
+                    images: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(MetadataFacets {
+            formats,
+            orientations: raw_orients,
+            years,
+        })
     }
 }

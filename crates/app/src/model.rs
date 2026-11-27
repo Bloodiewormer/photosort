@@ -1,4 +1,4 @@
-use catalog::{Entry, Filter, LabelId, Sort};
+use catalog::{Entry, Filter, LabelId, Orientation, Sort};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -311,6 +311,9 @@ pub fn format_chip_tooltip(mode: Option<ChipMode>, name: &str, count: usize) -> 
 pub struct FilterState {
     pub search: String,
     pub chips: BTreeMap<LabelId, ChipMode>,
+    pub formats: BTreeSet<String>,
+    pub orientations: BTreeSet<Orientation>,
+    pub capture_years: BTreeSet<i32>,
     pub sort: Sort,
     pub reviewed: catalog::ReviewedFilter,
 }
@@ -320,6 +323,9 @@ impl Default for FilterState {
         Self {
             search: String::new(),
             chips: BTreeMap::new(),
+            formats: BTreeSet::new(),
+            orientations: BTreeSet::new(),
+            capture_years: BTreeSet::new(),
             sort: Sort::PathAsc,
             reviewed: catalog::ReviewedFilter::All,
         }
@@ -352,13 +358,38 @@ impl FilterState {
         self.set_chip(id, next);
     }
 
+    pub fn toggle_format(&mut self, format: &str) {
+        if !self.formats.remove(format) {
+            self.formats.insert(format.to_owned());
+        }
+    }
+
+    pub fn toggle_orientation(&mut self, orient: Orientation) {
+        if !self.orientations.remove(&orient) {
+            self.orientations.insert(orient);
+        }
+    }
+
+    pub fn toggle_capture_year(&mut self, year: i32) {
+        if !self.capture_years.remove(&year) {
+            self.capture_years.insert(year);
+        }
+    }
+
     pub fn clear_filters(&mut self) {
         self.search.clear();
         self.chips.clear();
+        self.formats.clear();
+        self.orientations.clear();
+        self.capture_years.clear();
     }
 
     pub fn has_active_filters(&self) -> bool {
-        !self.search.trim().is_empty() || !self.chips.is_empty()
+        !self.search.trim().is_empty()
+            || !self.chips.is_empty()
+            || !self.formats.is_empty()
+            || !self.orientations.is_empty()
+            || !self.capture_years.is_empty()
     }
 
     pub fn to_catalog_filter(&self) -> Filter {
@@ -370,6 +401,9 @@ impl FilterState {
                 ChipMode::Exclude => filter.exclude.push(id),
             }
         }
+        filter.formats = self.formats.iter().cloned().collect();
+        filter.orientations = self.orientations.iter().copied().collect();
+        filter.capture_years = self.capture_years.iter().copied().collect();
         let trimmed = self.search.trim();
         if !trimmed.is_empty() {
             filter.search = Some(trimmed.to_owned());
@@ -410,6 +444,11 @@ pub fn format_bytes(bytes: u64) -> String {
 
 /// Formats a Unix timestamp in nanoseconds as `YYYY-MM-DD HH:MM UTC` without extra date crates.
 pub fn format_timestamp_utc(ns: i64) -> String {
+    format!("{} UTC", format_timestamp_plain(ns))
+}
+
+/// Formats an EXIF capture timestamp (wall-clock, no timezone) as `YYYY-MM-DD HH:MM`.
+pub fn format_timestamp_plain(ns: i64) -> String {
     let secs = ns.div_euclid(1_000_000_000);
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -427,7 +466,7 @@ pub fn format_timestamp_utc(ns: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
-    format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
+    format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02}")
 }
 
 /// Returns `singular` when `n == 1`, otherwise `plural` (Spanish number agreement).

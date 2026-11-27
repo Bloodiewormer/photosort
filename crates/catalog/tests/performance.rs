@@ -855,3 +855,60 @@ fn benchmark_reviewed_filter_and_counts_45k_assets() {
         println!("entries({name}, 3 stages, 45k): rows={n} | mean={mean:.2} ms, p95={p95:.2} ms");
     }
 }
+
+#[test]
+#[ignore = "heavy 45k x 768 all-pairs near-duplicate benchmark; run with --release -- --ignored --nocapture"]
+fn benchmark_near_duplicates_45k_embeddings() {
+    use catalog::{EMBEDDING_DIM, compute_near_duplicate_groups};
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
+
+    const ASSETS: usize = 45_000;
+
+    // Generate 45,000 deterministic L2-normalized synthetic 768-d vectors with 10 near-duplicate pairs.
+    let gen_start = Instant::now();
+    let mut items: Vec<(AssetId, [f32; EMBEDDING_DIM])> = Vec::with_capacity(ASSETS);
+    for i in 0..ASSETS {
+        let mut v = [0.0f32; EMBEDDING_DIM];
+        let mut state = (i as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(1);
+        let mut sum_sq = 0.0f32;
+        for slot in &mut v {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let x = (((state >> 33) as u32) as f32 / (u32::MAX as f32)) - 0.5;
+            *slot = x;
+            sum_sq += x * x;
+        }
+        let inv = 1.0 / sum_sq.sqrt();
+        for slot in &mut v {
+            *slot *= inv;
+        }
+        items.push((AssetId(i as i64 + 1), v));
+    }
+    // Inject 10 known near-duplicate pairs (cosine ~0.98).
+    for k in 0..10usize {
+        let mut copy = items[k].1;
+        copy[0] += 0.15;
+        let norm = copy.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut copy {
+            *x /= norm;
+        }
+        items[ASSETS - 1 - k].1 = copy;
+    }
+    println!(
+        "Generated {ASSETS} x {EMBEDDING_DIM} embeddings in {:.2} s",
+        gen_start.elapsed().as_secs_f64()
+    );
+
+    let cancel = AtomicBool::new(false);
+    let t0 = Instant::now();
+    let groups = compute_near_duplicate_groups(&items, 0.95, &cancel, &|_| {}).unwrap();
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!(
+        "All-pairs near-duplicates ({ASSETS} x {EMBEDDING_DIM}, threshold=0.95): {:.2} s -> {} groups",
+        elapsed,
+        groups.len()
+    );
+    assert_eq!(groups.len(), 10);
+}

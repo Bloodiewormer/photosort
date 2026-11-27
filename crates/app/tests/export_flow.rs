@@ -46,6 +46,10 @@ fn select_entries_uses_selection_or_all_filtered_entries_when_empty() {
             sha256: format!("{i:064x}"),
             size: 10,
             modified_ns: None,
+            width: None,
+            height: None,
+            format: None,
+            captured_at_ns: None,
         })
         .collect();
 

@@ -165,3 +165,114 @@ fn missing_locations_are_excluded_and_shrink_or_drop_groups() {
     assert_eq!(s.rel_paths(&groups[0]), vec!["b/1.jpg", "b/2.jpg"]);
     assert_eq!(s.rel_paths(&groups[1]), vec!["a/1.jpg", "a/3.jpg"]);
 }
+
+#[test]
+fn near_duplicates_separates_similar_from_distinct_and_excludes_removed_roots() {
+    use catalog::{EMBEDDING_DIM, SIGLIP2_MODEL_ID};
+    use std::sync::atomic::AtomicBool;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_a = tmp.path().join("lib_a");
+    let lib_b = tmp.path().join("lib_b");
+    write(&lib_a, "sim1.jpg", b"similar-one");
+    write(&lib_a, "sim2.jpg", b"similar-two");
+    write(&lib_a, "sim1_exact_copy.jpg", b"similar-one"); // exact duplicate of sim1 -> same asset
+    write(&lib_a, "distinct.jpg", b"very-different");
+    write(&lib_b, "removed_sim.jpg", b"similar-in-other-root");
+
+    let roots_guard = [
+        LibraryRoot::new(&lib_a).unwrap(),
+        LibraryRoot::new(&lib_b).unwrap(),
+    ];
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db = ensure_writable(&data.join("catalog.sqlite"), &roots_guard).unwrap();
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.index(&roots_guard[0]).unwrap();
+    cat.index(&roots_guard[1]).unwrap();
+    let [root_a, root_b] = roots_guard;
+
+    let asset = |p: PathBuf| {
+        cat.asset_of(&dunce::canonicalize(p).unwrap())
+            .unwrap()
+            .unwrap()
+    };
+    let a1 = asset(lib_a.join("sim1.jpg"));
+    let a2 = asset(lib_a.join("sim2.jpg"));
+    let a_dist = asset(lib_a.join("distinct.jpg"));
+    let a_b = asset(lib_b.join("removed_sim.jpg"));
+
+    let normalize = |mut v: Vec<f32>| {
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut v {
+            *x /= n;
+        }
+        v
+    };
+
+    // a1 and a2 have cosine ~0.97; a_b is also ~0.97 to a1; a_dist is orthogonal (cosine 0.0).
+    let mut v1 = vec![0.0f32; EMBEDDING_DIM];
+    v1[0] = 1.0;
+    let mut v2 = vec![0.0f32; EMBEDDING_DIM];
+    v2[0] = 0.97;
+    v2[1] = 0.243;
+    let mut vb = vec![0.0f32; EMBEDDING_DIM];
+    vb[0] = 0.97;
+    vb[2] = 0.243;
+    let mut vd = vec![0.0f32; EMBEDDING_DIM];
+    vd[5] = 1.0;
+
+    cat.save_vision_result(a1, SIGLIP2_MODEL_ID, &normalize(v1), &[])
+        .unwrap();
+    cat.save_vision_result(a2, SIGLIP2_MODEL_ID, &normalize(v2), &[])
+        .unwrap();
+    cat.save_vision_result(a_b, SIGLIP2_MODEL_ID, &normalize(vb), &[])
+        .unwrap();
+    cat.save_vision_result(a_dist, SIGLIP2_MODEL_ID, &normalize(vd), &[])
+        .unwrap();
+
+    let cancel = AtomicBool::new(false);
+    let both_roots = vec![
+        root_a.as_path().to_path_buf(),
+        root_b.as_path().to_path_buf(),
+    ];
+
+    // Threshold 0.95 groups a1, a2, a_b together and excludes a_dist.
+    let groups = cat
+        .compute_and_save_near_duplicates_in_roots(
+            SIGLIP2_MODEL_ID,
+            &both_roots,
+            0.95,
+            &cancel,
+            &|_| {},
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    let ids: Vec<_> = groups[0].entries.iter().map(|e| e.asset).collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.contains(&a1) && ids.contains(&a2) && ids.contains(&a_b));
+    assert!(!ids.contains(&a_dist));
+
+    // After removing root_b, reading cached groups with only root_a excludes a_b.
+    let only_a = vec![root_a.as_path().to_path_buf()];
+    let filtered = cat.near_duplicate_groups_in_roots(&only_a).unwrap();
+    assert_eq!(filtered.len(), 1);
+    let ids_a: Vec<_> = filtered[0].entries.iter().map(|e| e.asset).collect();
+    assert_eq!(ids_a.len(), 2);
+    assert!(ids_a.contains(&a1) && ids_a.contains(&a2));
+    assert!(!ids_a.contains(&a_b));
+
+    // Higher threshold (0.99) yields no groups because the similar pair is ~0.97.
+    let strict = cat
+        .compute_and_save_near_duplicates_in_roots(
+            SIGLIP2_MODEL_ID,
+            &only_a,
+            0.99,
+            &cancel,
+            &|_| {},
+        )
+        .unwrap()
+        .unwrap();
+    assert!(strict.is_empty());
+}

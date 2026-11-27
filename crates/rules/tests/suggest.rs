@@ -5,9 +5,12 @@ fn plain() -> Facts {
     Facts {
         file_name: "photo.jpg".into(),
         extension: "jpg".into(),
+        format: Some("JPEG".into()),
         width: 800,
         height: 600,
         has_camera_exif: false,
+        captured_at_ns: None,
+        captured_year: None,
     }
 }
 
@@ -210,9 +213,12 @@ fn screenshot_name_and_screen_size_emit_once_with_higher_confidence() {
     let facts = Facts {
         file_name: "Screenshot_2024.png".into(),
         extension: "png".into(),
+        format: Some("PNG".into()),
         width: 1920,
         height: 1080,
         has_camera_exif: false,
+        captured_at_ns: None,
+        captured_year: None,
     };
     let out = suggest(&facts);
     assert_eq!(
@@ -327,9 +333,12 @@ fn multiple_rules_can_fire_together() {
     let facts = Facts {
         file_name: "Screenshot_IMG-20240101-WA0001.gif".into(),
         extension: "gif".into(),
+        format: Some("GIF".into()),
         width: 800,
         height: 2400,
         has_camera_exif: false,
+        captured_at_ns: None,
+        captured_year: None,
     };
     let out = suggest(&facts);
     assert_eq!(

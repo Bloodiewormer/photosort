@@ -4,7 +4,9 @@ use crate::review_engine::{EnginePhase, EngineSnapshot};
 use crate::theme::{self, Palette};
 use crate::views::context_menu::attach_chip_context_menu;
 use crate::views::label_actions::{LabelAction, draw_label_menu_items, flatten_category_tree};
-use catalog::{LabelId, LabelKind, LabelNode, ReviewedCounts, ReviewedFilter};
+use catalog::{
+    LabelId, LabelKind, LabelNode, MetadataFacets, Orientation, ReviewedCounts, ReviewedFilter,
+};
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Frame, Id, Layout, Margin, RichText, ScrollArea, Stroke,
     TextureHandle, Vec2,
@@ -325,6 +327,7 @@ pub fn draw_sidebar(
     works_count: usize,
     rules_count: usize,
     all_labels: &[LabelNode],
+    metadata_facets: &MetadataFacets,
     filter: &mut FilterState,
     sidebar_state: &mut SidebarState,
 ) -> SidebarOutcome {
@@ -467,7 +470,12 @@ pub fn draw_sidebar(
                         .filter(|l| l.kind == LabelKind::Entity && l.images > 0)
                         .collect();
 
-                    if visible_cats.is_empty() && visible_tags.is_empty() && visible_ents.is_empty()
+                    if visible_cats.is_empty()
+                        && visible_tags.is_empty()
+                        && visible_ents.is_empty()
+                        && metadata_facets.formats.is_empty()
+                        && metadata_facets.orientations.is_empty()
+                        && metadata_facets.years.is_empty()
                     {
                         ui.label(
                             RichText::new("Sin etiquetas todavía")
@@ -505,6 +513,21 @@ pub fn draw_sidebar(
                             false,
                             &mut outcome,
                         );
+                        draw_format_filter_group(
+                            ui,
+                            palette,
+                            metadata_facets,
+                            filter,
+                            &mut outcome,
+                        );
+                        draw_orientation_filter_group(
+                            ui,
+                            palette,
+                            metadata_facets,
+                            filter,
+                            &mut outcome,
+                        );
+                        draw_year_filter_group(ui, palette, metadata_facets, filter, &mut outcome);
                     }
                 });
 
@@ -838,6 +861,155 @@ fn draw_flat_filter_group(
             outcome.filter_changed = true;
             outcome.switch_view = Some(ActiveView::Gallery);
         }
+    });
+    ui.add_space(theme::SPACE_XS);
+}
+
+fn draw_toggle_chip(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    count: usize,
+    active: bool,
+) -> egui::Response {
+    let (bg, fg, stroke) = if active {
+        let c = palette.chip_require_fg.color32();
+        (palette.chip_require_bg.color32(), c, Stroke::new(1.5, c))
+    } else {
+        (
+            palette.bg_card.color32(),
+            palette.text_primary.color32(),
+            Stroke::new(1.0, palette.border.color32()),
+        )
+    };
+    let mut rt = RichText::new(format!("{label} ({count})"))
+        .size(theme::FONT_SMALL)
+        .color(fg);
+    if active {
+        rt = rt.strong();
+    }
+    let btn = egui::Button::new(rt)
+        .fill(bg)
+        .stroke(stroke)
+        .corner_radius(CornerRadius::same(theme::RADIUS_SM));
+    ui.add(btn)
+}
+
+fn draw_format_filter_group(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    facets: &MetadataFacets,
+    filter: &mut FilterState,
+    outcome: &mut SidebarOutcome,
+) {
+    if facets.formats.is_empty() {
+        return;
+    }
+    let header_title = format!("Formato ({})", facets.formats.len());
+    egui::CollapsingHeader::new(
+        RichText::new(header_title)
+            .size(theme::FONT_SMALL)
+            .color(palette.text_secondary.color32()),
+    )
+    .id_salt("filter_group_format")
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for fc in &facets.formats {
+                let active = filter.formats.contains(&fc.format);
+                let count = fc.images.max(0) as usize;
+                if draw_toggle_chip(ui, palette, &fc.format, count, active).clicked() {
+                    filter.toggle_format(&fc.format);
+                    outcome.filter_changed = true;
+                    outcome.switch_view = Some(ActiveView::Gallery);
+                }
+            }
+        });
+    });
+    ui.add_space(theme::SPACE_XS);
+}
+
+fn orientation_label(orient: Orientation) -> &'static str {
+    match orient {
+        Orientation::Landscape => "Horizontal",
+        Orientation::Portrait => "Vertical",
+        Orientation::Square => "Cuadrada",
+    }
+}
+
+fn draw_orientation_filter_group(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    facets: &MetadataFacets,
+    filter: &mut FilterState,
+    outcome: &mut SidebarOutcome,
+) {
+    if facets.orientations.is_empty() {
+        return;
+    }
+    let header_title = format!("Orientación ({})", facets.orientations.len());
+    egui::CollapsingHeader::new(
+        RichText::new(header_title)
+            .size(theme::FONT_SMALL)
+            .color(palette.text_secondary.color32()),
+    )
+    .id_salt("filter_group_orientation")
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for oc in &facets.orientations {
+                let active = filter.orientations.contains(&oc.orientation);
+                let count = oc.images.max(0) as usize;
+                if draw_toggle_chip(
+                    ui,
+                    palette,
+                    orientation_label(oc.orientation),
+                    count,
+                    active,
+                )
+                .clicked()
+                {
+                    filter.toggle_orientation(oc.orientation);
+                    outcome.filter_changed = true;
+                    outcome.switch_view = Some(ActiveView::Gallery);
+                }
+            }
+        });
+    });
+    ui.add_space(theme::SPACE_XS);
+}
+
+fn draw_year_filter_group(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    facets: &MetadataFacets,
+    filter: &mut FilterState,
+    outcome: &mut SidebarOutcome,
+) {
+    if facets.years.is_empty() {
+        return;
+    }
+    let header_title = format!("Año de captura ({})", facets.years.len());
+    egui::CollapsingHeader::new(
+        RichText::new(header_title)
+            .size(theme::FONT_SMALL)
+            .color(palette.text_secondary.color32()),
+    )
+    .id_salt("filter_group_capture_year")
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for yc in &facets.years {
+                let active = filter.capture_years.contains(&yc.year);
+                let count = yc.images.max(0) as usize;
+                let year_text = yc.year.to_string();
+                if draw_toggle_chip(ui, palette, &year_text, count, active).clicked() {
+                    filter.toggle_capture_year(yc.year);
+                    outcome.filter_changed = true;
+                    outcome.switch_view = Some(ActiveView::Gallery);
+                }
+            }
+        });
     });
     ui.add_space(theme::SPACE_XS);
 }
