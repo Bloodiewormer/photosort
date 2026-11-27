@@ -2,13 +2,15 @@
 #![allow(clippy::disallowed_methods)]
 
 use catalog::{
-    AssetId, CREDITS_CATEGORY, Catalog, LabelId, LabelKind, OcrLine, OcrRecognizer, PROMO_CATEGORY,
-    ParsedWorkFilename, RECRUITMENT_CATEGORY, SCREENSHOT_CATEGORY, Source, Status, WorkEntry,
-    WorkMatcher, extract_work_title_from_stem, parse_work_from_stem, work_match_key,
+    AD_CATEGORY, AssetId, CHAPTER_PAGE_CATEGORY, CREDITS_CATEGORY, Catalog, LabelId, LabelKind,
+    MANGA_COVER_CATEGORY, OcrLine, OcrRecognizer, PROMO_CATEGORY, ParsedWorkFilename,
+    RECRUITMENT_CATEGORY, SCANLATION_PAGE_CATEGORIES, SCREENSHOT_CATEGORY, Source, Status,
+    WorkEntry, WorkMatcher, extract_work_title_from_stem, parse_work_from_stem, work_match_key,
 };
 use fsguard::{LibraryRoot, ensure_writable};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use std::time::Instant;
 
 fn line(text: &str, score: f32, rect: [f32; 4]) -> OcrLine {
@@ -1052,4 +1054,314 @@ fn a_second_copy_with_a_plain_name_keeps_the_ownership_suggestion() {
         .unwrap()
         .expect("suggested from the named copy");
     assert_eq!(aw.work, work);
+}
+
+#[test]
+fn match_asset_detects_ad_pages_and_rejects_single_word_mentions() {
+    let matcher = WorkMatcher::build(&[]);
+
+    // 1. Synthetic Spanish ad page
+    let ad_es = matcher.match_asset(
+        &[
+            line("¡Apóyanos en Patreon!", 0.95, [20.0, 20.0, 240.0, 44.0]),
+            line(
+                "Visita nuestra web para capítulos adelantados",
+                0.93,
+                [20.0, 60.0, 360.0, 84.0],
+            ),
+            line("Síguenos en Discord", 0.91, [20.0, 100.0, 200.0, 124.0]),
+        ],
+        false,
+    );
+    assert!(ad_es.ad_confidence.is_some(), "Spanish ad must be detected");
+    assert!(ad_es.recruitment_confidence.is_none());
+
+    // 2. Synthetic English ad page
+    let ad_en = matcher.match_asset(
+        &[
+            line("Support us on Patreon!", 0.96, [20.0, 20.0, 240.0, 44.0]),
+            line(
+                "Visit our website to read ahead",
+                0.94,
+                [20.0, 60.0, 320.0, 84.0],
+            ),
+            line("Join our Discord server", 0.92, [20.0, 100.0, 240.0, 124.0]),
+        ],
+        false,
+    );
+    assert!(ad_en.ad_confidence.is_some(), "English ad must be detected");
+
+    // 3. Negative case: a dialogue that mentions Discord once is NOT an ad
+    let discord_dialogue = matcher.match_asset(
+        &[
+            line(
+                "Oye, ¿viste lo que dijeron en Discord ayer?",
+                0.95,
+                [20.0, 20.0, 320.0, 44.0],
+            ),
+            line(
+                "No, estuve ocupado todo el día.",
+                0.94,
+                [20.0, 60.0, 260.0, 84.0],
+            ),
+        ],
+        false,
+    );
+    assert!(
+        discord_dialogue.ad_confidence.is_none(),
+        "single mention of Discord in dialogue must not trigger ad"
+    );
+
+    // Negative case: dialogue with 'síguenos' alone without supporting platforms
+    let follow_dialogue = matcher.match_asset(
+        &[line(
+            "¡Síguenos rápido o nos atraparán!",
+            0.95,
+            [20.0, 20.0, 300.0, 44.0],
+        )],
+        false,
+    );
+    assert!(
+        follow_dialogue.ad_confidence.is_none(),
+        "'síguenos' in ordinary dialogue must not trigger ad"
+    );
+
+    // 4. Recruitment takes precedence over ad: if recruitment matches, ad is not suggested
+    let recruit_and_discord = matcher.match_asset(
+        &[
+            line(
+                "¡Buscamos traductores y cleaners!",
+                0.95,
+                [20.0, 20.0, 320.0, 44.0],
+            ),
+            line("Únete a nuestro Discord", 0.92, [20.0, 60.0, 240.0, 84.0]),
+        ],
+        false,
+    );
+    assert!(
+        recruit_and_discord.recruitment_confidence.is_some(),
+        "recruitment must be detected"
+    );
+    assert!(
+        recruit_and_discord.ad_confidence.is_none(),
+        "if recruitment matches, ad must not be suggested"
+    );
+}
+
+#[test]
+fn chapter_page_suggested_from_filename_and_negatives() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("One Piece - Cap 100 - 05.png", b"c1"),
+        ("Ilustracion_01.png", b"c2"),
+        ("Naruto - Chapter 50 - 01.png", b"c3"),
+    ]);
+    let ch_id = ids["One Piece - Cap 100 - 05.png"];
+    let plain_id = ids["Ilustracion_01.png"];
+    let credits_ch_id = ids["Naruto - Chapter 50 - 01.png"];
+
+    // 1. Positive case: filename with chapter marker suggests Página de capítulo
+    let changed = cat
+        .suggest_chapter_page_from_path(ch_id, Path::new("One Piece - Cap 100 - 05.png"))
+        .unwrap();
+    assert!(changed, "must suggest chapter page");
+    let labels = cat.labels_of(ch_id).unwrap();
+    let ch_label = labels
+        .iter()
+        .find(|a| a.kind == LabelKind::Category && a.name == CHAPTER_PAGE_CATEGORY)
+        .expect("Página de capítulo suggested");
+    assert_eq!(
+        (ch_label.source, ch_label.status),
+        (Source::Rules, Status::Suggested)
+    );
+
+    // 2. Negative case: filename without chapter marker does NOT suggest Página de capítulo
+    let changed_plain = cat
+        .suggest_chapter_page_from_path(plain_id, Path::new("Ilustracion_01.png"))
+        .unwrap();
+    assert!(
+        !changed_plain,
+        "plain filename must not suggest chapter page"
+    );
+    let labels_plain = cat.labels_of(plain_id).unwrap();
+    assert!(
+        !labels_plain.iter().any(|a| a.name == CHAPTER_PAGE_CATEGORY),
+        "Página de capítulo must not exist for plain filename"
+    );
+
+    // 3. Negative case: filename has chapter marker, but page has credits OCR
+    cat.save_ocr_lines(
+        credits_ch_id,
+        &[
+            line("Translator: Bob", 0.95, [10.0, 20.0, 180.0, 42.0]),
+            line("Typesetter: Alice", 0.94, [10.0, 50.0, 180.0, 72.0]),
+        ],
+    )
+    .unwrap();
+    let m = cat.load_work_matcher().unwrap();
+    cat.apply_work_matches(credits_ch_id, &m).unwrap();
+
+    // Now try to suggest chapter page from path: must be rejected because page is credits
+    let changed_cred = cat
+        .suggest_chapter_page_from_path(credits_ch_id, Path::new("Naruto - Chapter 50 - 01.png"))
+        .unwrap();
+    assert!(
+        !changed_cred,
+        "must not suggest chapter page when page is credits"
+    );
+    let labels_cred = cat.labels_of(credits_ch_id).unwrap();
+    assert!(
+        labels_cred
+            .iter()
+            .any(|a| a.name == CREDITS_CATEGORY && a.status == Status::Suggested),
+        "Créditos must be suggested"
+    );
+    assert!(
+        !labels_cred.iter().any(|a| a.name == CHAPTER_PAGE_CATEGORY),
+        "Página de capítulo must not be suggested when page is credits"
+    );
+}
+
+#[test]
+fn scanlation_page_type_priority_and_single_suggestion_invariant() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("page_ad_credits.png", b"p1"),
+        ("page_credits_chapter.png", b"p2"),
+        ("page_cover_chapter.png", b"p3"),
+    ]);
+    let p1 = ids["page_ad_credits.png"];
+    let p2 = ids["page_credits_chapter.png"];
+    let p3 = ids["page_cover_chapter.png"];
+
+    // 1. Two candidates: Ad vs Credits. Ad has higher priority (Ad > Credits).
+    cat.save_ocr_lines(
+        p1,
+        &[
+            line("Translator: Alex", 0.94, [10.0, 20.0, 180.0, 40.0]),
+            line("Cleaner: Sam", 0.93, [10.0, 50.0, 180.0, 70.0]),
+            line("Typesetter: Pat", 0.92, [10.0, 80.0, 180.0, 100.0]),
+            line("¡Apóyanos en Patreon!", 0.95, [10.0, 120.0, 240.0, 140.0]),
+            line("Visita nuestra web", 0.92, [10.0, 150.0, 200.0, 170.0]),
+        ],
+    )
+    .unwrap();
+    let m = cat.load_work_matcher().unwrap();
+    cat.apply_work_matches(p1, &m).unwrap();
+
+    let p1_labels = cat.labels_of(p1).unwrap();
+    let p1_suggested_cats: Vec<_> = p1_labels
+        .iter()
+        .filter(|a| {
+            a.kind == LabelKind::Category
+                && a.status == Status::Suggested
+                && SCANLATION_PAGE_CATEGORIES.contains(&a.name.as_str())
+        })
+        .collect();
+    assert_eq!(
+        p1_suggested_cats.len(),
+        1,
+        "exactly one page type suggestion allowed"
+    );
+    assert_eq!(
+        p1_suggested_cats[0].name, AD_CATEGORY,
+        "Anuncio wins over Créditos"
+    );
+
+    // 2. Two candidates: Credits vs Chapter page. Credits has higher priority (Credits > Chapter page).
+    // First, suggest chapter page via rules.
+    cat.suggest_chapter_page_from_path(p2, Path::new("Manga - Cap 1 - 02.png"))
+        .unwrap();
+    assert!(
+        cat.labels_of(p2)
+            .unwrap()
+            .iter()
+            .any(|a| a.name == CHAPTER_PAGE_CATEGORY && a.status == Status::Suggested),
+        "chapter page initially suggested"
+    );
+
+    // Now OCR detects credits:
+    cat.save_ocr_lines(
+        p2,
+        &[
+            line("TL: Bob", 0.95, [10.0, 20.0, 120.0, 40.0]),
+            line("CL: Alice", 0.94, [10.0, 50.0, 120.0, 70.0]),
+            line("TS: Charlie", 0.93, [10.0, 80.0, 120.0, 100.0]),
+        ],
+    )
+    .unwrap();
+    cat.apply_work_matches(p2, &m).unwrap();
+
+    let p2_labels = cat.labels_of(p2).unwrap();
+    let p2_suggested_cats: Vec<_> = p2_labels
+        .iter()
+        .filter(|a| {
+            a.kind == LabelKind::Category
+                && a.status == Status::Suggested
+                && SCANLATION_PAGE_CATEGORIES.contains(&a.name.as_str())
+        })
+        .collect();
+    assert_eq!(
+        p2_suggested_cats.len(),
+        1,
+        "exactly one page type suggestion allowed"
+    );
+    assert_eq!(
+        p2_suggested_cats[0].name, CREDITS_CATEGORY,
+        "Créditos wins over Página de capítulo"
+    );
+
+    // 3. Two candidates: Cover (Portada de manga) vs Chapter page. Portada > Chapter page.
+    cat.suggest_chapter_page_from_path(p3, Path::new("Series - Cap 10 - 01.png"))
+        .unwrap();
+    let cover_label = cat
+        .label(LabelKind::Category, MANGA_COVER_CATEGORY)
+        .unwrap();
+    cat.suggest(p3, cover_label, Source::Ai, 0.90).unwrap();
+    cat.reconcile_page_types(p3).unwrap();
+
+    let p3_labels = cat.labels_of(p3).unwrap();
+    let p3_suggested_cats: Vec<_> = p3_labels
+        .iter()
+        .filter(|a| {
+            a.kind == LabelKind::Category
+                && a.status == Status::Suggested
+                && SCANLATION_PAGE_CATEGORIES.contains(&a.name.as_str())
+        })
+        .collect();
+    assert_eq!(
+        p3_suggested_cats.len(),
+        1,
+        "exactly one page type suggestion allowed"
+    );
+    assert_eq!(
+        p3_suggested_cats[0].name, MANGA_COVER_CATEGORY,
+        "Portada wins over Página de capítulo"
+    );
+
+    // 4. User decisions are preserved and never overwritten:
+    // Accept chapter page on p3:
+    let ch_lbl = cat
+        .label(LabelKind::Category, CHAPTER_PAGE_CATEGORY)
+        .unwrap();
+    cat.accept(p3, ch_lbl).unwrap();
+    // Re-running OCR or reconcile must not overwrite accepted decision:
+    cat.apply_work_matches(p3, &m).unwrap();
+    let p3_after = cat.labels_of(p3).unwrap();
+    let ch_after = p3_after.iter().find(|a| a.label == ch_lbl).unwrap();
+    assert_eq!(
+        ch_after.status,
+        Status::Accepted,
+        "user acceptance must be preserved"
+    );
+
+    // Reject on p2:
+    let cred_lbl = cat.label(LabelKind::Category, CREDITS_CATEGORY).unwrap();
+    cat.reject(p2, cred_lbl).unwrap();
+    cat.apply_work_matches(p2, &m).unwrap();
+    let p2_after = cat.labels_of(p2).unwrap();
+    let cred_after = p2_after.iter().find(|a| a.label == cred_lbl).unwrap();
+    assert_eq!(
+        cred_after.status,
+        Status::Rejected,
+        "user rejection must be preserved"
+    );
 }

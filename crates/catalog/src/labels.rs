@@ -467,6 +467,7 @@ impl Catalog {
              ON CONFLICT(asset_id, label_id) DO UPDATE SET status = ?3",
             params![asset.0, label.0, status],
         )?;
+        let _ = crate::works::reconcile_page_types_in_tx(&self.conn, asset);
         Ok(())
     }
 

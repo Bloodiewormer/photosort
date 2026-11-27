@@ -224,6 +224,9 @@ pub fn analyze_pending_item(
             if catalog.suggest_work_from_path(item.asset, &item.path)? {
                 suggestions += 1;
             }
+            if catalog.suggest_chapter_page_from_path(item.asset, &item.path)? {
+                suggestions += 1;
+            }
             catalog.mark_done(item.asset, STAGE, VERSION)?;
             Ok(Ok(suggestions))
         }

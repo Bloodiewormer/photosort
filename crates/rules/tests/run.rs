@@ -1,7 +1,7 @@
 // Fixtures are created in temp dirs, never inside a real library root.
 #![allow(clippy::disallowed_methods)]
 
-use catalog::{Assignment, Catalog, LabelKind, Source, Status};
+use catalog::{Assignment, CHAPTER_PAGE_CATEGORY, Catalog, LabelKind, Source, Status};
 use fsguard::{LibraryRoot, ensure_writable};
 use image::codecs::gif::GifEncoder;
 use image::codecs::jpeg::JpegEncoder;
@@ -488,4 +488,34 @@ fn run_with_stop_midway_keeps_done_work_and_later_run_completes_identically() {
     for (rel, _) in &files {
         assert_eq!(partial.labels(rel), baseline.labels(rel), "file {rel}");
     }
+}
+
+#[test]
+fn chapter_page_suggested_by_rules_stage() {
+    let files = [
+        (
+            "manga/One Piece - Cap 100 - 05.png",
+            png_bytes(200, 300, None),
+        ),
+        ("manga/normal_photo.png", png_bytes(201, 300, None)),
+    ];
+    let s = Setup::new(&files);
+    let report = run(&s.cat).unwrap();
+    assert_eq!(report.analyzed, 2);
+
+    let ch_labels = s.labels("manga/One Piece - Cap 100 - 05.png");
+    assert!(
+        ch_labels
+            .iter()
+            .any(|a| a.kind == LabelKind::Category && a.name == CHAPTER_PAGE_CATEGORY),
+        "Página de capítulo suggested by rules"
+    );
+
+    let normal_labels = s.labels("manga/normal_photo.png");
+    assert!(
+        !normal_labels
+            .iter()
+            .any(|a| a.kind == LabelKind::Category && a.name == CHAPTER_PAGE_CATEGORY),
+        "Página de capítulo not suggested for normal file"
+    );
 }

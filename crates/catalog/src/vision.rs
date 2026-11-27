@@ -1664,5 +1664,7 @@ fn apply_suggestions_in_tx(
         }
     }
 
+    crate::works::reconcile_page_types_in_tx(tx, asset)?;
+
     Ok(())
 }

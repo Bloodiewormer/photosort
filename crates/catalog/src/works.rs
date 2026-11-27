@@ -9,6 +9,19 @@ use unicode_normalization::UnicodeNormalization;
 pub const PROMO_CATEGORY: &str = "Página promocional";
 pub const CREDITS_CATEGORY: &str = "Créditos";
 pub const RECRUITMENT_CATEGORY: &str = "Reclutamiento";
+pub const AD_CATEGORY: &str = "Anuncio";
+pub const CHAPTER_PAGE_CATEGORY: &str = "Página de capítulo";
+
+/// Scanlation page-type categories in strict descending priority order:
+/// Reclutamiento > Anuncio > Créditos > Índice de proyectos (Página promocional) > Portada de manga > Página de capítulo.
+pub const SCANLATION_PAGE_CATEGORIES: &[&str] = &[
+    RECRUITMENT_CATEGORY,
+    AD_CATEGORY,
+    CREDITS_CATEGORY,
+    PROMO_CATEGORY,
+    crate::vision::MANGA_COVER_CATEGORY,
+    CHAPTER_PAGE_CATEGORY,
+];
 
 const FILENAME_WORK_CONFIDENCE: f64 = 0.85;
 
@@ -60,6 +73,7 @@ pub struct AssetWorkMatches {
     pub promo_confidence: Option<f64>,
     pub credits_confidence: Option<f64>,
     pub recruitment_confidence: Option<f64>,
+    pub ad_confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +226,7 @@ impl WorkMatcher {
                 promo_confidence: None,
                 credits_confidence: None,
                 recruitment_confidence: None,
+                ad_confidence: None,
             };
         }
 
@@ -386,12 +401,18 @@ impl WorkMatcher {
             .collect();
         let credits_confidence = detect_credits_confidence(&visible_lines);
         let recruitment_confidence = detect_recruitment_confidence(&visible_lines);
+        let ad_confidence = if recruitment_confidence.is_some() {
+            None
+        } else {
+            detect_ad_confidence(&visible_lines)
+        };
 
         AssetWorkMatches {
             works,
             promo_confidence,
             credits_confidence,
             recruitment_confidence,
+            ad_confidence,
         }
     }
 }
@@ -695,6 +716,200 @@ fn detect_recruitment_confidence(lines: &[&str]) -> Option<f64> {
             has_general = true;
         }
         for &sig in SUPPORTING_SIGNALS {
+            if contains_phrase(&padded, sig) {
+                support_hits += 1;
+            }
+        }
+    }
+
+    if has_strong && support_hits >= 1 {
+        Some(0.90)
+    } else if has_strong {
+        Some(0.85)
+    } else if has_general && support_hits >= 1 {
+        Some(0.80)
+    } else {
+        None
+    }
+}
+
+/// Detects scanlation advertisement / support pages from curated Spanish and English phrases.
+/// Platforms like Discord, Patreon, or Ko-fi alone without calls to support/visit/follow do not
+/// trigger an ad confidence, preventing ordinary dialogue bubbles mentioning Discord from being flagged.
+/// Recruitment pages take precedence over ads.
+pub(crate) fn detect_ad_confidence(lines: &[&str]) -> Option<f64> {
+    if lines.is_empty() {
+        return None;
+    }
+
+    const STRONG_AD_PHRASES: &[&str] = &[
+        // Spanish call-to-actions / support / platforms
+        "apoyanos en patreon",
+        "apoyanos en ko fi",
+        "apoyanos en kofi",
+        "apoya nuestro trabajo",
+        "apoya al scan",
+        "apoya al fansub",
+        "apoya el proyecto",
+        "visita nuestra pagina",
+        "visita nuestra web",
+        "visita nuestro sitio",
+        "visitanos en",
+        "visita nuestro discord",
+        "siguenos en nuestras redes",
+        "siguenos en redes",
+        "siguenos en twitter",
+        "siguenos en instagram",
+        "siguenos en discord",
+        "unete a nuestro discord",
+        "unete al discord",
+        "servidor de discord",
+        "canal de discord",
+        "comunidad de discord",
+        "descarga nuestra app",
+        "descarga la app",
+        "descarga la aplicacion",
+        "disponible en google play",
+        "disponible en app store",
+        "lee primero en nuestra web",
+        "lee antes en nuestra web",
+        "capitulos adelantados en",
+        "capitulos anticipados",
+        "haz tu donacion",
+        "donaciones por paypal",
+        "patreon com",
+        "ko fi com",
+        "discord gg",
+        // English call-to-actions / support / platforms
+        "support us on patreon",
+        "support us on ko fi",
+        "support us on kofi",
+        "support our work",
+        "support the scan",
+        "support the scanlation",
+        "support this project",
+        "visit our website",
+        "visit our web",
+        "visit our page",
+        "visit our site",
+        "visit us at",
+        "visit us on",
+        "follow our socials",
+        "follow our social media",
+        "follow us on twitter",
+        "follow us on instagram",
+        "follow us on discord",
+        "join our discord",
+        "join our discord server",
+        "discord server",
+        "discord community",
+        "download our app",
+        "download the app",
+        "get it on google play",
+        "available on the app store",
+        "read ahead on",
+        "early access on",
+        "read first on our website",
+        "read first on",
+        "become a patron",
+        "become a supporter",
+        "buy us a coffee",
+        "buy me a coffee",
+        "donate on paypal",
+        "paypal me",
+    ];
+
+    const GENERAL_AD_PHRASES: &[&str] = &[
+        // Spanish
+        "apoyanos",
+        "apoya",
+        "donaciones",
+        "donacion",
+        "donar",
+        "visitanos",
+        "visita la web",
+        "visita el sitio",
+        "siguenos",
+        "siguenos para mas",
+        "capitulos adelantados",
+        "capitulos anticipados",
+        "lee primero",
+        "nuestra web",
+        "nuestra pagina",
+        "nuestro sitio",
+        "nuestra app",
+        // English
+        "support us",
+        "donate",
+        "donations",
+        "donation",
+        "visit us",
+        "follow us",
+        "follow us for more",
+        "early access",
+        "read ahead",
+        "read first",
+        "our website",
+        "our webpage",
+        "our app",
+    ];
+
+    const SUPPORTING_AD_SIGNALS: &[&str] = &[
+        "patreon",
+        "ko fi",
+        "kofi",
+        "paypal",
+        "discord",
+        "fansub",
+        "scanlation",
+        "scans",
+        "scan",
+        "app",
+        "aplicacion",
+        "web",
+        "website",
+        "redes",
+        "socials",
+        "twitter",
+        "instagram",
+        "tiktok",
+        "sub",
+        "subscription",
+        "suscripcion",
+        "donar",
+        "donate",
+        "donation",
+        "donacion",
+        "donaciones",
+        "vip",
+    ];
+
+    let mut has_strong = false;
+    let mut has_general = false;
+    let mut support_hits = 0usize;
+
+    for &raw_line in lines {
+        let norm_colon = normalize_phrase_line(raw_line);
+        if norm_colon.is_empty() {
+            continue;
+        }
+        let plain = norm_colon.replace(':', " ");
+        let plain_collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        let padded = format!(" {plain_collapsed} ");
+
+        if STRONG_AD_PHRASES
+            .iter()
+            .any(|p| contains_phrase(&padded, p))
+        {
+            has_strong = true;
+        }
+        if GENERAL_AD_PHRASES
+            .iter()
+            .any(|p| contains_phrase(&padded, p))
+        {
+            has_general = true;
+        }
+        for &sig in SUPPORTING_AD_SIGNALS {
             if contains_phrase(&padded, sig) {
                 support_hits += 1;
             }
@@ -1087,6 +1302,226 @@ fn suggest_ownership(
             parsed.page.map(i64::from),
             FILENAME_WORK_CONFIDENCE
         ])?;
+    Ok(changed > 0)
+}
+
+/// Reconciles scanlation page-type suggestions for `asset` according to strict descending priority:
+/// Reclutamiento > Anuncio > Créditos > Página promocional > Portada de manga > Página de capítulo.
+/// Enforces at most one page-type suggestion per asset when multiple candidates exist.
+/// Decisions made by the user (`accepted` or `rejected`) are NEVER overwritten.
+pub(crate) fn reconcile_page_types_in_tx(
+    conn: &rusqlite::Connection,
+    asset: AssetId,
+) -> Result<(), CatalogError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT al.label_id, l.name, al.status
+         FROM asset_label al
+         JOIN label l ON l.id = al.label_id
+         WHERE al.asset_id = ?1
+           AND l.kind = 'category'
+           AND l.name IN (
+               'Reclutamiento',
+               'Anuncio',
+               'Créditos',
+               'Página promocional',
+               'Portada de manga',
+               'Página de capítulo'
+           )",
+    )?;
+
+    struct PageTypeRow {
+        label_id: i64,
+        name: String,
+        status: String,
+    }
+
+    let rows: Vec<PageTypeRow> = stmt
+        .query_map([asset.0], |r| {
+            Ok(PageTypeRow {
+                label_id: r.get(0)?,
+                name: r.get(1)?,
+                status: r.get(2)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+
+    let has_accepted = rows.iter().any(|r| r.status == "accepted");
+    if has_accepted {
+        conn.prepare_cached(
+            "DELETE FROM asset_label
+             WHERE asset_id = ?1
+               AND status = 'suggested'
+               AND label_id IN (
+                   SELECT id FROM label
+                   WHERE kind = 'category'
+                     AND name IN (
+                         'Reclutamiento',
+                         'Anuncio',
+                         'Créditos',
+                         'Página promocional',
+                         'Portada de manga',
+                         'Página de capítulo'
+                     )
+               )",
+        )?
+        .execute([asset.0])?;
+        return Ok(());
+    }
+
+    let suggested: Vec<&PageTypeRow> = rows.iter().filter(|r| r.status == "suggested").collect();
+    if suggested.len() <= 1 {
+        return Ok(());
+    }
+
+    let winner = suggested.into_iter().min_by_key(|r| {
+        SCANLATION_PAGE_CATEGORIES
+            .iter()
+            .position(|&c| c == r.name)
+            .unwrap_or(usize::MAX)
+    });
+
+    if let Some(win) = winner {
+        conn.prepare_cached(
+            "DELETE FROM asset_label
+             WHERE asset_id = ?1
+               AND status = 'suggested'
+               AND label_id <> ?2
+               AND label_id IN (
+                   SELECT id FROM label
+                   WHERE kind = 'category'
+                     AND name IN (
+                         'Reclutamiento',
+                         'Anuncio',
+                         'Créditos',
+                         'Página promocional',
+                         'Portada de manga',
+                         'Página de capítulo'
+                     )
+               )",
+        )?
+        .execute(params![asset.0, win.label_id])?;
+    }
+
+    Ok(())
+}
+
+/// Suggests `Página de capítulo` from filename when a chapter marker is present and the page
+/// is not promotional, credits, recruitment, advertisement, or cover.
+pub(crate) fn suggest_chapter_page_in_tx(
+    conn: &rusqlite::Connection,
+    asset: AssetId,
+    has_chapter: bool,
+) -> Result<bool, CatalogError> {
+    if !has_chapter {
+        let label_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                [CHAPTER_PAGE_CATEGORY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = label_id {
+            conn.execute(
+                "DELETE FROM asset_label
+                 WHERE asset_id = ?1
+                   AND label_id = ?2
+                   AND source = 'rules'
+                   AND status = 'suggested'",
+                params![asset.0, id],
+            )?;
+        }
+        return Ok(false);
+    }
+
+    let existing_status: Option<String> = conn
+        .query_row(
+            "SELECT al.status
+             FROM asset_label al
+             JOIN label l ON l.id = al.label_id
+             WHERE al.asset_id = ?1 AND l.kind = 'category' AND l.name = ?2",
+            params![asset.0, CHAPTER_PAGE_CATEGORY],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    if let Some(status) = existing_status
+        && (status == "accepted" || status == "rejected")
+    {
+        return Ok(false);
+    }
+
+    let has_higher_priority: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM asset_label al
+             JOIN label l ON l.id = al.label_id
+             WHERE al.asset_id = ?1
+               AND l.kind = 'category'
+               AND l.name IN (
+                   'Reclutamiento',
+                   'Anuncio',
+                   'Créditos',
+                   'Página promocional',
+                   'Portada de manga'
+               )
+               AND al.status IN ('accepted', 'suggested')
+         )",
+        [asset.0],
+        |r| r.get(0),
+    )?;
+
+    if has_higher_priority {
+        let label_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                [CHAPTER_PAGE_CATEGORY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = label_id {
+            conn.execute(
+                "DELETE FROM asset_label
+                 WHERE asset_id = ?1
+                   AND label_id = ?2
+                   AND source = 'rules'
+                   AND status = 'suggested'",
+                params![asset.0, id],
+            )?;
+        }
+        return Ok(false);
+    }
+
+    let label_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+            [CHAPTER_PAGE_CATEGORY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let id = match label_id {
+        Some(id) => id,
+        None => {
+            conn.execute(
+                "INSERT OR IGNORE INTO label (kind, name) VALUES ('category', ?1)",
+                [CHAPTER_PAGE_CATEGORY],
+            )?;
+            conn.query_row(
+                "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                [CHAPTER_PAGE_CATEGORY],
+                |r| r.get(0),
+            )?
+        }
+    };
+
+    let changed = conn.execute(
+        "INSERT INTO asset_label (asset_id, label_id, source, confidence, status)
+         VALUES (?1, ?2, 'rules', ?3, 'suggested')
+         ON CONFLICT(asset_id, label_id) DO UPDATE SET source = 'rules', confidence = ?3
+         WHERE status = 'suggested'",
+        params![asset.0, id, FILENAME_WORK_CONFIDENCE],
+    )?;
+
+    reconcile_page_types_in_tx(conn, asset)?;
+
     Ok(changed > 0)
 }
 
@@ -1526,12 +1961,30 @@ impl Catalog {
             }
         }
 
-        // 3. Synchronize OCR-suggested manga page-type categories (promo, credits, recruitment).
-        for (cat_name, confidence) in [
-            (PROMO_CATEGORY, result.promo_confidence),
-            (CREDITS_CATEGORY, result.credits_confidence),
-            (RECRUITMENT_CATEGORY, result.recruitment_confidence),
+        // 3. Synchronize OCR-suggested manga page-type categories.
+        // Pick the single winner among OCR page types according to priority:
+        // Reclutamiento > Anuncio > Créditos > Página promocional.
+        let ocr_winner: Option<(&str, f64)> = if let Some(conf) = result.recruitment_confidence {
+            Some((RECRUITMENT_CATEGORY, conf))
+        } else if let Some(conf) = result.ad_confidence {
+            Some((AD_CATEGORY, conf))
+        } else if let Some(conf) = result.credits_confidence {
+            Some((CREDITS_CATEGORY, conf))
+        } else if let Some(conf) = result.promo_confidence {
+            Some((PROMO_CATEGORY, conf))
+        } else {
+            None
+        };
+
+        for &cat_name in &[
+            RECRUITMENT_CATEGORY,
+            AD_CATEGORY,
+            CREDITS_CATEGORY,
+            PROMO_CATEGORY,
         ] {
+            if Some(cat_name) == ocr_winner.map(|(c, _)| c) {
+                continue;
+            }
             let label_id: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
@@ -1549,30 +2002,40 @@ impl Catalog {
                     params![asset.0, id],
                 )?;
             }
-            if let Some(conf) = confidence {
-                let id = match label_id {
-                    Some(id) => id,
-                    None => {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO label (kind, name) VALUES ('category', ?1)",
-                            [cat_name],
-                        )?;
-                        tx.query_row(
-                            "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
-                            [cat_name],
-                            |r| r.get(0),
-                        )?
-                    }
-                };
-                tx.execute(
-                    "INSERT INTO asset_label (asset_id, label_id, source, confidence, status)
-                     VALUES (?1, ?2, 'ocr', ?3, 'suggested')
-                     ON CONFLICT(asset_id, label_id) DO UPDATE SET source = 'ocr', confidence = ?3
-                     WHERE status = 'suggested'",
-                    params![asset.0, id, conf.clamp(0.0, 1.0)],
-                )?;
-            }
         }
+
+        if let Some((cat_name, conf)) = ocr_winner {
+            let label_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                    [cat_name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let id = match label_id {
+                Some(id) => id,
+                None => {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO label (kind, name) VALUES ('category', ?1)",
+                        [cat_name],
+                    )?;
+                    tx.query_row(
+                        "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                        [cat_name],
+                        |r| r.get(0),
+                    )?
+                }
+            };
+            tx.execute(
+                "INSERT INTO asset_label (asset_id, label_id, source, confidence, status)
+                 VALUES (?1, ?2, 'ocr', ?3, 'suggested')
+                 ON CONFLICT(asset_id, label_id) DO UPDATE SET source = 'ocr', confidence = ?3
+                 WHERE status = 'suggested'",
+                params![asset.0, id, conf.clamp(0.0, 1.0)],
+            )?;
+        }
+
+        reconcile_page_types_in_tx(&tx, asset)?;
 
         tx.commit()?;
         Ok(result)
@@ -1651,9 +2114,30 @@ impl Catalog {
         suggest_ownership(&self.conn, asset, work_id, &parsed)
     }
 
+    /// Suggests `Página de capítulo` from filename if the stem contains a chapter marker and
+    /// the page is not promotional, credits, recruitment, advertisement, or cover.
+    pub fn suggest_chapter_page_from_path(
+        &self,
+        asset: AssetId,
+        path: &Path,
+    ) -> Result<bool, CatalogError> {
+        let has_chapter = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(parse_work_from_stem)
+            .is_some();
+        suggest_chapter_page_in_tx(&self.conn, asset, has_chapter)
+    }
+
+    /// Reconciles scanlation page-type suggestions for `asset` so that at most one suggestion
+    /// remains according to priority, preserving any user decisions.
+    pub fn reconcile_page_types(&self, asset: AssetId) -> Result<(), CatalogError> {
+        reconcile_page_types_in_tx(&self.conn, asset)
+    }
+
     /// Scans present locations (optionally restricted to `roots`) and idempotently suggests
-    /// filename-based work ownership for every asset whose file name matches an existing work or
-    /// alias. Never creates works and never touches `accepted`/`rejected` rows.
+    /// filename-based work ownership and chapter-page status for every asset whose file name
+    /// matches. Never creates works and never touches `accepted`/`rejected` rows.
     /// Returns `(scanned_assets, matched_assets)`.
     pub fn apply_filename_works(
         &mut self,
@@ -1711,6 +2195,14 @@ impl Catalog {
                 } else {
                     del_stale.execute([asset.0])?;
                 }
+
+                let has_chapter = copies.iter().any(|(_, path)| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(parse_work_from_stem)
+                        .is_some()
+                });
+                suggest_chapter_page_in_tx(&tx, asset, has_chapter)?;
             }
         }
         tx.commit()?;

@@ -33,8 +33,9 @@ pub use vision::{
     independent_ordering_confidence,
 };
 pub use works::{
-    AssetWork, AssetWorkMatches, CREDITS_CATEGORY, PROMO_CATEGORY, ParsedWorkFilename,
-    RECRUITMENT_CATEGORY, WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal, WorkSummary,
+    AD_CATEGORY, AssetWork, AssetWorkMatches, CHAPTER_PAGE_CATEGORY, CREDITS_CATEGORY,
+    PROMO_CATEGORY, ParsedWorkFilename, RECRUITMENT_CATEGORY, SCANLATION_PAGE_CATEGORIES,
+    WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal, WorkSummary,
     extract_work_title_from_stem, parse_work_from_stem, work_match_key,
 };
 
