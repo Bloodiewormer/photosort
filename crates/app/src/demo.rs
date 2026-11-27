@@ -1019,6 +1019,27 @@ pub fn prepare_demo(
         seeded_assignments += 1;
     }
 
+    // Seed a realistic subcategory tree under Manga so demo screenshots showcase hierarchy.
+    let manga_id = cat
+        .label(LabelKind::Category, "Manga")
+        .map_err(|e| e.to_string())?;
+    let scanlation_id = cat
+        .create_category("Scanlation", Some(manga_id))
+        .map_err(|e| e.to_string())?;
+    let promo_sub_id = cat
+        .create_category("Página promocional", Some(scanlation_id))
+        .map_err(|e| e.to_string())?;
+    if let Ok(cover_id) = cat.label(LabelKind::Category, catalog::MANGA_COVER_CATEGORY) {
+        let _ = cat.move_category(cover_id, Some(manga_id));
+    }
+    if let Some(spec) = specs.first()
+        && let Some(asset) = cat
+            .asset_of(&canonical_root.join(&spec.rel_path))
+            .map_err(|e| e.to_string())?
+    {
+        cat.accept(asset, promo_sub_id).map_err(|e| e.to_string())?;
+    }
+
     let duplicate_groups = cat.duplicates().map_err(|e| e.to_string())?.len();
 
     // Seed synthetic OCR lines on the first sorted image (shown in the gallery inspector)

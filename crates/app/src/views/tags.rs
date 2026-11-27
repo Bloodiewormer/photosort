@@ -1,7 +1,10 @@
 use crate::model::count_phrase;
 use crate::theme::{self, Palette};
+use crate::views::label_actions::{LabelAction, draw_label_menu_items, flatten_category_tree};
 use crate::vision_worker::TagsApplyEvent;
-use catalog::{Catalog, DEFAULT_CUSTOM_THRESHOLD, LabelKind, RuleId, RuleMode, VisionRule};
+use catalog::{
+    Catalog, DEFAULT_CUSTOM_THRESHOLD, LabelKind, LabelNode, RuleId, RuleMode, VisionRule,
+};
 use eframe::egui::{
     self, Align, CornerRadius, Frame, Key, Layout, Margin, ProgressBar, RichText, ScrollArea,
     Stroke,
@@ -140,6 +143,7 @@ pub struct TagsViewOutcome {
     pub cancel_apply: bool,
     /// `(title, texts, threshold)` to rank in the gallery on a background thread.
     pub rank_request: Option<(String, Vec<String>, Option<f32>)>,
+    pub label_action: Option<LabelAction>,
     pub status_notice: Option<String>,
     pub error: Option<String>,
 }
@@ -158,6 +162,7 @@ pub fn draw(
     palette: &Palette,
     state: &mut TagsViewState,
     rules: &[VisionRule],
+    all_labels: &[LabelNode],
     analyzed_count: usize,
     cat: Option<&mut Catalog>,
     apply_running: bool,
@@ -661,10 +666,15 @@ pub fn draw(
 
             ui.add_space(theme::SPACE_MD);
 
-            // Scrollable rules list grouped by mode
+            // Scrollable catalog tree + rules list grouped by mode
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    draw_catalog_labels_section(ui, palette, all_labels, &mut outcome);
+                    ui.add_space(theme::SPACE_MD);
+                    ui.separator();
+                    ui.add_space(theme::SPACE_MD);
+
                     let type_rules: Vec<&VisionRule> = rules
                         .iter()
                         .filter(|r| r.mode == RuleMode::Type)
@@ -932,4 +942,131 @@ pub fn draw(
     }
 
     outcome
+}
+
+fn draw_catalog_labels_section(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    all_labels: &[LabelNode],
+    outcome: &mut TagsViewOutcome,
+) {
+    let cat_tree = flatten_category_tree(all_labels, true);
+    let tags: Vec<&LabelNode> = all_labels
+        .iter()
+        .filter(|l| l.kind == LabelKind::Tag)
+        .collect();
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Categorías y etiquetas del catálogo")
+                .size(theme::FONT_HEADING)
+                .strong(),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("Nueva etiqueta").clicked() {
+                outcome.label_action = Some(LabelAction::CreateTag);
+            }
+            if ui.button("Nueva categoría").clicked() {
+                outcome.label_action = Some(LabelAction::CreateCategory { parent: None });
+            }
+        });
+    });
+    ui.label(
+        RichText::new(
+            "Organiza categorías en árbol o gestiona etiquetas; ninguna acción modifica archivos",
+        )
+        .size(theme::FONT_SMALL)
+        .color(palette.text_secondary.color32()),
+    );
+    ui.add_space(theme::SPACE_SM);
+
+    egui::CollapsingHeader::new(RichText::new(format!("Categorías ({})", cat_tree.len())).strong())
+        .id_salt("tags_view_catalog_categories")
+        .default_open(true)
+        .show(ui, |ui| {
+            if cat_tree.is_empty() {
+                ui.label(
+                    RichText::new("Sin categorías todavía")
+                        .size(theme::FONT_SMALL)
+                        .color(palette.text_secondary.color32()),
+                );
+            } else {
+                for (node, depth) in cat_tree {
+                    draw_catalog_label_row(ui, palette, node, depth, outcome);
+                }
+            }
+        });
+
+    ui.add_space(theme::SPACE_XS);
+    egui::CollapsingHeader::new(RichText::new(format!("Etiquetas ({})", tags.len())).strong())
+        .id_salt("tags_view_catalog_tags")
+        .default_open(false)
+        .show(ui, |ui| {
+            if tags.is_empty() {
+                ui.label(
+                    RichText::new("Sin etiquetas todavía")
+                        .size(theme::FONT_SMALL)
+                        .color(palette.text_secondary.color32()),
+                );
+            } else {
+                for node in tags {
+                    draw_catalog_label_row(ui, palette, node, 0, outcome);
+                }
+            }
+        });
+}
+
+fn draw_catalog_label_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    node: &LabelNode,
+    depth: usize,
+    outcome: &mut TagsViewOutcome,
+) {
+    let row_resp = Frame::new()
+        .fill(palette.bg_card.color32())
+        .stroke(Stroke::new(1.0, palette.border.color32()))
+        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+        .inner_margin(Margin::symmetric(
+            theme::SPACE_SM as i8,
+            theme::SPACE_XS as i8,
+        ))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if depth > 0 {
+                    ui.add_space((depth.min(6) as f32) * 16.0);
+                    ui.label(
+                        RichText::new("└")
+                            .size(theme::FONT_SMALL)
+                            .color(palette.text_hint.color32()),
+                    );
+                }
+                ui.label(
+                    RichText::new(&node.name)
+                        .color(palette.text_primary.color32())
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(count_phrase(node.images.max(0) as usize, "foto", "fotos"))
+                        .size(theme::FONT_SMALL)
+                        .color(palette.text_hint.color32()),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.menu_button("Acciones", |ui| {
+                        if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
+                            outcome.label_action = Some(act);
+                        }
+                    });
+                });
+            });
+        })
+        .response
+        .interact(egui::Sense::click());
+
+    row_resp.context_menu(|ui| {
+        if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
+            outcome.label_action = Some(act);
+        }
+    });
+    ui.add_space(2.0);
 }

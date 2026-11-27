@@ -10,6 +10,7 @@ use crate::views;
 use crate::views::context_menu::{PhotoMenuAction, PhotoMenuContext, PhotoMenuState};
 use crate::views::gallery::SimilarityView;
 use crate::views::inspector::InspectorState;
+use crate::views::label_actions::LabelActionModal;
 use crate::views::settings::SettingsViewState;
 use crate::views::shell::{ActiveView, SidebarState};
 use crate::views::tags::{TagsApplyState, TagsViewState};
@@ -18,7 +19,7 @@ use crate::vision_worker::{TagsApplyEvent, TagsApplyWorker, VisionRankResult, Vi
 use crate::worker::{Notify, PreviewWorker, ThumbPool, ThumbnailProvider};
 use crate::works_worker::{WorksEvent, WorksWorker};
 use catalog::{
-    AssetId, Catalog, Counts, DuplicateGroup, Entry, LabelCount, LabelId, ReviewedCounts,
+    AssetId, Catalog, Counts, DuplicateGroup, Entry, LabelId, LabelNode, ReviewedCounts,
     ReviewedFilter, SCREENSHOT_CATEGORY, StageErrorRecord, Status, VisionRule, WorkSummary,
 };
 use eframe::egui::{self, Key, Modifiers, Pos2, TextureHandle, TextureOptions};
@@ -44,7 +45,7 @@ pub struct PhotosortApp {
     reviewed_counts: ReviewedCounts,
     reviewed_assets: HashSet<AssetId>,
     root_counts: HashMap<PathBuf, usize>,
-    labels_in_use: Vec<LabelCount>,
+    all_labels: Vec<LabelNode>,
     works: Vec<WorkSummary>,
     works_view: WorksViewState,
     vision_rules: Vec<VisionRule>,
@@ -61,6 +62,7 @@ pub struct PhotosortApp {
     filter: FilterState,
     sidebar_state: SidebarState,
     settings_state: SettingsViewState,
+    label_modal: LabelActionModal,
     selection: Selection,
     last_columns: usize,
     last_primary_cell_pos: Option<Pos2>,
@@ -190,7 +192,7 @@ impl PhotosortApp {
             reviewed_counts: ReviewedCounts::default(),
             reviewed_assets: HashSet::new(),
             root_counts: HashMap::new(),
-            labels_in_use: Vec::new(),
+            all_labels: Vec::new(),
             works: Vec::new(),
             works_view: WorksViewState::default(),
             vision_rules: Vec::new(),
@@ -206,6 +208,7 @@ impl PhotosortApp {
             filter: FilterState::default(),
             sidebar_state: SidebarState::default(),
             settings_state: SettingsViewState::default(),
+            label_modal: LabelActionModal::default(),
             selection: Selection::default(),
             last_columns: 1,
             last_primary_cell_pos: None,
@@ -322,8 +325,8 @@ impl PhotosortApp {
                 self.root_counts.insert(root.clone(), n);
             }
         }
-        match cat.labels_in_use_in_roots(&roots) {
-            Ok(list) => self.labels_in_use = list,
+        match cat.list_labels_in_roots(&roots) {
+            Ok(list) => self.all_labels = list,
             Err(e) => self.banner_error = Some(format!("Error al cargar etiquetas: {e}")),
         }
         match cat.list_works_in_roots(&roots) {
@@ -954,8 +957,8 @@ impl PhotosortApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.photo_menu.is_some() {
-            // While the photo context menu is open, it owns Arrow/Enter/Escape keys.
+        if self.photo_menu.is_some() || self.label_modal.is_open() {
+            // While a modal or context menu is open, it owns keyboard keys.
             return;
         }
         let wants_text = ctx.egui_wants_keyboard_input();
@@ -1236,10 +1239,13 @@ impl eframe::App for PhotosortApp {
             self.duplicate_groups.len(),
             self.works.len(),
             self.vision_rules.len(),
-            &self.labels_in_use,
+            &self.all_labels,
             &mut self.filter,
             &mut self.sidebar_state,
         );
+        if let Some(action) = sidebar_out.label_action {
+            self.label_modal.open(action, &self.all_labels);
+        }
         if let Some(view) = sidebar_out.switch_view {
             if view != ActiveView::Gallery {
                 self.viewer_open = false;
@@ -1630,12 +1636,16 @@ impl eframe::App for PhotosortApp {
                     palette,
                     &mut self.tags_view,
                     &self.vision_rules,
+                    &self.all_labels,
                     self.vision_analyzed_count,
                     self.catalog.as_mut(),
                     self.tags_apply_worker.is_some(),
                     self.vision_rank_worker.is_some(),
                     other_heavy,
                 );
+                if let Some(action) = outcome.label_action {
+                    self.label_modal.open(action, &self.all_labels);
+                }
                 if let Some(err) = outcome.error {
                     self.banner_error = Some(err);
                 }
@@ -1716,6 +1726,20 @@ impl eframe::App for PhotosortApp {
                     self.retry_single_asset(asset);
                 }
             }
+        }
+
+        // Label management modal (create subcategory, rename, move, merge, delete)
+        let modal_out =
+            self.label_modal
+                .draw(&ctx, palette, self.catalog.as_mut(), &self.all_labels);
+        if let Some(removed) = modal_out.removed_label {
+            self.filter.set_chip(removed, None);
+        }
+        if let Some(notice) = modal_out.status_notice {
+            self.status_notice = Some(notice);
+        }
+        if modal_out.catalog_mutated {
+            self.reload_catalog();
         }
 
         // Export wizard modal (when opened from selection bar or photo context menu)

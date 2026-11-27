@@ -10,8 +10,8 @@ pub use analysis::{Pending, ReviewedCounts, StageErrorRecord, sanitize_stage_err
 pub use browse::{Entry, LabelCount, Sort};
 pub use dupes::DuplicateGroup;
 pub use labels::{
-    AssetId, Assignment, Filter, LabelId, LabelKind, ReviewItem, ReviewedFilter, Source, StageSpec,
-    Status,
+    AssetId, Assignment, Filter, LabelId, LabelKind, LabelNode, RenameOutcome, ReviewItem,
+    ReviewedFilter, Source, StageSpec, Status,
 };
 pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
@@ -65,9 +65,10 @@ CREATE INDEX IF NOT EXISTS location_missing_asset ON location(missing, asset_id)
 CREATE INDEX IF NOT EXISTS location_asset_missing ON location(asset_id, missing);
 CREATE INDEX IF NOT EXISTS location_root_missing ON location(root, missing, asset_id);
 CREATE TABLE IF NOT EXISTS label (
-    id   INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('category', 'tag', 'entity')),
-    name TEXT NOT NULL COLLATE NOCASE,
+    id        INTEGER PRIMARY KEY,
+    kind      TEXT NOT NULL CHECK (kind IN ('category', 'tag', 'entity')),
+    name      TEXT NOT NULL COLLATE NOCASE,
+    parent_id INTEGER REFERENCES label(id),
     UNIQUE (kind, name)
 );
 CREATE TABLE IF NOT EXISTS asset_label (
@@ -199,6 +200,7 @@ CREATE INDEX IF NOT EXISTS stage_error_stage ON stage_error(stage, asset_id);
 pub enum CatalogError {
     Db(rusqlite::Error),
     Io(std::io::Error),
+    InvalidOperation(String),
 }
 
 impl fmt::Display for CatalogError {
@@ -206,6 +208,7 @@ impl fmt::Display for CatalogError {
         match self {
             Self::Db(e) => write!(f, "catalog database error: {e}"),
             Self::Io(e) => write!(f, "could not read the library: {e}"),
+            Self::InvalidOperation(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -270,8 +273,64 @@ impl Catalog {
         conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         conn.execute_batch(SCHEMA)?;
         let mut cat = Self { conn };
+        cat.migrate_label_parent()?;
         cat.seed_builtin_vision_rules()?;
         Ok(cat)
+    }
+
+    /// Ensures `label.parent_id` and its index exist on older catalogs without writing when up to date.
+    fn migrate_label_parent(&mut self) -> Result<(), CatalogError> {
+        let has_col = self.label_has_parent_id()?;
+        let has_idx = self.has_label_parent_index()?;
+        if has_col && has_idx {
+            return Ok(());
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_col_now = {
+            let mut stmt = tx.prepare("PRAGMA table_info(label)")?;
+            let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            let mut found = false;
+            for c in cols {
+                if c? == "parent_id" {
+                    found = true;
+                }
+            }
+            found
+        };
+        if !has_col_now {
+            tx.execute_batch(
+                "ALTER TABLE label ADD COLUMN parent_id INTEGER REFERENCES label(id);",
+            )?;
+        }
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS label_parent ON label(parent_id);")?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn label_has_parent_id(&self) -> Result<bool, CatalogError> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(label)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for c in cols {
+            if c? == "parent_id" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn has_label_parent_index(&self) -> Result<bool, CatalogError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'label_parent'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Adds new and changed images and flags the ones that disappeared. A file is only read again when
