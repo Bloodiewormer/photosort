@@ -91,41 +91,61 @@ pub enum GuardError {
     Io(io::Error),
 }
 
+impl GuardError {
+    /// True when a link is what got a path refused. For paths grown from an already validated
+    /// [`DestPath`], ending up inside a library can only happen through a link.
+    pub fn is_link(&self) -> bool {
+        matches!(
+            self,
+            Self::InsideLibrary { .. } | Self::LeavesDestination { .. } | Self::BrokenLink(_)
+        )
+    }
+}
+
+/// The reason of an I/O error, in Spanish for the common cases. Any other error keeps its own text:
+/// ours is already in Spanish, and the system's comes in the language of Windows.
+pub fn io_reason(e: &io::Error) -> String {
+    // Only the system's errors are replaced: ours carry an inner error that says what happened.
+    let known = match e.kind() {
+        _ if e.get_ref().is_some() => None,
+        io::ErrorKind::NotFound => Some("no se encontró el archivo o la carpeta"),
+        io::ErrorKind::PermissionDenied => Some("acceso denegado"),
+        io::ErrorKind::StorageFull => Some("no queda espacio en el disco"),
+        io::ErrorKind::AlreadyExists => Some("ya existe un archivo con ese nombre"),
+        _ => None,
+    };
+    known.map_or_else(|| e.to_string(), str::to_string)
+}
+
+/// Only the last component: the full path is already shown next to the message, or adds nothing.
+fn short(path: &Path) -> std::path::Display<'_> {
+    Path::new(path.file_name().unwrap_or(path.as_os_str())).display()
+}
+
 impl fmt::Display for GuardError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InsideLibrary { path, root } => {
-                write!(
-                    f,
-                    "refusing to write inside library root {}: {}",
-                    root.display(),
-                    path.display()
-                )
+            Self::InsideLibrary { .. } => {
+                f.write_str("la ruta lleva dentro de una biblioteca, donde no se escribe nada")
             }
-            Self::ContainsLibrary { path, root } => {
-                write!(
-                    f,
-                    "{} contains the library {}; choose a folder outside every library",
-                    path.display(),
-                    root.display()
-                )
-            }
-            Self::ParentDirComponent(path) => {
-                write!(f, "paths with `..` are not accepted: {}", path.display())
-            }
-            Self::InvalidName(name) => write!(f, "{name:?} is not a plain file name"),
-            Self::LeavesDestination { path, target } => {
-                write!(
-                    f,
-                    "refusing to follow a link that leaves the destination: {} leads to {}",
-                    path.display(),
-                    target.display()
-                )
-            }
-            Self::BrokenLink(path) => {
-                write!(f, "refusing to follow a broken link: {}", path.display())
-            }
-            Self::Io(e) => write!(f, "could not resolve path: {e}"),
+            Self::ContainsLibrary { root, .. } => write!(
+                f,
+                "la carpeta contiene la biblioteca «{}»; elige otra fuera de todas las bibliotecas",
+                short(root)
+            ),
+            Self::ParentDirComponent(_) => f.write_str("no se aceptan rutas con «..»"),
+            Self::InvalidName(name) => write!(
+                f,
+                "«{}» no es un nombre de archivo válido",
+                name.to_string_lossy()
+            ),
+            Self::LeavesDestination { path, .. } => write!(
+                f,
+                "el enlace «{}» sale de la carpeta de destino",
+                short(path)
+            ),
+            Self::BrokenLink(path) => write!(f, "el enlace «{}» está roto", short(path)),
+            Self::Io(e) => write!(f, "no se pudo comprobar la ruta: {}", io_reason(e)),
         }
     }
 }

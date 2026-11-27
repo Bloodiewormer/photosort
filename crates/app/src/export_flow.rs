@@ -6,7 +6,7 @@ use export::{
     Control, ExportItem, ExportOptions, ExportProgress, ExportReport, Layout, Outcome, Preview,
     export_with_options, preview_with_options,
 };
-use fsguard::{DestPath, GuardError, LibraryRoot, ensure_export_dir};
+use fsguard::{DestPath, GuardError, LibraryRoot, ensure_export_dir, io_reason};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -168,6 +168,8 @@ pub struct ExportSummary {
     pub dest: PathBuf,
     pub copied: usize,
     pub already_present: usize,
+    /// Not exported because the guard refused to follow a link in the destination.
+    pub blocked: Vec<(PathBuf, String)>,
     pub failed: Vec<(PathBuf, String)>,
     /// Exported files where something optional (XMP sidecar, embedded tags) did not happen.
     pub warnings: Vec<(PathBuf, String)>,
@@ -180,11 +182,13 @@ impl ExportSummary {
     pub fn from_report(dest: PathBuf, report: ExportReport) -> Self {
         let mut copied = 0usize;
         let mut already_present = 0usize;
+        let mut blocked = Vec::new();
         let mut failed = Vec::new();
         for (src, outcome) in report.outcomes {
             match outcome {
                 Outcome::Copied(_) => copied += 1,
                 Outcome::AlreadyPresent(_) => already_present += 1,
+                Outcome::Blocked(reason) => blocked.push((src, reason)),
                 Outcome::Failed(reason) => failed.push((src, reason)),
             }
         }
@@ -192,6 +196,7 @@ impl ExportSummary {
             dest,
             copied,
             already_present,
+            blocked,
             failed,
             warnings: report.warnings,
             stopped: report.stopped,
@@ -263,7 +268,7 @@ impl ExportWorker {
                     let _ = tx.send(ExportWorkerEvent::Finished(report));
                 }
                 Err(e) => {
-                    let _ = tx.send(ExportWorkerEvent::Failed(e.to_string()));
+                    let _ = tx.send(ExportWorkerEvent::Failed(io_reason(&e)));
                 }
             }
             if let Some(cb) = &notify {
@@ -500,7 +505,7 @@ impl ExportWizard {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let res = preview_with_options(&items, &dest_bg, options).map_err(|e| e.to_string());
+            let res = preview_with_options(&items, &dest_bg, options).map_err(|e| io_reason(&e));
             let _ = tx.send((gen_id, res));
             if let Some(cb) = &notify {
                 cb();

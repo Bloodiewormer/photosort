@@ -462,14 +462,19 @@ fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
             embed_jpeg_tags: true,
         };
 
-        preview_with_options(&items, &dest, options).unwrap();
+        // The blocked item is counted apart from the unreadable ones.
+        let p = preview_with_options(&items, &dest, options).unwrap();
+        assert_eq!((p.blocked, p.unreadable, p.files), (1, 0, 1), "{name}");
         let report =
             export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
 
         assert_eq!(before, snapshot(&library), "{name}: the library changed");
         match &report.outcomes[0].1 {
-            Outcome::Failed(reason) => assert!(reason.contains("library"), "{reason}"),
-            other => panic!("{name}: expected a failure, got {other:?}"),
+            Outcome::Blocked(reason) => assert_eq!(
+                reason,
+                "la ruta lleva dentro de una biblioteca, donde no se escribe nada"
+            ),
+            other => panic!("{name}: expected a blocked item, got {other:?}"),
         }
         assert!(matches!(report.outcomes[1].1, Outcome::Copied(_)));
         assert!(dest_path.join(copied).is_file());
@@ -491,7 +496,9 @@ fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
     assert_eq!(before, snapshot(&library), "sidecar: the library changed");
     assert!(matches!(report.outcomes[0].1, Outcome::Copied(_)));
     assert!(
-        report.warnings[0].1.contains("XMP sidecar not written"),
+        report.warnings[0]
+            .1
+            .starts_with("no se escribió el archivo XMP: la ruta lleva dentro de una biblioteca"),
         "{:?}",
         report.warnings
     );

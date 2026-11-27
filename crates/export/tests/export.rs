@@ -192,7 +192,10 @@ fn exporting_twice_creates_no_duplicates() {
 fn a_failed_item_is_reported_and_the_rest_is_still_exported() {
     let s = setup();
     let report = export(&[s.item("missing.jpg"), s.item("a.jpg")], &s.dest).unwrap();
-    assert!(matches!(Setup::outcome(&report, 0), Outcome::Failed(_)));
+    assert_eq!(
+        *Setup::outcome(&report, 0),
+        Outcome::Failed("no se encontró el archivo o la carpeta".into())
+    );
     assert!(matches!(Setup::outcome(&report, 1), Outcome::Copied(_)));
 }
 
@@ -336,6 +339,7 @@ fn the_preview_counts_files_and_bytes_without_writing_anything() {
             renamed: 0,
             already_present: 0,
             unreadable: 0,
+            blocked: 0,
             free_bytes: p.free_bytes,
         }
     );
@@ -368,6 +372,7 @@ fn the_preview_predicts_renames_present_files_and_unreadable_sources() {
             renamed: 2,
             already_present: 1,
             unreadable: 1,
+            blocked: 0,
             free_bytes: p.free_bytes,
         }
     );
@@ -397,6 +402,7 @@ fn preview_fits_compares_bytes_against_free_bytes_when_known() {
         renamed: 0,
         already_present: 0,
         unreadable: 0,
+        blocked: 0,
         free_bytes: Some(100),
     };
     assert!(fits_exact.fits());
@@ -729,6 +735,7 @@ fn preview_with_matches_export_with_for_all_four_layouts() {
                     }
                 }
                 Outcome::AlreadyPresent(_) => present += 1,
+                Outcome::Blocked(reason) => panic!("no links here: {reason}"),
                 Outcome::Failed(_) => failed += 1,
             }
         }
