@@ -10,6 +10,13 @@ pub fn xml_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            // Not allowed anywhere in an XML 1.0 document, not even escaped.
+            '\u{0}'..='\u{8}'
+            | '\u{b}'
+            | '\u{c}'
+            | '\u{e}'..='\u{1f}'
+            | '\u{fffe}'
+            | '\u{ffff}' => {}
             _ => out.push(c),
         }
     }
@@ -130,6 +137,12 @@ mod tests {
             escaped,
             "Manga &amp; Anime &lt;&quot;Best&quot; &apos;Shonen&apos;&gt; &amp; More"
         );
+    }
+
+    #[test]
+    fn xml_escape_drops_characters_xml_1_0_forbids() {
+        assert_eq!(xml_escape("a\u{0}b\u{1}c\u{1f}d\u{fffe}e"), "abcde");
+        assert_eq!(xml_escape("tab\tnl\ncr\r"), "tab\tnl\ncr\r");
     }
 
     #[test]

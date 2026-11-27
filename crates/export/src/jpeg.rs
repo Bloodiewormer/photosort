@@ -28,6 +28,14 @@ impl SegmentSpan {
         self.marker == 0xE1 && self.payload(data).starts_with(XMP_NAMESPACE)
     }
 
+    /// ExtendedXMP chunks belong to the main packet they extend, so they go when it is replaced.
+    fn is_extended_xmp(&self, data: &[u8]) -> bool {
+        self.marker == 0xE1
+            && self
+                .payload(data)
+                .starts_with(b"http://ns.adobe.com/xmp/extension/\0")
+    }
+
     fn is_exif(&self, data: &[u8]) -> bool {
         self.marker == 0xE1 && self.payload(data).starts_with(b"Exif\0\0")
     }
@@ -48,6 +56,9 @@ fn parse_segments(data: &[u8]) -> Result<(Vec<SegmentSpan>, usize), String> {
     let mut segments = Vec::new();
 
     while pos < data.len() {
+        if data[pos] != 0xFF {
+            return Err(format!("expected a JPEG marker at byte {pos}"));
+        }
         // Skip any fill bytes 0xFF
         while pos < data.len() && data[pos] == 0xFF {
             pos += 1;
@@ -64,9 +75,9 @@ fn parse_segments(data: &[u8]) -> Result<(Vec<SegmentSpan>, usize), String> {
             continue;
         }
 
-        // EOI (0xD9): End of Image
-        if marker == 0xD9 {
-            return Err("encountered EOI before SOS marker".to_string());
+        // EOI, a second SOI or a stuffed zero cannot appear before SOS.
+        if matches!(marker, 0xD9 | 0xD8 | 0x00) {
+            return Err(format!("unexpected marker 0x{marker:02X} before SOS"));
         }
 
         // SOS (0xDA): Start of Scan
@@ -131,6 +142,10 @@ fn build_xmp_segment(xmp_packet: &[u8]) -> Result<Vec<u8>, String> {
 pub fn embed_xmp_in_jpeg(data: &[u8], xmp_packet: &[u8]) -> Result<Vec<u8>, String> {
     let (segments, sos_offset) = parse_segments(data)?;
     let new_xmp_seg = build_xmp_segment(xmp_packet)?;
+    let segments: Vec<_> = segments
+        .into_iter()
+        .filter(|s| !s.is_extended_xmp(data))
+        .collect();
 
     let has_xmp = segments.iter().any(|s| s.is_xmp(data));
 
@@ -289,6 +304,82 @@ mod tests {
         let (segments, _) = parse_segments(&embedded_v2).unwrap();
         let xmp_count = segments.iter().filter(|s| s.is_xmp(&embedded_v2)).count();
         assert_eq!(xmp_count, 1);
+    }
+
+    fn seg(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![0xFF, marker];
+        v.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        v.extend_from_slice(payload);
+        v
+    }
+
+    const SCAN: &[u8] = &[
+        0xFF, 0xDA, 0x00, 0x04, 0x01, 0x02, 0xAB, 0xFF, 0x00, 0xFF, 0xD9,
+    ];
+
+    #[test]
+    fn a_byte_that_is_not_a_marker_is_an_error_not_a_misparse() {
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend(seg(0xE0, b"JFIF\0abc"));
+        jpeg.extend_from_slice(&[0x12, 0x00, 0x02]); // garbage that looks like a 2-byte segment
+        jpeg.extend_from_slice(SCAN);
+        assert!(embed_xmp_in_jpeg(&jpeg, b"x").is_err());
+    }
+
+    #[test]
+    fn malformed_headers_are_errors() {
+        // Length past the end of the file.
+        let mut long = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x10, 0x00, 0x01];
+        long.extend_from_slice(SCAN);
+        assert!(embed_xmp_in_jpeg(&long, b"x").is_err());
+        // EOI before SOS, length below 2, truncated marker, nothing after SOI.
+        assert!(embed_xmp_in_jpeg(&[0xFF, 0xD8, 0xFF, 0xD9], b"x").is_err());
+        assert!(embed_xmp_in_jpeg(&[0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x01], b"x").is_err());
+        assert!(embed_xmp_in_jpeg(&[0xFF, 0xD8, 0xFF], b"x").is_err());
+        assert!(embed_xmp_in_jpeg(&[0xFF, 0xD8], b"x").is_err());
+    }
+
+    #[test]
+    fn fill_bytes_are_skipped_and_scan_is_copied_verbatim() {
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend(seg(0xE1, b"Exif\0\0e"));
+        jpeg.extend_from_slice(&[0xFF, 0xFF]); // fill before the next marker
+        jpeg.extend(seg(0xE2, b"ICC_PROFILE\0p"));
+        jpeg.extend_from_slice(SCAN);
+        let out = embed_xmp_in_jpeg(&jpeg, b"<x/>").unwrap();
+        let mut expected = vec![0xFF, 0xD8];
+        expected.extend(seg(0xE1, b"Exif\0\0e"));
+        expected.extend(build_xmp_segment(b"<x/>").unwrap());
+        expected.extend(seg(0xE2, b"ICC_PROFILE\0p"));
+        expected.extend_from_slice(SCAN);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn replacing_xmp_drops_the_old_extended_xmp() {
+        let mut main = XMP_NAMESPACE.to_vec();
+        main.extend_from_slice(b"old");
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend(seg(0xE1, b"Exif\0\0e"));
+        jpeg.extend(seg(0xE1, &main));
+        jpeg.extend(seg(
+            0xE1,
+            b"http://ns.adobe.com/xmp/extension/\0old-extension",
+        ));
+        jpeg.extend_from_slice(SCAN);
+        let out = embed_xmp_in_jpeg(&jpeg, b"new").unwrap();
+        let mut expected = vec![0xFF, 0xD8];
+        expected.extend(seg(0xE1, b"Exif\0\0e"));
+        expected.extend(build_xmp_segment(b"new").unwrap());
+        expected.extend_from_slice(SCAN);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn the_segment_limit_is_65535_bytes() {
+        let max = 65_533 - XMP_NAMESPACE.len();
+        assert_eq!(build_xmp_segment(&vec![b'a'; max]).unwrap().len(), 65_537);
+        assert!(build_xmp_segment(&vec![b'a'; max + 1]).is_err());
     }
 
     #[test]

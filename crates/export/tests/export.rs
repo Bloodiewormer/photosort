@@ -975,3 +975,66 @@ fn preserve_folders_rejects_escaping_components() {
         export_with_options(&[item], &s.dest, options, &mut |_| Control::Continue).unwrap();
     assert!(matches!(Setup::outcome(&report, 0), Outcome::Failed(_)));
 }
+
+#[test]
+fn preserve_folders_keeps_roots_with_the_same_name_apart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib1 = tmp.path().join("a").join("Fotos");
+    let lib2 = tmp.path().join("b").join("Fotos");
+    write(&lib1, "x.jpg", b"one");
+    write(&lib2, "x.jpg", b"two");
+    let roots = [
+        LibraryRoot::new(&lib1).unwrap(),
+        LibraryRoot::new(&lib2).unwrap(),
+    ];
+    let dest = ensure_export_dir(&tmp.path().join("export"), &roots).unwrap();
+    let items: Vec<ExportItem> = [&lib1, &lib2]
+        .into_iter()
+        .map(|lib| ExportItem {
+            root: Some(lib.clone()),
+            ..ExportItem::new(lib.join("x.jpg"))
+        })
+        .collect();
+    let options = ExportOptions {
+        layout: Layout::PreserveFolders,
+        ..Default::default()
+    };
+    let report = export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
+    let paths: Vec<PathBuf> = report
+        .outcomes
+        .iter()
+        .map(|(_, o)| match o {
+            Outcome::Copied(p) => p.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    // Each root gets its own first-level folder, so `x (1).jpg` never appears.
+    assert_ne!(paths[0].parent(), paths[1].parent());
+    for p in &paths {
+        assert_eq!(p.file_name().unwrap(), "x.jpg");
+    }
+}
+
+#[test]
+fn an_xmp_too_large_to_embed_leaves_the_verified_copy_and_is_reported() {
+    let s = setup();
+    let jpeg: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x04, 0x01, 0x02, 0x11, 0x22, 0xFF, 0xD9,
+    ];
+    write(&s.library, "big.jpg", jpeg);
+    let mut item = s.item("big.jpg");
+    item.labels = vec![label(LabelKind::Tag, &"x".repeat(70_000), Status::Accepted)];
+    let options = ExportOptions {
+        embed_jpeg_tags: true,
+        ..Default::default()
+    };
+    let report =
+        export_with_options(&[item], &s.dest, options, &mut |_| Control::Continue).unwrap();
+    assert!(matches!(Setup::outcome(&report, 0), Outcome::Copied(_)));
+    assert_eq!(fs::read(s.dest_dir().join("big.jpg")).unwrap(), jpeg);
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report.manifest_json).unwrap()).unwrap();
+    let f = &json["files"][0];
+    assert!(f.get("sha256_after_tagging").is_none());
+    assert!(f["warning"].as_str().unwrap().contains("65535"), "{f}");
+}

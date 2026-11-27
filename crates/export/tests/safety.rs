@@ -3,7 +3,7 @@
 
 use catalog::{Assignment, LabelId, LabelKind, Source, Status};
 use export::{
-    Control, ExportItem, ExportOptions, Layout, export, export_with, export_with_options,
+    Control, ExportItem, ExportOptions, Layout, Outcome, export, export_with, export_with_options,
     extract_xmp_from_jpeg, preview, preview_with, preview_with_options,
 };
 use fsguard::{LibraryRoot, ensure_export_dir};
@@ -262,6 +262,10 @@ fn previewing_and_exporting_with_all_options_active_leaves_originals_untouched()
     // First export
     let report = export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
 
+    // The preview of a second export already knows the tagged copies.
+    let p2 = preview_with_options(&items, &dest, options).unwrap();
+    assert_eq!((p2.files, p2.already_present, p2.renamed), (0, 3, 0));
+
     // Second export to test re-exporting to same destination
     let report2 = export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
 
@@ -354,6 +358,54 @@ fn previewing_and_exporting_with_all_options_active_leaves_originals_untouched()
     assert!(manifest_csv_content.contains(&orig_sha));
     assert!(manifest_csv_content.contains(&final_sha));
 
-    // Second export should report already_present for all 3
+    // The tagged copy keeps the original's dates.
+    let src_md = fs::metadata(&p_jpeg).unwrap();
+    let dst_md = fs::metadata(dest.as_path().join("a.jpg")).unwrap();
+    assert_eq!(src_md.modified().unwrap(), dst_md.modified().unwrap());
+    assert_eq!(src_md.created().ok(), dst_md.created().ok());
+
+    // Exporting again adds nothing: no `a (1).jpg`, no second sidecar.
     assert_eq!(report2.outcomes.len(), 3);
+    for (src, outcome) in &report2.outcomes {
+        assert!(
+            matches!(outcome, Outcome::AlreadyPresent(_)),
+            "{}: {outcome:?}",
+            src.display()
+        );
+    }
+    let mut names: Vec<String> = WalkDir::new(dest.as_path())
+        .into_iter()
+        .map(|e| {
+            let e = e.unwrap();
+            e.path()
+                .strip_prefix(dest.as_path())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .filter(|n| !n.is_empty() && !n.starts_with("manifest"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "a.jpg",
+            "a.jpg.xmp",
+            "sub",
+            "sub/b.png",
+            "sub/b.png.xmp",
+            "sub/deep",
+            "sub/deep/c.webp",
+            "sub/deep/c.webp.xmp"
+        ]
+    );
+    let json2: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report2.manifest_json).unwrap()).unwrap();
+    let a2 = json2["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["source_path"].as_str().unwrap().ends_with("a.jpg"))
+        .unwrap();
+    assert_eq!(a2["sha256_after_tagging"], final_sha);
 }
