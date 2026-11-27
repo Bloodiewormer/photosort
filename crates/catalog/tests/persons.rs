@@ -558,3 +558,34 @@ fn multiple_faces_of_same_person_in_one_photo_count_as_one_photo_and_hidden_not_
     s.cat.set_person_hidden(p0, true).unwrap();
     assert!(s.cat.unnamed_persons_with_min_photos(3).unwrap().is_empty());
 }
+
+#[test]
+fn only_clear_faces_of_photos_are_grouped() {
+    let mut s = setup(&[
+        ("photo.jpg", b"1"),
+        ("manga.jpg", b"2"),
+        ("blurry.jpg", b"3"),
+        ("tiny.jpg", b"4"),
+    ]);
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    for (name, bbox, score) in [
+        ("photo.jpg", [10.0, 10.0, 100.0, 100.0], 0.95),
+        ("manga.jpg", [10.0, 10.0, 100.0, 100.0], 0.95),
+        ("blurry.jpg", [10.0, 10.0, 100.0, 100.0], 0.85),
+        ("tiny.jpg", [10.0, 10.0, 30.0, 30.0], 0.95),
+    ] {
+        let face = vec![DetectedFace::new(bbox, score)];
+        s.cat
+            .save_vision_result(s.asset(name), SIGLIP2_MODEL_ID, &emb, &face)
+            .unwrap();
+    }
+    let manga = s
+        .cat
+        .label(catalog::LabelKind::Category, catalog::TYPE_MANGA)
+        .unwrap();
+    s.cat.accept(s.asset("manga.jpg"), manga).unwrap();
+    assert_eq!(
+        s.cat.assets_with_faces_needing_embeddings().unwrap(),
+        vec![s.asset("photo.jpg")]
+    );
+}

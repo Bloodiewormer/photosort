@@ -4,7 +4,7 @@
 //! (matching OpenCV `FaceRecognizerSF::feature`, which calls `blobFromImage` with `scalefactor = 1`
 //! and `swapRB = true` on BGR images).
 //! Output: 128-dimensional L2-normalized feature vector.
-//! Cosine similarity threshold for "same person": `0.363`.
+//! Cosine similarity threshold for "same person": `0.5` (calibrated; OpenCV uses `0.363`).
 
 use crate::manifest::{SFACE_MODEL, verify_sface};
 use crate::session::{SessionOptions, build_session};
@@ -17,7 +17,9 @@ use std::path::Path;
 pub const SFACE_INPUT_SIZE: u32 = 112;
 pub const SFACE_EMBEDDING_DIM: usize = 128;
 /// OpenCV cosine similarity threshold for identifying the same person with SFace.
-pub const SFACE_SIMILARITY_THRESHOLD: f32 = 0.363;
+/// Stricter than OpenCV's 0.363 for 1:1 checks: at 0.363 two different people merged on a
+/// real sample, at 0.5 they stayed apart (docs/vision.md).
+pub const SFACE_SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// Standard ArcFace 112×112 destination facial landmarks:
 /// 1. Left eye: `[38.2946, 51.6963]`
