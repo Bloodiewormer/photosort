@@ -122,7 +122,7 @@ pub fn validate_destination(path: &Path, roots: &[LibraryRoot]) -> Result<DestPa
         Err(GuardError::ParentDirComponent(_)) => {
             Err("La ruta de destino no puede contener «..». Elige una carpeta válida.".into())
         }
-        Err(GuardError::Io(e)) => Err(format!("No se pudo validar la carpeta de destino: {e}")),
+        Err(e) => Err(format!("No se pudo validar la carpeta de destino: {e}")),
     }
 }
 
@@ -169,6 +169,8 @@ pub struct ExportSummary {
     pub copied: usize,
     pub already_present: usize,
     pub failed: Vec<(PathBuf, String)>,
+    /// Exported files where something optional (XMP sidecar, embedded tags) did not happen.
+    pub warnings: Vec<(PathBuf, String)>,
     pub stopped: bool,
     pub manifest_json: PathBuf,
     pub manifest_csv: PathBuf,
@@ -191,6 +193,7 @@ impl ExportSummary {
             copied,
             already_present,
             failed,
+            warnings: report.warnings,
             stopped: report.stopped,
             manifest_json: report.manifest_json,
             manifest_csv: report.manifest_csv,
@@ -309,9 +312,15 @@ pub struct ExportWizard {
     preview_gen: u64,
     preview_rx: Option<mpsc::Receiver<(u64, Result<Preview, String>)>>,
     export_worker: Option<ExportWorker>,
+    focus_dest: bool,
 }
 
 impl ExportWizard {
+    /// True once, in the first frame of the window: the keyboard focus starts inside it.
+    pub fn take_focus_dest(&mut self) -> bool {
+        std::mem::take(&mut self.focus_dest)
+    }
+
     pub fn open(
         catalog: &Catalog,
         entries: &[Entry],
@@ -351,6 +360,7 @@ impl ExportWizard {
             preview_gen: 0,
             preview_rx: None,
             export_worker: None,
+            focus_dest: true,
         }
     }
 

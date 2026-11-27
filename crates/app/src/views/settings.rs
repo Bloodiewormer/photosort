@@ -16,6 +16,8 @@ const MAX_COLUMN_WIDTH: f32 = 720.0;
 pub struct SettingsViewState {
     pub confirm_remove_root: Option<PathBuf>,
     pub confirm_clear_face_data: bool,
+    /// Photos done and total while faces are being grouped.
+    pub face_grouping: Option<(usize, usize)>,
     pub vision_dir_error: Option<String>,
     pub ocr_dir_error: Option<String>,
 }
@@ -30,6 +32,7 @@ pub struct SettingsOutcome {
     pub theme_changed: bool,
     pub clear_face_grouping: bool,
     pub start_face_grouping: bool,
+    pub cancel_face_grouping: bool,
     pub error: Option<String>,
 }
 
@@ -139,7 +142,8 @@ pub fn draw(
                                                 .on_hover_text(&full_path);
                                             })
                                             .response
-                                            .interact(egui::Sense::click());
+                                            // Right click only; «Quitar» is the keyboard path.
+                                            .interact(egui::Sense::CLICK);
 
                                         row_resp.context_menu(|ui| {
                                             if ui.button("Mostrar en el Explorador").clicked() {
@@ -324,6 +328,37 @@ pub fn draw(
                                 ) {
                                     outcome.settings_changed = true;
                                     if settings.stage_face_grouping && !prev_grouping {
+                                        outcome.start_face_grouping = true;
+                                    } else if !settings.stage_face_grouping && prev_grouping {
+                                        outcome.cancel_face_grouping = true;
+                                    }
+                                }
+                                if let Some((done, total)) = state.face_grouping {
+                                    ui.add_space(theme::SPACE_SM);
+                                    ui.horizontal(|ui| {
+                                        let frac = done as f32 / total.max(1) as f32;
+                                        ui.add(egui::ProgressBar::new(frac).desired_width(180.0));
+                                        let text = if total == 0 {
+                                            "Preparando la agrupación…".to_string()
+                                        } else {
+                                            format!(
+                                                "Agrupando rostros: {done} de {}",
+                                                count_phrase(total, "foto", "fotos")
+                                            )
+                                        };
+                                        ui.label(
+                                            RichText::new(text)
+                                                .size(theme::FONT_SMALL)
+                                                .color(palette.text_secondary.color32()),
+                                        );
+                                        if ui.button("Cancelar").clicked() {
+                                            outcome.cancel_face_grouping = true;
+                                        }
+                                    });
+                                } else if settings.stage_face_grouping {
+                                    // Retries after another heavy task blocked the start, or a cancel.
+                                    ui.add_space(theme::SPACE_SM);
+                                    if ui.button("Agrupar ahora").clicked() {
                                         outcome.start_face_grouping = true;
                                     }
                                 }
@@ -779,7 +814,7 @@ fn option_pill(ui: &mut egui::Ui, palette: &Palette, label: &str, selected: bool
     } else {
         Stroke::new(1.0, palette.border.color32())
     };
-    ui.add(
+    let resp = ui.add(
         egui::Button::new(
             RichText::new(label)
                 .size(theme::FONT_BODY)
@@ -789,6 +824,7 @@ fn option_pill(ui: &mut egui::Ui, palette: &Palette, label: &str, selected: bool
         .stroke(stroke)
         .corner_radius(CornerRadius::same(theme::RADIUS_MD))
         .min_size(Vec2::new(88.0, 32.0)),
-    )
-    .clicked()
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, label));
+    resp.clicked()
 }

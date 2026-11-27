@@ -23,6 +23,8 @@ pub struct PhotoMenuState {
     /// False until the first frame it is drawn in. The click that opens the menu happens in that
     /// frame, and the menu may be moved away from the pointer to fit the window.
     shown: bool,
+    /// What had the keyboard focus when the menu opened; Escape gives it back.
+    return_focus: Option<Id>,
 }
 
 impl PhotoMenuState {
@@ -31,6 +33,7 @@ impl PhotoMenuState {
             pos,
             focus_idx: 0,
             shown: false,
+            return_focus: None,
         }
     }
 }
@@ -117,8 +120,16 @@ fn build_photo_menu_items(ctx: PhotoMenuContext) -> Vec<MenuItem> {
     items
 }
 
-/// Renders the photo context menu (opened by right-click, Shift+F10, or `--view menu`).
-/// Supports Up/Down arrow navigation, Enter/Space activation, Escape and click-outside dismissal.
+/// Consumes the keyboard shortcuts that open a context menu: the menu key and Shift+F10.
+pub fn menu_key_pressed(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|i| {
+        i.consume_key(Modifiers::NONE, Key::Menu) || i.consume_key(Modifiers::SHIFT, Key::F10)
+    })
+}
+
+/// Renders the photo context menu (opened by right-click, the menu key, Shift+F10, or
+/// `--view menu`). Supports Up/Down arrow and Tab navigation, Enter/Space activation, Escape and
+/// click-outside dismissal.
 pub fn draw_photo_menu(
     ctx: &egui::Context,
     palette: &Palette,
@@ -133,14 +144,25 @@ pub fn draw_photo_menu(
         return None;
     }
     current.focus_idx = current.focus_idx.min(items.len() - 1);
+    if !current.shown {
+        current.return_focus = ctx.memory(|m| m.focused());
+    }
+    let return_focus = current.return_focus;
 
     let mut chosen: Option<PhotoMenuAction> = None;
     let mut close = false;
 
+    let mut escaped = false;
     ctx.input_mut(|i| {
+        // Shift+Tab first: `consume_key` with no modifiers also matches Shift.
         if i.consume_key(Modifiers::NONE, Key::Escape) {
             close = true;
-        } else if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+            escaped = true;
+        } else if i.consume_key(Modifiers::SHIFT, Key::Tab) {
+            current.focus_idx = (current.focus_idx + items.len() - 1) % items.len();
+        } else if i.consume_key(Modifiers::NONE, Key::Tab)
+            || i.consume_key(Modifiers::NONE, Key::ArrowDown)
+        {
             current.focus_idx = (current.focus_idx + 1) % items.len();
         } else if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
             current.focus_idx = if current.focus_idx == 0 {
@@ -158,6 +180,9 @@ pub fn draw_photo_menu(
 
     if close {
         *state = None;
+        if escaped && let Some(id) = return_focus {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
         return chosen;
     }
 
@@ -219,6 +244,10 @@ pub fn draw_photo_menu(
                         .stroke(stroke)
                         .min_size(egui::vec2(est_w - 8.0, 32.0));
                         let resp = ui.add(btn);
+                        // Real focus on the highlighted item, so a screen reader announces it.
+                        if is_focused {
+                            resp.request_focus();
+                        }
                         if resp.hovered() {
                             current.focus_idx = idx;
                         }

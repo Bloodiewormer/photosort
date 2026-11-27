@@ -135,14 +135,20 @@ fn draw_choose_step(
     let mut picked_folder: Option<PathBuf> = None;
     ui.horizontal(|ui| {
         let edit_w = (ui.available_width() - 148.0).max(180.0);
-        let edit = ui.add(
-            egui::TextEdit::singleline(&mut path_text)
-                .desired_width(edit_w)
-                .hint_text(theme::hint_text(
-                    palette,
-                    "Elige una carpeta fuera de tus bibliotecas…",
-                )),
+        let edit = theme::named(
+            ui.add(
+                egui::TextEdit::singleline(&mut path_text)
+                    .desired_width(edit_w)
+                    .hint_text(theme::hint_text(
+                        palette,
+                        "Elige una carpeta fuera de tus bibliotecas…",
+                    )),
+            ),
+            "Carpeta de destino",
         );
+        if wizard.take_focus_dest() {
+            edit.request_focus();
+        }
         if edit.changed() {
             wizard.set_dest(PathBuf::from(path_text.trim()));
         }
@@ -172,7 +178,7 @@ fn draw_choose_step(
     ui.add_space(theme::SPACE_XS);
 
     let mut chosen_layout = wizard.layout();
-    egui::ComboBox::from_id_salt("export_layout_combo")
+    let export_layout_combo_response = egui::ComboBox::from_id_salt("export_layout_combo")
         .selected_text(layout_label(chosen_layout))
         .width(220.0)
         .show_ui(ui, |ui| {
@@ -180,7 +186,9 @@ fn draw_choose_step(
                 ui.selectable_value(&mut chosen_layout, option, layout_label(option))
                     .on_hover_text(layout_description(option));
             }
-        });
+        })
+        .response;
+    theme::named(export_layout_combo_response, "Estructura de carpetas");
     if chosen_layout != wizard.layout() {
         wizard.set_layout(chosen_layout);
     }
@@ -501,6 +509,30 @@ fn draw_done_step(
             });
     }
 
+    if !summary.warnings.is_empty() {
+        ui.add_space(theme::SPACE_SM);
+        ui.label(
+            RichText::new("Avisos:")
+                .strong()
+                .color(palette.status_suggested_fg.color32()),
+        );
+        ui.add_space(theme::SPACE_XS);
+        ScrollArea::vertical()
+            .id_salt("export_warning_list")
+            .max_height(100.0)
+            .show(ui, |ui| {
+                for (path, warning) in &summary.warnings {
+                    let name = path.file_name().unwrap_or(path.as_os_str());
+                    ui.label(
+                        RichText::new(format!("{} — {warning}", name.to_string_lossy()))
+                            .size(theme::FONT_SMALL)
+                            .color(palette.status_suggested_fg.color32()),
+                    )
+                    .on_hover_text(path.display().to_string());
+                }
+            });
+    }
+
     ui.add_space(theme::SPACE_LG);
     ui.separator();
     ui.add_space(theme::SPACE_SM);
@@ -590,8 +622,23 @@ fn info_row_with_tooltip(
     });
 }
 
+/// Enter as the default action: only with no control focused, so that Enter on «Cerrar» or
+/// «Volver» never starts an export. A held Enter repeats, and its repeats could chain the steps
+/// into an export, so only a fresh press counts.
 fn enter_pressed(ctx: &egui::Context) -> bool {
-    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+    !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| {
+            let fresh = i.events.iter().any(is_fresh_enter);
+            i.consume_key(egui::Modifiers::NONE, Key::Enter) && fresh
+        })
+}
+
+fn is_fresh_enter(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, modifiers, .. }
+            if modifiers.is_none()
+    )
 }
 
 fn repaint_notify(ctx: &egui::Context) -> Notify {

@@ -126,12 +126,9 @@ impl Thumbs {
     }
 
     fn join_cache_name(&self, name: &str) -> Result<DestPath, ThumbError> {
-        self.cache_dir.join_name(OsStr::new(name)).ok_or_else(|| {
-            ThumbError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid cache file name",
-            ))
-        })
+        self.cache_dir
+            .join_name(OsStr::new(name))
+            .map_err(|e| ThumbError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))
     }
 }
 

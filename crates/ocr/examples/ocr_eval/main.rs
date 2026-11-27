@@ -84,7 +84,7 @@ fn samples(args: &Args) -> Result<(), String> {
             continue;
         }
         let name = format!("{:?}.png", sample.category).to_lowercase();
-        let path = out.join_name(name.as_ref()).ok_or("bad file name")?;
+        let path = out.join_name(name.as_ref()).map_err(|e| e.to_string())?;
         let mut png = Vec::new();
         PngEncoder::new(&mut png)
             .write_image(

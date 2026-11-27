@@ -2,6 +2,7 @@ pub mod analysis_worker;
 pub mod bench;
 pub mod demo;
 pub mod export_flow;
+pub mod face_group_worker;
 pub mod fonts;
 pub mod model;
 pub mod model_dirs;

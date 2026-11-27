@@ -2,6 +2,7 @@ use crate::model::{
     GridLayout, Selection, count_phrase, format_duration, gallery_cell_tooltip, selected_phrase,
 };
 use crate::theme::{self, Palette};
+use crate::views::context_menu::menu_key_pressed;
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::{AssetId, Entry, Sort};
 use eframe::egui::{
@@ -146,7 +147,7 @@ pub fn draw(
                 if similarity_view.is_none() && work_order_banner.is_none() {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let prev_sort = *sort;
-                        egui::ComboBox::from_id_salt("gallery_sort_combo")
+                        let combo = egui::ComboBox::from_id_salt("gallery_sort_combo")
                             .width(172.0)
                             .selected_text(sort_label(*sort))
                             .show_ui(ui, |ui| {
@@ -165,6 +166,7 @@ pub fn draw(
                                     ui.selectable_value(sort, option, sort_label(option));
                                 }
                             });
+                        theme::named(combo.response, "Orden");
                         if *sort != prev_sort {
                             outcome.sort_changed = true;
                         }
@@ -253,7 +255,8 @@ pub fn draw(
             let bg_resp = ui.interact(
                 ui.available_rect_before_wrap(),
                 Id::unique("gallery_empty_area_menu"),
-                Sense::click(),
+                // Clickable but not focusable: it is only the empty space.
+                Sense::CLICK,
             );
             let mut any_cell_secondary_clicked = false;
 
@@ -310,6 +313,12 @@ pub fn draw(
                                         .input(|i| i.pointer.interact_pos())
                                         .unwrap_or_else(|| rect.center());
                                     outcome.open_photo_menu = Some((idx, pos));
+                                }
+                                if resp.has_focus() && menu_key_pressed(ui.ctx()) {
+                                    any_cell_secondary_clicked = true;
+                                    selection.right_click(idx, entries.len());
+                                    outcome.selection_changed = true;
+                                    outcome.open_photo_menu = Some((idx, rect.center()));
                                 }
                                 if resp.double_clicked() {
                                     selection.click(idx, entries.len());
@@ -521,11 +530,13 @@ pub fn draw(
                                     .sense(Sense::empty()),
                                 );
 
-                                let a11y_label = if is_reviewed {
-                                    format!("{filename} · Revisada")
-                                } else {
-                                    filename
-                                };
+                                let mut a11y_label = filename;
+                                if is_reviewed {
+                                    a11y_label.push_str(", revisada");
+                                }
+                                if has_suggestions {
+                                    a11y_label.push_str(", con sugerencias");
+                                }
                                 resp.widget_info(|| {
                                     egui::WidgetInfo::selected(
                                         egui::Role::Button,

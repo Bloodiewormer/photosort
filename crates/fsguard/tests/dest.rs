@@ -59,7 +59,10 @@ fn join_name_refuses_anything_that_is_not_a_single_name() {
         "\\x.jpg",
     ] {
         assert!(
-            dir.join_name(OsStr::new(bad)).is_none(),
+            matches!(
+                dir.join_name(OsStr::new(bad)),
+                Err(GuardError::InvalidName(_))
+            ),
             "{bad:?} was accepted"
         );
     }

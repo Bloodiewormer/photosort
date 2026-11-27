@@ -589,3 +589,52 @@ fn only_clear_faces_of_photos_are_grouped() {
         vec![s.asset("photo.jpg")]
     );
 }
+
+/// The face grouping worker writes with its own connection while the user edits persons: each
+/// read-then-write must wait for the other writer instead of failing with "database is locked".
+#[test]
+fn person_edits_and_grouping_wait_for_another_writer() {
+    let mut s = setup(&[("a.jpg", b"1"), ("b.jpg", b"2")]);
+    let a = s.asset("a.jpg");
+    let b = s.asset("b.jpg");
+    let face = vec![DetectedFace::new([10.0, 10.0, 100.0, 100.0], 0.95)];
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    for asset in [a, b] {
+        s.cat
+            .save_vision_result(asset, SIGLIP2_MODEL_ID, &emb, &face)
+            .unwrap();
+    }
+    let face_a = s.cat.asset_face_details(a).unwrap()[0].id;
+    let face_b = s.cat.asset_face_details(b).unwrap()[0].id;
+    let source = s.cat.create_person(None).unwrap();
+    let target = s.cat.create_person(Some("Target")).unwrap();
+    s.cat.assign_face_to_person(face_a, source, false).unwrap();
+
+    let hold_write_lock = |db: &Path| {
+        let writer = rusqlite::Connection::open(db).unwrap();
+        let (locked_tx, locked) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            writer.execute_batch("COMMIT").unwrap();
+        });
+        locked.recv().unwrap();
+        handle
+    };
+
+    let db = s._db.as_path().to_path_buf();
+    let other = hold_write_lock(&db);
+    s.cat.merge_persons(source, target).unwrap();
+    other.join().unwrap();
+
+    let other = hold_write_lock(&db);
+    s.cat.group_face(face_b, &unit_vector_128(0), 0.5).unwrap();
+    other.join().unwrap();
+
+    assert_eq!(
+        s.cat.asset_face_details(a).unwrap()[0].person_id,
+        Some(target)
+    );
+    assert!(s.cat.asset_face_details(b).unwrap()[0].person_id.is_some());
+}

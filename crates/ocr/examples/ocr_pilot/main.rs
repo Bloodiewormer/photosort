@@ -178,7 +178,9 @@ fn analyse(
 
 fn run(config: &Config, say: &mut dyn Write) -> Result<(), String> {
     let out = guard_out(&config.folders, &config.out)?;
-    let report_path = out.join_name("report.html".as_ref()).ok_or("bad name")?;
+    let report_path = out
+        .join_name("report.html".as_ref())
+        .map_err(|e| e.to_string())?;
     if report_path.as_path().exists() {
         return Err("--out already has a report; choose a new folder".into());
     }
@@ -222,7 +224,9 @@ fn run(config: &Config, say: &mut dyn Write) -> Result<(), String> {
             ..Options::default()
         },
     )?;
-    let thumbs_dir = out.join_name("thumbs".as_ref()).ok_or("bad name")?;
+    let thumbs_dir = out
+        .join_name("thumbs".as_ref())
+        .map_err(|e| e.to_string())?;
     // Creates `out` too. The error is not shown: it can hold a path.
     let thumbs = Thumbs::new(&thumbs_dir, THUMB_PX).map_err(|_| "cannot create --out")?;
 

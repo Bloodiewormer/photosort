@@ -637,7 +637,7 @@ fn generate_synthetic_library(
         let name = format!("{}_{f:03}", FOLDER_PREFIXES[f % FOLDER_PREFIXES.len()]);
         let dest = library_dest
             .join_name(OsStr::new(&name))
-            .ok_or_else(|| format!("nombre de subcarpeta inválido: {name}"))?;
+            .map_err(|e| e.to_string())?;
         create_dir_dest(&dest).map_err(|e| e.to_string())?;
         folder_dests.push(dest);
     }
@@ -683,7 +683,7 @@ fn generate_synthetic_library(
 
         let file_dest = folder_dests[folder_idx]
             .join_name(OsStr::new(&file_name))
-            .ok_or_else(|| format!("nombre de archivo inválido: {file_name}"))?;
+            .map_err(|e| e.to_string())?;
         write_bytes_dest(&file_dest, &bytes).map_err(|e| e.to_string())?;
         total_bytes += bytes.len() as u64;
     }
@@ -852,10 +852,10 @@ where
     let base_dest = ensure_writable(temp_dir.path(), &[]).map_err(|e| e.to_string())?;
     let library_dest = base_dest
         .join_name(OsStr::new("library"))
-        .ok_or_else(|| "nombre inválido para library".to_string())?;
+        .map_err(|e| e.to_string())?;
     let data_dest = base_dest
         .join_name(OsStr::new("data"))
-        .ok_or_else(|| "nombre inválido para data".to_string())?;
+        .map_err(|e| e.to_string())?;
     create_dir_dest(&library_dest).map_err(|e| e.to_string())?;
     create_dir_dest(&data_dest).map_err(|e| e.to_string())?;
 

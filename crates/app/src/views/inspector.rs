@@ -712,13 +712,16 @@ pub fn draw(
                                     || !state.ocr_draft.trim().is_empty()
                                 {
                                     ui.add_space(theme::SPACE_XS);
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut state.ocr_draft)
-                                            .desired_width(ui.available_width())
-                                            .hint_text(theme::hint_text(
-                                                palette,
-                                                "Título o alias…",
-                                            )),
+                                    theme::named(
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut state.ocr_draft)
+                                                .desired_width(ui.available_width())
+                                                .hint_text(theme::hint_text(
+                                                    palette,
+                                                    "Título o alias…",
+                                                )),
+                                        ),
+                                        "Título o alias",
                                     );
                                     ui.add_space(theme::SPACE_XS);
                                     let draft_ready = !state.ocr_draft.trim().is_empty();
@@ -743,18 +746,24 @@ pub fn draw(
                                                 })
                                                 .map(|w| w.name.as_str())
                                                 .unwrap_or("Elegir obra…");
-                                            egui::ComboBox::from_id_salt("inspector_alias_target")
-                                                .selected_text(target_name)
-                                                .width(140.0)
-                                                .show_ui(ui, |ui| {
-                                                    for w in works {
-                                                        ui.selectable_value(
-                                                            &mut state.alias_target,
-                                                            Some(w.label),
-                                                            &w.name,
-                                                        );
-                                                    }
-                                                });
+                                            let inspector_alias_target_response =
+                                                egui::ComboBox::from_id_salt("inspector_alias_target")
+                                                    .selected_text(target_name)
+                                                    .width(140.0)
+                                                    .show_ui(ui, |ui| {
+                                                        for w in works {
+                                                            ui.selectable_value(
+                                                                &mut state.alias_target,
+                                                                Some(w.label),
+                                                                &w.name,
+                                                            );
+                                                        }
+                                                    })
+                                                    .response;
+                                            theme::named(
+                                                inspector_alias_target_response,
+                                                "Obra a la que añadir el alias",
+                                            );
                                             let can_alias =
                                                 draft_ready && state.alias_target.is_some();
                                             if ui
@@ -915,25 +924,31 @@ pub fn draw(
 
                         ui.add_space(theme::SPACE_SM);
                         ui.horizontal_wrapped(|ui| {
-                            egui::ComboBox::from_id_salt("new_label_kind")
-                                .selected_text(kind_label(state.new_label_kind))
-                                .width(92.0)
-                                .show_ui(ui, |ui| {
-                                    for k in [LabelKind::Tag, LabelKind::Category, LabelKind::Entity]
-                                    {
-                                        ui.selectable_value(
-                                            &mut state.new_label_kind,
-                                            k,
-                                            kind_label(k),
-                                        );
-                                    }
-                                });
+                            let new_label_kind_response =
+                                egui::ComboBox::from_id_salt("new_label_kind")
+                                    .selected_text(kind_label(state.new_label_kind))
+                                    .width(92.0)
+                                    .show_ui(ui, |ui| {
+                                        for k in [LabelKind::Tag, LabelKind::Category, LabelKind::Entity]
+                                        {
+                                            ui.selectable_value(
+                                                &mut state.new_label_kind,
+                                                k,
+                                                kind_label(k),
+                                            );
+                                        }
+                                    })
+                                    .response;
+                            theme::named(new_label_kind_response, "Tipo de la etiqueta nueva");
                             let edit_w = (ui.available_width() - 72.0).clamp(60.0, 160.0);
-                            let edit = ui.add(
-                                egui::TextEdit::singleline(&mut state.new_label_text)
-                                    .id(Id::unique(NEW_LABEL_INPUT_ID))
-                                    .desired_width(edit_w)
-                                    .hint_text(theme::hint_text(palette, "Nueva etiqueta")),
+                            let edit = theme::named(
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut state.new_label_text)
+                                        .id(Id::unique(NEW_LABEL_INPUT_ID))
+                                        .desired_width(edit_w)
+                                        .hint_text(theme::hint_text(palette, "Nueva etiqueta")),
+                                ),
+                                "Nueva etiqueta",
                             );
                             if state.focus_new_label_next_frame {
                                 edit.request_focus();

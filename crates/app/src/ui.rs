@@ -1,3 +1,4 @@
+use crate::face_group_worker::{FaceGroupEvent, FaceGroupWorker};
 use crate::model::{ChipMode, FilterState, MoveDir, Selection, count_phrase};
 use crate::near_dupes_worker::{NearDupesEvent, NearDupesWorker};
 use crate::review_engine::{
@@ -92,6 +93,7 @@ pub struct PhotosortApp {
     tags_apply_worker: Option<TagsApplyWorker>,
     vision_rank_worker: Option<VisionRankWorker>,
     near_dupes_worker: Option<NearDupesWorker>,
+    face_group_worker: Option<FaceGroupWorker>,
     status_notice: Option<String>,
     banner_error: Option<String>,
 
@@ -137,6 +139,7 @@ impl PhotosortApp {
         let settings = loaded.settings;
         let (thumbs, thumbs_warning) = open_thumbnails(&data_dir, &settings.valid_roots());
         theme::configure_styles(&cc.egui_ctx, settings.theme);
+        cc.egui_ctx.add_plugin(theme::SpanishNames);
 
         let logo_texture = theme::logo_color_image().map(|img| {
             cc.egui_ctx
@@ -242,6 +245,7 @@ impl PhotosortApp {
             tags_apply_worker: None,
             vision_rank_worker: None,
             near_dupes_worker: None,
+            face_group_worker: None,
             status_notice: None,
             banner_error,
             thumb_pool: ThumbPool::new(3, thumbs, Some(Arc::clone(&notify))),
@@ -565,6 +569,8 @@ impl PhotosortApp {
             Some("la aplicación de etiquetas")
         } else if self.near_dupes_worker.is_some() {
             Some("la búsqueda de parecidos")
+        } else if self.face_group_worker.is_some() {
+            Some("la agrupación de rostros")
         } else {
             None
         }
@@ -581,6 +587,7 @@ impl PhotosortApp {
         let mut finished_tags_apply = false;
         let mut finished_rank = false;
         let mut finished_near_dupes = false;
+        let mut finished_face_group = false;
         let mut needs_full_reload = false;
         let mut inspector_asset_updated = false;
 
@@ -754,6 +761,54 @@ impl PhotosortApp {
             }
         }
 
+        if let Some(worker) = &self.face_group_worker {
+            while let Some(ev) = worker.try_recv() {
+                match ev {
+                    FaceGroupEvent::Progress { done, total } => {
+                        self.settings_state.face_grouping = Some((done, total));
+                    }
+                    FaceGroupEvent::Finished {
+                        stopped,
+                        total,
+                        grouped_faces,
+                        grouped_photos,
+                        unreadable_photos,
+                    } => {
+                        finished_face_group = true;
+                        needs_full_reload = true;
+                        self.status_notice = Some(if total == 0 {
+                            "Todos los rostros detectados ya tienen vector y grupo".into()
+                        } else {
+                            let prefix = if stopped {
+                                "Agrupación cancelada"
+                            } else {
+                                "Agrupación completada"
+                            };
+                            let mut notice = format!(
+                                "{prefix}: {} agrupados en {}",
+                                count_phrase(grouped_faces, "rostro", "rostros"),
+                                count_phrase(grouped_photos, "foto", "fotos"),
+                            );
+                            if unreadable_photos > 0 {
+                                notice.push_str(&format!(
+                                    " (sin poder leer: {})",
+                                    count_phrase(unreadable_photos, "foto", "fotos")
+                                ));
+                            }
+                            notice
+                        });
+                    }
+                    FaceGroupEvent::Failed(err) => {
+                        finished_face_group = true;
+                        self.banner_error = Some(format!("Error al agrupar rostros: {err}"));
+                    }
+                }
+            }
+        }
+
+        if finished_face_group {
+            self.stop_face_grouping();
+        }
         if finished_works {
             self.works_worker = None;
             self.sync_engine_yield();
@@ -996,102 +1051,47 @@ impl PhotosortApp {
         }
     }
 
-    fn process_pending_face_embeddings(&mut self) {
+    fn start_face_grouping(&mut self, ctx: &egui::Context) {
+        if self.face_group_worker.is_some() {
+            return;
+        }
         if self.demo_mode {
             self.status_notice = Some("Modo demo: rostros agrupados (sin cargar modelos)".into());
             self.reload_catalog();
             return;
         }
-
-        let Some(models_dir) = &self.settings.vision_models_dir else {
+        if let Some(task) = self.foreground_heavy_task() {
+            self.status_notice = Some(format!("Espera a que termine {task}"));
+            return;
+        }
+        let Some(models_dir) = self.settings.vision_models_dir.clone() else {
             self.status_notice =
                 Some("Falta la carpeta de modelos de visión; configúrala en Configuración".into());
             return;
         };
-
-        if !vision::manifest::has_sface(models_dir) {
-            self.status_notice =
-                Some("Falta el modelo SFace en la carpeta de modelos de visión".into());
-            return;
+        let roots = self.settings.valid_roots();
+        match settings::db_dest_path(&self.data_dir, &roots) {
+            Ok(db) => {
+                let ctx_clone = ctx.clone();
+                let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
+                self.settings_state.face_grouping = Some((0, 0));
+                self.face_group_worker = Some(FaceGroupWorker::start(
+                    db,
+                    models_dir,
+                    self.settings.ocr_device,
+                    Some(notify),
+                ));
+                self.sync_engine_yield();
+            }
+            Err(e) => self.banner_error = Some(e.to_string()),
         }
+    }
 
-        let Some(cat) = &mut self.catalog else {
-            return;
-        };
-
-        let assets = match cat.assets_with_faces_needing_embeddings() {
-            Ok(list) => list,
-            Err(e) => {
-                self.banner_error = Some(format!("Error al buscar rostros pendientes: {e}"));
-                return;
-            }
-        };
-
-        if assets.is_empty() {
-            self.status_notice =
-                Some("Todos los rostros detectados ya tienen vector y grupo".into());
-            return;
-        }
-
-        let options = crate::vision_worker::session_options(self.settings.ocr_device);
-        let mut sface = match vision::SFace::load(models_dir, &options) {
-            Ok(s) => s,
-            Err(e) => {
-                self.banner_error = Some(format!("No se pudo cargar el modelo SFace: {e}"));
-                return;
-            }
-        };
-
-        let mut grouped_faces = 0usize;
-        let mut processed_assets = 0usize;
-
-        for asset in &assets {
-            let path = match cat.entry_for(*asset) {
-                Ok(Some(entry)) => entry.path,
-                _ => continue,
-            };
-
-            let faces = match cat.asset_face_details(*asset) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-
-            let pending_faces: Vec<_> = faces
-                .into_iter()
-                .filter(|f| !f.has_embedding && catalog::is_groupable_face(f.score, f.bbox))
-                .collect();
-            if pending_faces.is_empty() {
-                continue;
-            }
-
-            let img = match thumbs::decode(&path, crate::vision_worker::VISION_DECODE_MAX_PX) {
-                Ok(dyn_img) => dyn_img.to_rgb8(),
-                Err(_) => continue,
-            };
-
-            for face in pending_faces {
-                let aligned = vision::align_face(&img, &face.landmarks);
-                let emb = match sface.feature(&aligned) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-
-                if cat
-                    .group_face(face.id, &emb, vision::SFACE_SIMILARITY_THRESHOLD)
-                    .is_ok()
-                {
-                    grouped_faces += 1;
-                }
-            }
-            processed_assets += 1;
-        }
-
-        self.status_notice = Some(format!(
-            "Agrupación completada: {} agrupados en {}",
-            count_phrase(grouped_faces, "rostro", "rostros"),
-            count_phrase(processed_assets, "foto", "fotos")
-        ));
-        self.reload_catalog();
+    /// Drops the grouping worker: cancels it and waits for it to leave the catalog.
+    fn stop_face_grouping(&mut self) {
+        self.face_group_worker = None;
+        self.settings_state.face_grouping = None;
+        self.sync_engine_yield();
     }
 
     fn start_near_dupes(&mut self, ctx: &egui::Context, threshold: f32) {
@@ -1214,8 +1214,12 @@ impl PhotosortApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.photo_menu.is_some() || self.label_modal.is_open() {
-            // While a modal or context menu is open, it owns keyboard keys.
+        if self.photo_menu.is_some()
+            || self.label_modal.is_open()
+            || self.export_wizard.is_some()
+            || egui::Popup::is_any_open(ctx)
+        {
+            // While a dialog or menu is open, it owns keyboard keys.
             return;
         }
         let wants_text = ctx.egui_wants_keyboard_input();
@@ -1240,20 +1244,6 @@ impl PhotosortApp {
                 }
             }
             if wants_text {
-                return;
-            }
-
-            // Shift+F10 opens the photo context menu for the current photo.
-            // Note: egui 0.37's Key enum does not expose the Windows Application/Menu key;
-            // Shift+F10 is the standard Windows keyboard equivalent supported here.
-            if i.consume_key(Modifiers::SHIFT, Key::F10)
-                && self.selection.primary().is_some()
-                && !self.viewer_open
-            {
-                let pos = self
-                    .last_primary_cell_pos
-                    .unwrap_or_else(|| ctx.content_rect().center());
-                self.photo_menu = Some(PhotoMenuState::at(pos));
                 return;
             }
 
@@ -1471,6 +1461,15 @@ impl PhotosortApp {
 
 impl eframe::App for PhotosortApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        theme::scroll_focus_into_view(&ctx);
+        self.draw(ui);
+        theme::paint_focus_ring(&ctx);
+    }
+}
+
+impl PhotosortApp {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_workers(&ctx);
         self.handle_shortcuts(&ctx);
@@ -1700,6 +1699,20 @@ impl eframe::App for PhotosortApp {
                     self.sync_inspector(false);
                 }
                 if let Some((_idx, pos)) = gal_out.open_photo_menu {
+                    self.photo_menu = Some(PhotoMenuState::at(pos));
+                }
+                // The gallery opens the menu for a focused thumbnail; this covers any other focus.
+                if self.photo_menu.is_none()
+                    && self.selection.primary().is_some()
+                    && !self.viewer_open
+                    && !self.label_modal.is_open()
+                    && self.export_wizard.is_none()
+                    && !ctx.text_edit_focused()
+                    && views::context_menu::menu_key_pressed(&ctx)
+                {
+                    let pos = self
+                        .last_primary_cell_pos
+                        .unwrap_or_else(|| ctx.content_rect().center());
                     self.photo_menu = Some(PhotoMenuState::at(pos));
                 }
                 if gal_out.review_selected {
@@ -2236,6 +2249,15 @@ impl eframe::App for PhotosortApp {
                 if outcome.theme_changed {
                     theme::apply_theme_preference(&ctx, self.settings.theme);
                 }
+                if outcome.cancel_face_grouping
+                    && let Some(worker) = &self.face_group_worker
+                {
+                    worker.cancel();
+                }
+                if outcome.clear_face_grouping {
+                    // A running grouping would recreate the data being deleted.
+                    self.stop_face_grouping();
+                }
                 if outcome.clear_face_grouping
                     && let Some(cat) = &mut self.catalog
                 {
@@ -2255,7 +2277,7 @@ impl eframe::App for PhotosortApp {
                     }
                 }
                 if outcome.start_face_grouping {
-                    self.process_pending_face_embeddings();
+                    self.start_face_grouping(&ctx);
                 }
                 if outcome.settings_changed {
                     self.save_settings_and_sync_engine();

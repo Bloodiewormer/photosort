@@ -409,3 +409,90 @@ fn previewing_and_exporting_with_all_options_active_leaves_originals_untouched()
         .unwrap();
     assert_eq!(a2["sha256_after_tagging"], final_sha);
 }
+
+/// `mklink /J` needs no administrator rights. Both ends are always inside the test's temp folder.
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    let out = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "could not create junction: {out:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    // An empty library folder: anything that appears in it was written through a junction.
+    let trap = library.join("trap");
+    fs::create_dir_all(&trap).unwrap();
+
+    let mut items = vec![];
+    for (rel, category) in [("manga/obra/a.jpg", "Manga"), ("fotos/b.jpg", "Fotos")] {
+        let p = library.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, synthetic_jpeg(rel.as_bytes(), b"scan")).unwrap();
+        items.push(ExportItem {
+            labels: vec![assign(LabelKind::Category, category)],
+            root: Some(library.clone()),
+            ..ExportItem::new(p)
+        });
+    }
+    let root = LibraryRoot::new(&library).unwrap();
+
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    // The first item goes to the linked folder; the second one must still be exported.
+    for (name, layout, linked, copied) in [
+        ("preserve", Layout::PreserveFolders, "manga", "fotos/b.jpg"),
+        ("category", Layout::ByCategory, "Manga", "Fotos/b.jpg"),
+    ] {
+        let dest_path = tmp.path().join(name);
+        fs::create_dir_all(&dest_path).unwrap();
+        junction(&dest_path.join(linked), &trap);
+        let dest = ensure_export_dir(&dest_path, std::slice::from_ref(&root)).unwrap();
+        let options = ExportOptions {
+            layout,
+            write_xmp_sidecars: true,
+            embed_jpeg_tags: true,
+        };
+
+        preview_with_options(&items, &dest, options).unwrap();
+        let report =
+            export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
+
+        assert_eq!(before, snapshot(&library), "{name}: the library changed");
+        match &report.outcomes[0].1 {
+            Outcome::Failed(reason) => assert!(reason.contains("library"), "{reason}"),
+            other => panic!("{name}: expected a failure, got {other:?}"),
+        }
+        assert!(matches!(report.outcomes[1].1, Outcome::Copied(_)));
+        assert!(dest_path.join(copied).is_file());
+        assert!(dest_path.join(format!("{copied}.xmp")).is_file());
+    }
+
+    // A link where a sidecar would go: the copy is made and the report carries the warning.
+    let dest_path = tmp.path().join("sidecar");
+    fs::create_dir_all(&dest_path).unwrap();
+    junction(&dest_path.join("b.jpg.xmp"), &trap);
+    let dest = ensure_export_dir(&dest_path, std::slice::from_ref(&root)).unwrap();
+    let options = ExportOptions {
+        write_xmp_sidecars: true,
+        ..Default::default()
+    };
+    let report =
+        export_with_options(&items[1..], &dest, options, &mut |_| Control::Continue).unwrap();
+
+    assert_eq!(before, snapshot(&library), "sidecar: the library changed");
+    assert!(matches!(report.outcomes[0].1, Outcome::Copied(_)));
+    assert!(
+        report.warnings[0].1.contains("XMP sidecar not written"),
+        "{:?}",
+        report.warnings
+    );
+}
