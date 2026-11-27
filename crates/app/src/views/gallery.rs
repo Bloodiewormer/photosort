@@ -191,6 +191,11 @@ pub fn draw(
                     "Revisar"
                 };
 
+                let sel_txt = selected_phrase(selection.len());
+                let hint_msg = "Clic derecho para más opciones";
+                let font_body = egui::FontId::proportional(theme::FONT_BODY);
+                let font_small = egui::FontId::proportional(theme::FONT_SMALL);
+
                 Frame::new()
                     .fill(palette.bg_panel.color32())
                     .stroke(Stroke::new(1.0, palette.border.color32()))
@@ -200,9 +205,46 @@ pub fn draw(
                         theme::SPACE_SM as i8,
                     ))
                     .show(ui, |ui| {
+                        let sel_w = ui
+                            .painter()
+                            .layout_no_wrap(sel_txt.clone(), font_body.clone(), Color32::WHITE)
+                            .rect
+                            .width();
+                        let hint_w = ui
+                            .painter()
+                            .layout_no_wrap(hint_msg.to_string(), font_small, Color32::WHITE)
+                            .rect
+                            .width();
+                        let review_w = ui
+                            .painter()
+                            .layout_no_wrap(review_btn_text.to_string(), font_body.clone(), Color32::WHITE)
+                            .rect
+                            .width()
+                            + theme::SPACE_MD * 2.0;
+                        let export_w = ui
+                            .painter()
+                            .layout_no_wrap("Exportar…".to_string(), font_body.clone(), Color32::WHITE)
+                            .rect
+                            .width()
+                            + theme::SPACE_MD * 2.0;
+                        let clear_w = ui
+                            .painter()
+                            .layout_no_wrap("Quitar selección".to_string(), font_body, Color32::WHITE)
+                            .rect
+                            .width()
+                            + theme::SPACE_MD * 2.0;
+                        let total_needed = sel_w
+                            + theme::SPACE_XS
+                            + review_w
+                            + export_w
+                            + clear_w
+                            + hint_w
+                            + theme::SPACE_LG * 3.0;
+                        let show_hint = ui.available_width() >= total_needed;
+
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
-                                RichText::new(selected_phrase(selection.len()))
+                                RichText::new(sel_txt)
                                     .strong()
                                     .color(palette.text_primary.color32()),
                             );
@@ -220,13 +262,15 @@ pub fn draw(
                                 selection.clear();
                                 outcome.selection_changed = true;
                             }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new("Clic derecho para más opciones")
-                                        .size(theme::FONT_SMALL)
-                                        .color(palette.text_hint.color32()),
-                                );
-                            });
+                            if show_hint {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(hint_msg)
+                                            .size(theme::FONT_SMALL)
+                                            .color(palette.text_hint.color32()),
+                                    );
+                                });
+                            }
                         });
                     });
                 ui.add_space(theme::SPACE_MD);
@@ -709,5 +753,142 @@ pub fn sort_label(sort: Sort) -> &'static str {
         Sort::SizeDesc => "Tamaño en disco (mayor)",
         Sort::ModifiedAsc => "Modificación (antigua)",
         Sort::ModifiedDesc => "Modificación (reciente)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Color32, Pos2, RawInput, Rect, Vec2};
+
+    #[test]
+    fn selection_bar_hides_context_menu_hint_when_window_narrow() {
+        let ctx = egui::Context::default();
+        // At 1000x700 with sidebar (240px) and inspector (328px), gallery available width is ~432px
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(432.0, 700.0));
+        let mut selection = Selection::default();
+        selection.click(0, 10);
+        selection.click(1, 10);
+
+        let input = RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+
+        let mut showed_hint = false;
+        let mut output = ctx.run_ui(input, |ui| {
+            let sel_txt = selected_phrase(selection.len());
+            let hint_msg = "Clic derecho para más opciones";
+            let font_body = egui::FontId::proportional(theme::FONT_BODY);
+            let font_small = egui::FontId::proportional(theme::FONT_SMALL);
+
+            let sel_w = ui
+                .painter()
+                .layout_no_wrap(sel_txt.clone(), font_body.clone(), Color32::WHITE)
+                .rect
+                .width();
+            let hint_w = ui
+                .painter()
+                .layout_no_wrap(hint_msg.to_string(), font_small, Color32::WHITE)
+                .rect
+                .width();
+            let review_w = ui
+                .painter()
+                .layout_no_wrap("Revisar".to_string(), font_body.clone(), Color32::WHITE)
+                .rect
+                .width()
+                + theme::SPACE_MD * 2.0;
+            let export_w = ui
+                .painter()
+                .layout_no_wrap("Exportar…".to_string(), font_body.clone(), Color32::WHITE)
+                .rect
+                .width()
+                + theme::SPACE_MD * 2.0;
+            let clear_w = ui
+                .painter()
+                .layout_no_wrap("Quitar selección".to_string(), font_body, Color32::WHITE)
+                .rect
+                .width()
+                + theme::SPACE_MD * 2.0;
+            let total_needed = sel_w
+                + theme::SPACE_XS
+                + review_w
+                + export_w
+                + clear_w
+                + hint_w
+                + theme::SPACE_LG * 3.0;
+            showed_hint = ui.available_width() >= total_needed;
+        });
+        output.textures_delta.clear();
+
+        assert!(
+            !showed_hint,
+            "El texto de clic derecho debe ocultarse cuando el ancho es insuficiente para no solaparse"
+        );
+    }
+
+    #[test]
+    fn selection_bar_shows_context_menu_hint_when_space_permits() {
+        let ctx = egui::Context::default();
+        // Wide screen: 1600x900, gallery gets > 1000px
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1032.0, 900.0));
+        let mut selection = Selection::default();
+        selection.click(0, 10);
+
+        let input = RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+
+        let mut showed_hint = false;
+        let mut output = ctx.run_ui(input, |ui| {
+            let sel_txt = selected_phrase(selection.len());
+            let hint_msg = "Clic derecho para más opciones";
+            let font_body = egui::FontId::proportional(theme::FONT_BODY);
+            let font_small = egui::FontId::proportional(theme::FONT_SMALL);
+
+            let sel_w = ui
+                .painter()
+                .layout_no_wrap(sel_txt.clone(), font_body.clone(), Color32::WHITE)
+                .rect
+                .width();
+            let hint_w = ui
+                .painter()
+                .layout_no_wrap(hint_msg.to_string(), font_small, Color32::WHITE)
+                .rect
+                .width();
+            let review_w = ui
+                .painter()
+                .layout_no_wrap("Revisar".to_string(), font_body.clone(), Color32::WHITE)
+                .rect
+                .width()
+                + theme::SPACE_MD * 2.0;
+            let export_w = ui
+                .painter()
+                .layout_no_wrap("Exportar…".to_string(), font_body.clone(), Color32::WHITE)
+                .rect
+                .width()
+                + theme::SPACE_MD * 2.0;
+            let clear_w = ui
+                .painter()
+                .layout_no_wrap("Quitar selección".to_string(), font_body, Color32::WHITE)
+                .rect
+                .width()
+                + theme::SPACE_MD * 2.0;
+            let total_needed = sel_w
+                + theme::SPACE_XS
+                + review_w
+                + export_w
+                + clear_w
+                + hint_w
+                + theme::SPACE_LG * 3.0;
+            showed_hint = ui.available_width() >= total_needed;
+        });
+        output.textures_delta.clear();
+
+        assert!(
+            showed_hint,
+            "El texto de clic derecho debe mostrarse en pantalla ancha con espacio suficiente"
+        );
     }
 }
