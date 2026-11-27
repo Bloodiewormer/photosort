@@ -1,4 +1,5 @@
 use crate::model::{count_phrase, library_display_name};
+use crate::model_dirs;
 use crate::review_engine::{EngineSnapshot, StageKind};
 use crate::settings::{OcrDevice, Settings, Theme};
 use crate::theme::{self, Palette};
@@ -14,6 +15,8 @@ const MAX_COLUMN_WIDTH: f32 = 720.0;
 #[derive(Default)]
 pub struct SettingsViewState {
     pub confirm_remove_root: Option<PathBuf>,
+    pub vision_dir_error: Option<String>,
+    pub ocr_dir_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -237,10 +240,11 @@ pub fn draw(
                                 ui.add_space(theme::SPACE_SM);
 
                                 let vision_note = if settings.vision_models_dir.is_none() {
-                                    "Clasifica tipo de imagen y rostros · necesita carpeta de modelos de visión"
+                                    "Clasifica tipo de imagen y rostros · al activar se pedirá la carpeta de modelos"
                                 } else {
                                     "Clasifica tipo de imagen y rostros con modelos locales"
                                 };
+                                let prev_vision = settings.stage_vision;
                                 if switch_row(
                                     ui,
                                     palette,
@@ -248,15 +252,35 @@ pub fn draw(
                                     vision_note,
                                     &mut settings.stage_vision,
                                 ) {
-                                    outcome.settings_changed = true;
+                                    if settings.stage_vision
+                                        && !prev_vision
+                                        && settings.vision_models_dir.is_none()
+                                    {
+                                        if let Some(dir) = pick_model_folder(
+                                            "Elegir carpeta de modelos de visión",
+                                            None,
+                                        ) {
+                                            apply_vision_pick(
+                                                settings,
+                                                state,
+                                                &dir,
+                                                &mut outcome.settings_changed,
+                                            );
+                                        } else {
+                                            settings.stage_vision = false;
+                                        }
+                                    } else {
+                                        outcome.settings_changed = true;
+                                    }
                                 }
                                 ui.add_space(theme::SPACE_SM);
 
                                 let ocr_note = if settings.ocr_models_dir.is_none() {
-                                    "Lee texto y busca obras conocidas · es la etapa más lenta y necesita modelos OCR"
+                                    "Lee texto y busca obras conocidas · al activar se pedirá la carpeta de modelos OCR"
                                 } else {
                                     "Lee texto y busca obras conocidas · es la etapa más lenta"
                                 };
+                                let prev_ocr = settings.stage_ocr;
                                 if switch_row(
                                     ui,
                                     palette,
@@ -264,7 +288,25 @@ pub fn draw(
                                     ocr_note,
                                     &mut settings.stage_ocr,
                                 ) {
-                                    outcome.settings_changed = true;
+                                    if settings.stage_ocr
+                                        && !prev_ocr
+                                        && settings.ocr_models_dir.is_none()
+                                    {
+                                        if let Some(dir) =
+                                            pick_model_folder("Elegir carpeta de modelos OCR", None)
+                                        {
+                                            apply_ocr_pick(
+                                                settings,
+                                                state,
+                                                &dir,
+                                                &mut outcome.settings_changed,
+                                            );
+                                        } else {
+                                            settings.stage_ocr = false;
+                                        }
+                                    } else {
+                                        outcome.settings_changed = true;
+                                    }
                                 }
 
                                 for paused in &engine_snapshot.paused_stages {
@@ -330,24 +372,54 @@ pub fn draw(
                             // 3. Modelos y dispositivo
                             section_heading(ui, palette, "Modelos y dispositivo");
                             section_card(ui, palette, |ui| {
-                                if model_folder_row(
+                                match model_folder_row(
                                     ui,
                                     palette,
                                     "Modelos de visión (SigLIP 2 y YuNet)",
-                                    &mut settings.vision_models_dir,
+                                    settings.vision_models_dir.as_deref(),
+                                    state.vision_dir_error.as_deref(),
                                     "Elegir carpeta de modelos de visión",
                                 ) {
-                                    outcome.settings_changed = true;
+                                    ModelFolderAction::Picked(dir) => {
+                                        apply_vision_pick(
+                                            settings,
+                                            state,
+                                            &dir,
+                                            &mut outcome.settings_changed,
+                                        );
+                                    }
+                                    ModelFolderAction::Cleared => {
+                                        settings.vision_models_dir = None;
+                                        settings.stage_vision = false;
+                                        state.vision_dir_error = None;
+                                        outcome.settings_changed = true;
+                                    }
+                                    ModelFolderAction::None => {}
                                 }
                                 ui.add_space(theme::SPACE_MD);
-                                if model_folder_row(
+                                match model_folder_row(
                                     ui,
                                     palette,
                                     "Modelos OCR",
-                                    &mut settings.ocr_models_dir,
+                                    settings.ocr_models_dir.as_deref(),
+                                    state.ocr_dir_error.as_deref(),
                                     "Elegir carpeta de modelos OCR",
                                 ) {
-                                    outcome.settings_changed = true;
+                                    ModelFolderAction::Picked(dir) => {
+                                        apply_ocr_pick(
+                                            settings,
+                                            state,
+                                            &dir,
+                                            &mut outcome.settings_changed,
+                                        );
+                                    }
+                                    ModelFolderAction::Cleared => {
+                                        settings.ocr_models_dir = None;
+                                        settings.stage_ocr = false;
+                                        state.ocr_dir_error = None;
+                                        outcome.settings_changed = true;
+                                    }
+                                    ModelFolderAction::None => {}
                                 }
 
                                 ui.add_space(theme::SPACE_MD);
@@ -516,22 +588,84 @@ fn switch_row(
     changed
 }
 
+enum ModelFolderAction {
+    None,
+    Picked(PathBuf),
+    Cleared,
+}
+
+fn pick_model_folder(dialog_title: &str, current: Option<&Path>) -> Option<PathBuf> {
+    let mut dlg = rfd::FileDialog::new().set_title(dialog_title);
+    if let Some(cur) = current
+        && cur.is_dir()
+    {
+        dlg = dlg.set_directory(cur);
+    }
+    dlg.pick_folder()
+}
+
+fn apply_vision_pick(
+    settings: &mut Settings,
+    state: &mut SettingsViewState,
+    dir: &Path,
+    settings_changed: &mut bool,
+) {
+    match model_dirs::apply_picked_vision_dir(settings, dir) {
+        Ok(inferred_ocr) => {
+            state.vision_dir_error = None;
+            if inferred_ocr.is_some() {
+                state.ocr_dir_error = None;
+            }
+            *settings_changed = true;
+        }
+        Err(reason) => {
+            if settings.vision_models_dir.is_none() {
+                settings.stage_vision = false;
+            }
+            state.vision_dir_error = Some(reason);
+        }
+    }
+}
+
+fn apply_ocr_pick(
+    settings: &mut Settings,
+    state: &mut SettingsViewState,
+    dir: &Path,
+    settings_changed: &mut bool,
+) {
+    match model_dirs::apply_picked_ocr_dir(settings, dir) {
+        Ok(inferred_vision) => {
+            state.ocr_dir_error = None;
+            if inferred_vision.is_some() {
+                state.vision_dir_error = None;
+            }
+            *settings_changed = true;
+        }
+        Err(reason) => {
+            if settings.ocr_models_dir.is_none() {
+                settings.stage_ocr = false;
+            }
+            state.ocr_dir_error = Some(reason);
+        }
+    }
+}
+
 fn model_folder_row(
     ui: &mut egui::Ui,
     palette: &Palette,
     title: &str,
-    slot: &mut Option<PathBuf>,
+    current: Option<&Path>,
+    error: Option<&str>,
     dialog_title: &str,
-) -> bool {
-    let mut changed = false;
+) -> ModelFolderAction {
+    let mut action = ModelFolderAction::None;
     ui.label(RichText::new(title).strong());
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
-        let display = slot
-            .as_ref()
+        let display = current
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "Sin configurar".into());
-        let color = if slot.is_some() {
+        let color = if current.is_some() {
             palette.text_primary.color32()
         } else {
             palette.text_hint.color32()
@@ -541,25 +675,25 @@ fn model_folder_row(
                 .truncate(),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if slot.is_some() && ui.button("Quitar").clicked() {
-                *slot = None;
-                changed = true;
+            if current.is_some() && ui.button("Quitar").clicked() {
+                action = ModelFolderAction::Cleared;
             }
-            if ui.button("Elegir carpeta…").clicked() {
-                let mut dlg = rfd::FileDialog::new().set_title(dialog_title);
-                if let Some(cur) = slot.as_ref()
-                    && cur.is_dir()
-                {
-                    dlg = dlg.set_directory(cur);
-                }
-                if let Some(dir) = dlg.pick_folder() {
-                    *slot = Some(dir);
-                    changed = true;
-                }
+            if ui.button("Elegir carpeta…").clicked()
+                && let Some(dir) = pick_model_folder(dialog_title, current)
+            {
+                action = ModelFolderAction::Picked(dir);
             }
         });
     });
-    changed
+    if let Some(err) = error {
+        ui.add_space(theme::SPACE_XS);
+        ui.label(
+            RichText::new(err)
+                .size(theme::FONT_SMALL)
+                .color(palette.status_rejected_fg.color32()),
+        );
+    }
+    action
 }
 
 fn option_pill(ui: &mut egui::Ui, palette: &Palette, label: &str, selected: bool) -> bool {

@@ -1400,7 +1400,8 @@ impl Catalog {
         // Hydrate Entry metadata for the top-N winners only.
         let mut entries_by_id: HashMap<i64, Entry> = HashMap::with_capacity(top.len());
         let mut entry_stmt = self.conn.prepare(
-            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
+                    a.width, a.height, a.format, a.captured_at_ns
              FROM location l JOIN asset a ON a.id = l.asset_id
              WHERE l.asset_id = ?1 AND l.missing = 0
              ORDER BY l.path ASC
@@ -1408,16 +1409,7 @@ impl Catalog {
         )?;
         for item in &top {
             if let Some(entry) = entry_stmt
-                .query_row([item.asset_id], |r| {
-                    let size: i64 = r.get(3)?;
-                    Ok(Entry {
-                        asset: AssetId(r.get(0)?),
-                        path: PathBuf::from(r.get::<_, String>(1)?),
-                        sha256: r.get(2)?,
-                        size: size.max(0) as u64,
-                        modified_ns: r.get(4)?,
-                    })
-                })
+                .query_row([item.asset_id], crate::browse::entry_from_row)
                 .optional()?
             {
                 entries_by_id.insert(item.asset_id, entry);
@@ -1520,7 +1512,8 @@ impl Catalog {
 
         let mut entries_by_id: HashMap<i64, Entry> = HashMap::with_capacity(top.len());
         let entry_sql = format!(
-            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns
+            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
+                    a.width, a.height, a.format, a.captured_at_ns
              FROM location l JOIN asset a ON a.id = l.asset_id
              WHERE l.asset_id = ? AND l.missing = 0 AND l.root IN ({marks})
              ORDER BY l.path ASC
@@ -1534,16 +1527,10 @@ impl Catalog {
                 e_args.push(Box::new(r.to_string_lossy().into_owned()));
             }
             if let Some(entry) = entry_stmt
-                .query_row(rusqlite::params_from_iter(e_args.iter()), |r| {
-                    let size: i64 = r.get(3)?;
-                    Ok(Entry {
-                        asset: AssetId(r.get(0)?),
-                        path: PathBuf::from(r.get::<_, String>(1)?),
-                        sha256: r.get(2)?,
-                        size: size.max(0) as u64,
-                        modified_ns: r.get(4)?,
-                    })
-                })
+                .query_row(
+                    rusqlite::params_from_iter(e_args.iter()),
+                    crate::browse::entry_from_row,
+                )
                 .optional()?
             {
                 entries_by_id.insert(item.asset_id, entry);

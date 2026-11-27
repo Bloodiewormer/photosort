@@ -1,4 +1,4 @@
-use crate::model::{format_bytes, format_timestamp_utc};
+use crate::model::{format_bytes, format_timestamp_plain, format_timestamp_utc};
 use crate::theme::{self, Palette};
 use crate::views::gallery::fit_rect;
 use catalog::{
@@ -181,6 +181,15 @@ pub fn draw(
                             meta_row(ui, palette, "Carpeta", &parent.display().to_string());
                         }
                         meta_row(ui, palette, "Tamaño", &format_bytes(entry.size));
+                        if let (Some(w), Some(h)) = (entry.width, entry.height) {
+                            meta_row(ui, palette, "Dimensiones", &format!("{w} × {h} px"));
+                        }
+                        if let Some(fmt) = &entry.format {
+                            meta_row(ui, palette, "Formato", fmt);
+                        }
+                        if let Some(captured) = entry.captured_at_ns {
+                            meta_row(ui, palette, "Fecha de captura", &format_timestamp_plain(captured));
+                        }
                         let date_str = entry
                             .modified_ns
                             .map(format_timestamp_utc)

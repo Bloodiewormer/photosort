@@ -67,6 +67,14 @@ pub enum ReviewedFilter {
     Reviewed,
 }
 
+/// Image orientation derived from stored pixel dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Orientation {
+    Landscape,
+    Portrait,
+    Square,
+}
+
 /// Every condition must hold. Rejected labels never match.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Filter {
@@ -86,6 +94,32 @@ pub struct Filter {
     /// When `Some((mode, stages))`, filters by whether every stage in `stages` is done.
     /// With `stages` empty, nothing counts as `Reviewed` and everything counts as `Pending`.
     pub reviewed: Option<(ReviewedFilter, Vec<StageSpec>)>,
+    /// When non-empty, only assets whose normalized format (e.g. `"JPEG"`, `"PNG"`) is in this list match.
+    pub formats: Vec<String>,
+    /// When non-empty, only assets matching one of these orientations match.
+    pub orientations: Vec<Orientation>,
+    /// When non-empty, only assets whose EXIF capture year is in this list match.
+    pub capture_years: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelNode {
+    pub label: LabelId,
+    pub kind: LabelKind,
+    pub name: String,
+    pub parent: Option<LabelId>,
+    /// Active (non-rejected) present images matching this label (including subcategories).
+    pub images: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameOutcome {
+    Renamed,
+    /// Another label of the same kind already has this name (case-insensitive).
+    Conflict {
+        existing: LabelId,
+        existing_name: String,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -165,23 +199,40 @@ pub(crate) fn unexpected(column: usize, value: &str) -> rusqlite::Error {
     )
 }
 
-/// Matches the images that carry the label, ignoring rejected ones. The caller appends the comparison.
-const HAS: &str = "EXISTS (SELECT 1 FROM asset_label al WHERE al.asset_id = l.asset_id \
-                   AND al.status <> 'rejected' AND al.label_id";
+/// Matches the images that carry a label or any of its descendant categories, ignoring rejected ones.
+const HAS_SUBTREE_SINGLE: &str = "EXISTS (WITH RECURSIVE sub(id) AS (\
+                                  SELECT ? \
+                                  UNION ALL \
+                                  SELECT lb.id FROM label lb JOIN sub ON lb.parent_id = sub.id\
+                                  ) \
+                                  SELECT 1 FROM asset_label al \
+                                  WHERE al.asset_id = l.asset_id \
+                                    AND al.status <> 'rejected' \
+                                    AND al.label_id IN (SELECT id FROM sub))";
 
 /// Appends the filter's WHERE predicates against table alias `l` (location).
 pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, filter: &Filter) {
     for id in &filter.require {
-        sql.push_str(&format!(" AND {HAS} = ?)"));
+        sql.push_str(&format!(" AND {HAS_SUBTREE_SINGLE}"));
         args.push(Box::new(id.0));
     }
     if !filter.any.is_empty() {
         let marks = vec!["?"; filter.any.len()].join(",");
-        sql.push_str(&format!(" AND {HAS} IN ({marks}))"));
+        sql.push_str(&format!(
+            " AND EXISTS (WITH RECURSIVE sub(id) AS (\
+               SELECT id FROM label WHERE id IN ({marks}) \
+               UNION ALL \
+               SELECT lb.id FROM label lb JOIN sub ON lb.parent_id = sub.id\
+             ) \
+             SELECT 1 FROM asset_label al \
+             WHERE al.asset_id = l.asset_id \
+               AND al.status <> 'rejected' \
+               AND al.label_id IN (SELECT id FROM sub))"
+        ));
         args.extend(filter.any.iter().map(|id| Box::new(id.0) as Box<dyn ToSql>));
     }
     for id in &filter.exclude {
-        sql.push_str(&format!(" AND NOT {HAS} = ?)"));
+        sql.push_str(&format!(" AND NOT {HAS_SUBTREE_SINGLE}"));
         args.push(Box::new(id.0));
     }
     if let Some(text) = &filter.path_contains {
@@ -284,6 +335,40 @@ pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, fi
                     sql.push(')');
                 }
             }
+        }
+    }
+    if !filter.formats.is_empty() {
+        let marks = vec!["?"; filter.formats.len()].join(",");
+        sql.push_str(&format!(" AND a.format IN ({marks})"));
+        for fmt in &filter.formats {
+            args.push(Box::new(fmt.clone()));
+        }
+    }
+    if !filter.orientations.is_empty() {
+        sql.push_str(" AND (");
+        for (idx, orient) in filter.orientations.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(" OR ");
+            }
+            match orient {
+                Orientation::Landscape => {
+                    sql.push_str("(a.width > a.height AND a.width > 0 AND a.height > 0)");
+                }
+                Orientation::Portrait => {
+                    sql.push_str("(a.height > a.width AND a.width > 0 AND a.height > 0)");
+                }
+                Orientation::Square => {
+                    sql.push_str("(a.width = a.height AND a.width > 0)");
+                }
+            }
+        }
+        sql.push(')');
+    }
+    if !filter.capture_years.is_empty() {
+        let marks = vec!["?"; filter.capture_years.len()].join(",");
+        sql.push_str(&format!(" AND a.captured_year IN ({marks})"));
+        for &year in &filter.capture_years {
+            args.push(Box::new(i64::from(year)));
         }
     }
 }
@@ -408,7 +493,9 @@ impl Catalog {
     }
 
     pub fn find(&self, filter: &Filter) -> Result<Vec<PathBuf>, CatalogError> {
-        let mut sql = String::from("SELECT l.path FROM location l WHERE l.missing = 0");
+        let mut sql = String::from(
+            "SELECT l.path FROM location l JOIN asset a ON a.id = l.asset_id WHERE l.missing = 0",
+        );
         let mut args: Vec<Box<dyn ToSql>> = Vec::new();
         append_filter(&mut sql, &mut args, filter);
         sql.push_str(" ORDER BY l.path");
@@ -497,5 +584,480 @@ impl Catalog {
             }
         }
         Ok(out)
+    }
+
+    /// Lists all labels with their parent link and active present image counts (subcategories included).
+    pub fn list_labels(&self) -> Result<Vec<LabelNode>, CatalogError> {
+        self.list_labels_scoped(None)
+    }
+
+    /// Lists all labels with active present image counts restricted to `roots` (subcategories included).
+    pub fn list_labels_in_roots(&self, roots: &[PathBuf]) -> Result<Vec<LabelNode>, CatalogError> {
+        self.list_labels_scoped(Some(roots))
+    }
+
+    fn list_labels_scoped(
+        &self,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<Vec<LabelNode>, CatalogError> {
+        if let Some(r) = roots
+            && r.is_empty()
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, kind, name, parent_id
+                 FROM label
+                 ORDER BY kind, name COLLATE NOCASE",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let kind: String = row.get(1)?;
+                Ok(LabelNode {
+                    label: LabelId(row.get(0)?),
+                    kind: LabelKind::parse(&kind).ok_or_else(|| unexpected(1, &kind))?,
+                    name: row.get(2)?,
+                    parent: row.get::<_, Option<i64>>(3)?.map(LabelId),
+                    images: 0,
+                })
+            })?;
+            return Ok(rows.collect::<Result<_, _>>()?);
+        }
+
+        let (root_clause, args): (String, Vec<Box<dyn ToSql>>) = match roots {
+            None => (String::new(), Vec::new()),
+            Some(r) => {
+                let marks = vec!["?"; r.len()].join(",");
+                let a = r
+                    .iter()
+                    .map(|p| Box::new(p.to_string_lossy().into_owned()) as Box<dyn ToSql>)
+                    .collect();
+                (format!(" AND l.root IN ({marks})"), a)
+            }
+        };
+
+        let sql = format!(
+            "WITH RECURSIVE anc(descendant_id, ancestor_id) AS (
+                 SELECT id, id FROM label
+                 UNION ALL
+                 SELECT a.descendant_id, l.parent_id
+                 FROM anc a
+                 JOIN label l ON l.id = a.ancestor_id
+                 WHERE l.parent_id IS NOT NULL
+             )
+             SELECT lb.id, lb.kind, lb.name, lb.parent_id, COALESCE(c.images, 0)
+             FROM label lb
+             LEFT JOIN (
+                 SELECT anc.ancestor_id AS label_id, COUNT(DISTINCT al.asset_id) AS images
+                 FROM anc
+                 JOIN asset_label al ON al.label_id = anc.descendant_id
+                 WHERE al.status <> 'rejected'
+                   AND EXISTS (SELECT 1 FROM location l
+                               WHERE l.asset_id = al.asset_id
+                                 AND l.missing = 0{root_clause})
+                 GROUP BY anc.ancestor_id
+             ) c ON c.label_id = lb.id
+             ORDER BY lb.kind, lb.name COLLATE NOCASE"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |row| {
+            let kind: String = row.get(1)?;
+            Ok(LabelNode {
+                label: LabelId(row.get(0)?),
+                kind: LabelKind::parse(&kind).ok_or_else(|| unexpected(1, &kind))?,
+                name: row.get(2)?,
+                parent: row.get::<_, Option<i64>>(3)?.map(LabelId),
+                images: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Creates a new category (optionally under `parent`). Fails if the name is empty, already
+    /// exists (case-insensitive), or `parent` is not an existing category.
+    pub fn create_category(
+        &self,
+        name: &str,
+        parent: Option<LabelId>,
+    ) -> Result<LabelId, CatalogError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(CatalogError::InvalidOperation(
+                "El nombre de la categoría no puede estar vacío".into(),
+            ));
+        }
+        if let Some(p) = parent {
+            let parent_kind: Option<String> = self
+                .conn
+                .query_row("SELECT kind FROM label WHERE id = ?1", [p.0], |r| r.get(0))
+                .optional()?;
+            if parent_kind.as_deref() != Some("category") {
+                return Err(CatalogError::InvalidOperation(
+                    "La categoría padre no existe".into(),
+                ));
+            }
+        }
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                [trimmed],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Err(CatalogError::InvalidOperation(format!(
+                "Ya existe una categoría llamada «{trimmed}»"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO label (kind, name, parent_id) VALUES ('category', ?1, ?2)",
+            params![trimmed, parent.map(|p| p.0)],
+        )?;
+        Ok(LabelId(self.conn.last_insert_rowid()))
+    }
+
+    /// Creates a new flat tag. Fails if empty or already exists (case-insensitive).
+    pub fn create_tag(&self, name: &str) -> Result<LabelId, CatalogError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(CatalogError::InvalidOperation(
+                "El nombre de la etiqueta no puede estar vacío".into(),
+            ));
+        }
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM label WHERE kind = 'tag' AND name = ?1",
+                [trimmed],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Err(CatalogError::InvalidOperation(format!(
+                "Ya existe una etiqueta llamada «{trimmed}»"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO label (kind, name, parent_id) VALUES ('tag', ?1, NULL)",
+            [trimmed],
+        )?;
+        Ok(LabelId(self.conn.last_insert_rowid()))
+    }
+
+    /// Renames a category or tag. If another label of the same kind already has `new_name`
+    /// (case-insensitive), returns `RenameOutcome::Conflict` so the caller can offer a merge.
+    pub fn rename_label(&self, id: LabelId, new_name: &str) -> Result<RenameOutcome, CatalogError> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err(CatalogError::InvalidOperation(
+                "El nombre no puede estar vacío".into(),
+            ));
+        }
+        let kind: String = self
+            .conn
+            .query_row("SELECT kind FROM label WHERE id = ?1", [id.0], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| CatalogError::InvalidOperation("La etiqueta no existe".into()))?;
+        if kind == "entity" {
+            return Err(CatalogError::InvalidOperation(
+                "Las obras se gestionan desde la pestaña Obras".into(),
+            ));
+        }
+        let conflict: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, name FROM label WHERE kind = ?1 AND name = ?2 AND id <> ?3",
+                params![kind, trimmed, id.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_id, existing_name)) = conflict {
+            return Ok(RenameOutcome::Conflict {
+                existing: LabelId(existing_id),
+                existing_name,
+            });
+        }
+        self.conn.execute(
+            "UPDATE label SET name = ?2 WHERE id = ?1",
+            params![id.0, trimmed],
+        )?;
+        Ok(RenameOutcome::Renamed)
+    }
+
+    /// Moves a category under `new_parent` (or to the root when `None`). Rejects cycles.
+    pub fn move_category(
+        &self,
+        id: LabelId,
+        new_parent: Option<LabelId>,
+    ) -> Result<(), CatalogError> {
+        let kind: Option<String> = self
+            .conn
+            .query_row("SELECT kind FROM label WHERE id = ?1", [id.0], |r| r.get(0))
+            .optional()?;
+        if kind.as_deref() != Some("category") {
+            return Err(CatalogError::InvalidOperation(
+                "Solo las categorías pueden moverse dentro de otra categoría".into(),
+            ));
+        }
+        if let Some(p) = new_parent {
+            if p == id {
+                return Err(CatalogError::InvalidOperation(
+                    "No se puede mover una categoría dentro de sí misma".into(),
+                ));
+            }
+            let p_kind: Option<String> = self
+                .conn
+                .query_row("SELECT kind FROM label WHERE id = ?1", [p.0], |r| r.get(0))
+                .optional()?;
+            if p_kind.as_deref() != Some("category") {
+                return Err(CatalogError::InvalidOperation(
+                    "La categoría de destino no existe".into(),
+                ));
+            }
+            let creates_cycle: bool = self
+                .conn
+                .query_row(
+                    "WITH RECURSIVE anc(id) AS (
+                         SELECT parent_id FROM label WHERE id = ?1
+                         UNION ALL
+                         SELECT l.parent_id FROM label l JOIN anc ON l.id = anc.id
+                         WHERE l.parent_id IS NOT NULL
+                     )
+                     SELECT 1 FROM anc WHERE id = ?2 LIMIT 1",
+                    params![p.0, id.0],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if creates_cycle {
+                return Err(CatalogError::InvalidOperation(
+                    "No se puede mover una categoría dentro de una de sus subcategorías".into(),
+                ));
+            }
+        }
+        self.conn.execute(
+            "UPDATE label SET parent_id = ?2 WHERE id = ?1",
+            params![id.0, new_parent.map(|p| p.0)],
+        )?;
+        Ok(())
+    }
+
+    /// Merges `source` into `target` (same kind, category or tag).
+    /// - Assignments move to `target`; conflicts keep higher precedence:
+    ///   accepted > rejected > suggested, then higher confidence.
+    /// - Subcategories of `source` move to `target` without creating cycles.
+    /// - If `source` has a vision rule and `target` does not, the rule moves to `target`;
+    ///   if both have one, `target`'s rule is kept and `source`'s is deleted.
+    /// - `source` is removed from the catalog; no files are touched.
+    pub fn merge_labels(&mut self, source: LabelId, target: LabelId) -> Result<(), CatalogError> {
+        if source == target {
+            return Err(CatalogError::InvalidOperation(
+                "No se puede fusionar una etiqueta consigo misma".into(),
+            ));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let (src_kind, src_parent): (String, Option<i64>) = tx
+            .query_row(
+                "SELECT kind, parent_id FROM label WHERE id = ?1",
+                [source.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                CatalogError::InvalidOperation("La etiqueta de origen no existe".into())
+            })?;
+        let tgt_kind: String = tx
+            .query_row("SELECT kind FROM label WHERE id = ?1", [target.0], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| {
+                CatalogError::InvalidOperation("La etiqueta de destino no existe".into())
+            })?;
+
+        if src_kind == "entity" || tgt_kind == "entity" {
+            return Err(CatalogError::InvalidOperation(
+                "Las obras se gestionan desde la pestaña Obras".into(),
+            ));
+        }
+        if src_kind != tgt_kind {
+            return Err(CatalogError::InvalidOperation(
+                "Solo se pueden fusionar elementos del mismo tipo".into(),
+            ));
+        }
+
+        // 1. Reparent subcategories safely without cycles.
+        if src_kind == "category" {
+            let target_is_descendant: bool = tx
+                .query_row(
+                    "WITH RECURSIVE anc(id) AS (
+                         SELECT parent_id FROM label WHERE id = ?1
+                         UNION ALL
+                         SELECT l.parent_id FROM label l JOIN anc ON l.id = anc.id
+                         WHERE l.parent_id IS NOT NULL
+                     )
+                     SELECT 1 FROM anc WHERE id = ?2 LIMIT 1",
+                    params![target.0, source.0],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if target_is_descendant {
+                tx.execute(
+                    "UPDATE label SET parent_id = ?2 WHERE id = ?1",
+                    params![target.0, src_parent],
+                )?;
+            }
+            tx.execute(
+                "UPDATE label SET parent_id = ?2 WHERE parent_id = ?1",
+                params![source.0, target.0],
+            )?;
+        }
+
+        // 2. Merge asset_label rows respecting user decisions: accepted > rejected > suggested,
+        //    then higher confidence.
+        let src_rows: Vec<(i64, String, f64, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT asset_id, source, confidence, status
+                 FROM asset_label
+                 WHERE label_id = ?1",
+            )?;
+            let rows = stmt.query_map([source.0], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+
+        for (asset_id, src_source, src_conf, src_status) in src_rows {
+            let tgt_row: Option<(f64, String)> = tx
+                .query_row(
+                    "SELECT confidence, status FROM asset_label WHERE asset_id = ?1 AND label_id = ?2",
+                    params![asset_id, target.0],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match tgt_row {
+                None => {
+                    tx.execute(
+                        "INSERT INTO asset_label (asset_id, label_id, source, confidence, status)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![asset_id, target.0, src_source, src_conf, src_status],
+                    )?;
+                }
+                Some((tgt_conf, tgt_status)) => {
+                    if status_precedence(&src_status) > status_precedence(&tgt_status)
+                        || (status_precedence(&src_status) == status_precedence(&tgt_status)
+                            && src_conf > tgt_conf)
+                    {
+                        tx.execute(
+                            "UPDATE asset_label SET source = ?3, confidence = ?4, status = ?5
+                             WHERE asset_id = ?1 AND label_id = ?2",
+                            params![asset_id, target.0, src_source, src_conf, src_status],
+                        )?;
+                    }
+                }
+            }
+        }
+        tx.execute("DELETE FROM asset_label WHERE label_id = ?1", [source.0])?;
+
+        // 3. Merge vision_rule and vision_managed_label.
+        let src_has_rule = tx
+            .query_row(
+                "SELECT 1 FROM vision_rule WHERE label_id = ?1",
+                [source.0],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let tgt_has_rule = tx
+            .query_row(
+                "SELECT 1 FROM vision_rule WHERE label_id = ?1",
+                [target.0],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let src_managed = tx
+            .query_row(
+                "SELECT 1 FROM vision_managed_label WHERE label_id = ?1",
+                [source.0],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+
+        if src_has_rule {
+            if tgt_has_rule {
+                tx.execute("DELETE FROM vision_rule WHERE label_id = ?1", [source.0])?;
+            } else {
+                tx.execute(
+                    "UPDATE vision_rule SET label_id = ?2 WHERE label_id = ?1",
+                    params![source.0, target.0],
+                )?;
+                if src_managed {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO vision_managed_label (label_id) VALUES (?1)",
+                        [target.0],
+                    )?;
+                }
+            }
+        }
+        tx.execute(
+            "DELETE FROM vision_managed_label WHERE label_id = ?1",
+            [source.0],
+        )?;
+
+        // 4. Delete source label.
+        tx.execute("DELETE FROM label WHERE id = ?1", [source.0])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Removes a category or tag from the catalog. Direct subcategories are promoted to its parent.
+    /// Never touches files on disk.
+    pub fn delete_label(&mut self, id: LabelId) -> Result<bool, CatalogError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some((kind, parent_id)): Option<(String, Option<i64>)> = tx
+            .query_row(
+                "SELECT kind, parent_id FROM label WHERE id = ?1",
+                [id.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        if kind == "entity" {
+            return Err(CatalogError::InvalidOperation(
+                "Las obras se eliminan desde la pestaña Obras".into(),
+            ));
+        }
+        if kind == "category" {
+            tx.execute(
+                "UPDATE label SET parent_id = ?2 WHERE parent_id = ?1",
+                params![id.0, parent_id],
+            )?;
+        }
+        tx.execute("DELETE FROM asset_label WHERE label_id = ?1", [id.0])?;
+        tx.execute("DELETE FROM vision_rule WHERE label_id = ?1", [id.0])?;
+        tx.execute(
+            "DELETE FROM vision_managed_label WHERE label_id = ?1",
+            [id.0],
+        )?;
+        tx.execute("DELETE FROM label WHERE id = ?1", [id.0])?;
+        tx.commit()?;
+        Ok(true)
+    }
+}
+
+fn status_precedence(status: &str) -> u8 {
+    match status {
+        "accepted" => 3,
+        "rejected" => 2,
+        "suggested" => 1,
+        _ => 0,
     }
 }

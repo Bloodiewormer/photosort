@@ -1820,7 +1820,8 @@ impl Catalog {
             return Ok(Vec::new());
         }
         let mut sql = String::from(
-            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns, aw.chapter, aw.page
+            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
+                    a.width, a.height, a.format, a.captured_at_ns, aw.chapter, aw.page
              FROM asset_work aw
              JOIN asset a ON a.id = aw.asset_id
              JOIN location l ON l.asset_id = aw.asset_id
@@ -1841,20 +1842,10 @@ impl Catalog {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
-            let size: i64 = r.get(3)?;
-            let chapter: String = r.get(5)?;
-            let page: Option<i64> = r.get(6)?;
-            Ok((
-                Entry {
-                    asset: AssetId(r.get(0)?),
-                    path: PathBuf::from(r.get::<_, String>(1)?),
-                    sha256: r.get(2)?,
-                    size: size.max(0) as u64,
-                    modified_ns: r.get(4)?,
-                },
-                chapter,
-                page.and_then(|p| u32::try_from(p).ok()),
-            ))
+            let entry = crate::browse::entry_from_row(r)?;
+            let chapter: String = r.get(9)?;
+            let page: Option<i64> = r.get(10)?;
+            Ok((entry, chapter, page.and_then(|p| u32::try_from(p).ok())))
         })?;
 
         let mut items: Vec<(Entry, String, Option<u32>)> = rows.collect::<Result<_, _>>()?;

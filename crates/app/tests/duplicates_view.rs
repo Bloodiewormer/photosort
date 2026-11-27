@@ -13,6 +13,10 @@ fn make_entry(asset: i64, path: &str, sha: &str, size: u64) -> Entry {
         sha256: sha.into(),
         size,
         modified_ns: Some(1_700_000_000_000_000_000),
+        width: None,
+        height: None,
+        format: None,
+        captured_at_ns: None,
     }
 }
 

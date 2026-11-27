@@ -6,7 +6,7 @@ use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 
 pub const STAGE: &str = "rules";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 const BATCH_SIZE: usize = 256;
 
@@ -14,9 +14,12 @@ const BATCH_SIZE: usize = 256;
 pub struct Facts {
     pub file_name: String,
     pub extension: String,
+    pub format: Option<String>,
     pub width: u32,
     pub height: u32,
     pub has_camera_exif: bool,
+    pub captured_at_ns: Option<i64>,
+    pub captured_year: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,21 +43,27 @@ pub struct RunReport {
     pub stopped: bool,
 }
 
-/// Reads ONLY header/metadata: image dimensions via `image::image_dimensions` (no full decode)
-/// and camera Make/Model presence via `exif`. Read-only.
+/// Reads ONLY header/metadata: image format and dimensions via `image::ImageReader::into_dimensions`
+/// (no full decode), plus camera Make/Model presence and EXIF capture date (`DateTimeOriginal` with
+/// fallback to `DateTime`) via `exif`. Read-only.
 pub fn read_facts(path: &Path) -> io::Result<Facts> {
-    let (width, height) = image::image_dimensions(path).map_err(|e| match e {
+    let reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let detected_format = reader.format().map(image_format_name);
+    let (width, height) = reader.into_dimensions().map_err(|e| match e {
         image::ImageError::IoError(io_err) => io_err,
         other => io::Error::new(io::ErrorKind::InvalidData, other),
     })?;
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let has_camera_exif = exif::Reader::new()
-        .read_from_container(&mut reader)
-        .map(|data| {
-            has_non_empty_tag(&data, exif::Tag::Make) || has_non_empty_tag(&data, exif::Tag::Model)
-        })
-        .unwrap_or(false);
+    let mut buf = BufReader::new(file);
+    let exif_data = exif::Reader::new().read_from_container(&mut buf).ok();
+    let has_camera_exif = exif_data.as_ref().is_some_and(|data| {
+        has_non_empty_tag(data, exif::Tag::Make) || has_non_empty_tag(data, exif::Tag::Model)
+    });
+    let (captured_at_ns, captured_year) = exif_data
+        .as_ref()
+        .and_then(extract_capture_datetime)
+        .map(|(ns, y)| (Some(ns), Some(y)))
+        .unwrap_or((None, None));
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -63,13 +72,119 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
+    let format = detected_format
+        .map(ToOwned::to_owned)
+        .or_else(|| format_from_extension(&extension).map(ToOwned::to_owned));
     Ok(Facts {
         file_name,
         extension,
+        format,
         width,
         height,
         has_camera_exif,
+        captured_at_ns,
+        captured_year,
     })
+}
+
+fn image_format_name(fmt: image::ImageFormat) -> &'static str {
+    match fmt {
+        image::ImageFormat::Jpeg => "JPEG",
+        image::ImageFormat::Png => "PNG",
+        image::ImageFormat::Gif => "GIF",
+        image::ImageFormat::WebP => "WEBP",
+        image::ImageFormat::Bmp => "BMP",
+        image::ImageFormat::Tiff => "TIFF",
+        image::ImageFormat::Avif => "AVIF",
+        image::ImageFormat::Ico => "ICO",
+        _ => "OTRO",
+    }
+}
+
+fn format_from_extension(ext: &str) -> Option<&'static str> {
+    match ext {
+        "jpg" | "jpeg" => Some("JPEG"),
+        "png" => Some("PNG"),
+        "gif" => Some("GIF"),
+        "webp" => Some("WEBP"),
+        "bmp" => Some("BMP"),
+        "tif" | "tiff" => Some("TIFF"),
+        "avif" => Some("AVIF"),
+        "ico" => Some("ICO"),
+        _ => None,
+    }
+}
+
+fn extract_capture_datetime(data: &exif::Exif) -> Option<(i64, i32)> {
+    for tag in [exif::Tag::DateTimeOriginal, exif::Tag::DateTime] {
+        let Some(field) = data.get_field(tag, exif::In::PRIMARY) else {
+            continue;
+        };
+        let raw = match &field.value {
+            exif::Value::Ascii(values) => values
+                .iter()
+                .find_map(|bytes| {
+                    let s = std::str::from_utf8(bytes).ok()?.trim_matches('\0').trim();
+                    (!s.is_empty()).then(|| s.to_string())
+                })
+                .unwrap_or_default(),
+            _ => field.display_value().to_string(),
+        };
+        if let Some(parsed) = parse_exif_datetime_ns(&raw) {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
+/// Parses an EXIF datetime (`YYYY:MM:DD HH:MM:SS` or `YYYY-MM-DD HH:MM:SS`) into
+/// `(epoch_nanos, year)` using proleptic Gregorian wall-clock time.
+pub fn parse_exif_datetime_ns(raw: &str) -> Option<(i64, i32)> {
+    let trimmed = raw.trim().trim_matches('\0').trim();
+    if trimmed.len() < 19 {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    let sep1 = bytes[4];
+    let sep2 = bytes[7];
+    let sep_mid = bytes[10];
+    let sep3 = bytes[13];
+    let sep4 = bytes[16];
+    if !matches!(sep1, b':' | b'-')
+        || sep2 != sep1
+        || !matches!(sep_mid, b' ' | b'T')
+        || sep3 != b':'
+        || sep4 != b':'
+    {
+        return None;
+    }
+    let year: i32 = trimmed[0..4].parse().ok()?;
+    let month: u32 = trimmed[5..7].parse().ok()?;
+    let day: u32 = trimmed[8..10].parse().ok()?;
+    let hour: u32 = trimmed[11..13].parse().ok()?;
+    let minute: u32 = trimmed[14..16].parse().ok()?;
+    let second: u32 = trimmed[17..19].parse().ok()?;
+    if !(1900..=2200).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    // Howard Hinnant's days-from-civil algorithm (inverse of civil-from-days).
+    let y = i64::from(year) - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(month);
+    let d = i64::from(day);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    let ns = secs.checked_mul(1_000_000_000)?;
+    Some((ns, year))
 }
 
 fn has_non_empty_tag(data: &exif::Exif, tag: exif::Tag) -> bool {
@@ -82,8 +197,8 @@ fn has_non_empty_tag(data: &exif::Exif, tag: exif::Tag) -> bool {
         })
 }
 
-/// Runs rules on a single pending asset: reads header facts, records rule suggestions, and
-/// marks `STAGE` at `VERSION` done. Returns `Ok(Ok(suggestion_count))` on success,
+/// Runs rules on a single pending asset: reads header facts, stores image metadata, records rule
+/// suggestions, and marks `STAGE` at `VERSION` done. Returns `Ok(Ok(suggestion_count))` on success,
 /// `Ok(Err(reason))` if the image could not be read (leaving it pending), or `Err(db_err)` on
 /// catalog failure.
 pub fn analyze_pending_item(
@@ -92,6 +207,14 @@ pub fn analyze_pending_item(
 ) -> Result<Result<usize, String>, CatalogError> {
     match read_facts(&item.path) {
         Ok(facts) => {
+            catalog.set_asset_metadata(
+                item.asset,
+                Some(facts.width),
+                Some(facts.height),
+                facts.format.as_deref(),
+                facts.captured_at_ns,
+                facts.captured_year,
+            )?;
             let mut suggestions = 0usize;
             for s in suggest(&facts) {
                 let label = catalog.label(s.kind, s.name)?;
@@ -187,21 +310,13 @@ pub fn run_with(
                 continue;
             }
             progressed = true;
-            match read_facts(&item.path) {
-                Ok(facts) => {
-                    for s in suggest(&facts) {
-                        let label = catalog.label(s.kind, s.name)?;
-                        catalog.suggest(item.asset, label, Source::Rules, s.confidence)?;
-                        report.suggestions += 1;
-                    }
-                    if catalog.suggest_work_from_path(item.asset, &item.path)? {
-                        report.suggestions += 1;
-                    }
-                    catalog.mark_done(item.asset, STAGE, VERSION)?;
+            match analyze_pending_item(catalog, &item)? {
+                Ok(suggestions) => {
+                    report.suggestions += suggestions;
                     report.analyzed += 1;
                 }
-                Err(e) => {
-                    report.errors.push((item.path, e.to_string()));
+                Err(reason) => {
+                    report.errors.push((item.path, reason));
                     failed.insert(item.asset.0);
                 }
             }

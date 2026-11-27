@@ -3,6 +3,8 @@ pub mod bench;
 pub mod demo;
 pub mod export_flow;
 pub mod model;
+pub mod model_dirs;
+pub mod near_dupes_worker;
 pub mod ocr_worker;
 pub mod review_engine;
 pub mod review_flow;

@@ -139,16 +139,20 @@ pub fn draw(
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let prev_sort = *sort;
                         egui::ComboBox::from_id_salt("gallery_sort_combo")
-                            .width(140.0)
+                            .width(172.0)
                             .selected_text(sort_label(*sort))
                             .show_ui(ui, |ui| {
                                 for option in [
                                     Sort::PathAsc,
                                     Sort::PathDesc,
-                                    Sort::SizeAsc,
+                                    Sort::CapturedDesc,
+                                    Sort::CapturedAsc,
+                                    Sort::PixelsDesc,
+                                    Sort::PixelsAsc,
                                     Sort::SizeDesc,
-                                    Sort::ModifiedAsc,
+                                    Sort::SizeAsc,
                                     Sort::ModifiedDesc,
+                                    Sort::ModifiedAsc,
                                 ] {
                                     ui.selectable_value(sort, option, sort_label(option));
                                 }
@@ -654,9 +658,13 @@ pub fn sort_label(sort: Sort) -> &'static str {
     match sort {
         Sort::PathAsc => "Ruta (A-Z)",
         Sort::PathDesc => "Ruta (Z-A)",
-        Sort::SizeAsc => "Tamaño (menor)",
-        Sort::SizeDesc => "Tamaño (mayor)",
-        Sort::ModifiedAsc => "Fecha (antigua)",
-        Sort::ModifiedDesc => "Fecha (reciente)",
+        Sort::CapturedDesc => "Fecha de captura (reciente)",
+        Sort::CapturedAsc => "Fecha de captura (antigua)",
+        Sort::PixelsDesc => "Tamaño en píxeles (mayor)",
+        Sort::PixelsAsc => "Tamaño en píxeles (menor)",
+        Sort::SizeAsc => "Tamaño en disco (menor)",
+        Sort::SizeDesc => "Tamaño en disco (mayor)",
+        Sort::ModifiedAsc => "Modificación (antigua)",
+        Sort::ModifiedDesc => "Modificación (reciente)",
     }
 }

@@ -85,4 +85,4 @@ Las pruebas usan solo datos sintéticos. Las que necesitan modelos quedan como *
 
 ## Licencia
 
-El código de photosort se publica con la [licencia MIT](LICENSE). Las bibliotecas, `DirectML.dll`, ONNX Runtime y los modelos conservan sus propias licencias; antes de distribuir un instalador hay que revisarlas ([issue](https://github.com/Bloodiewormer/photosort/issues/42)).
+El código de photosort se publica con la [licencia MIT](LICENSE). Las bibliotecas, `DirectML.dll`, ONNX Runtime y los modelos conservan sus propias licencias; están resumidas en [docs/terceros.md](docs/terceros.md), con lo que falta antes de publicar un instalador.
