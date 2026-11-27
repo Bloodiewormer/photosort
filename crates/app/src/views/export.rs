@@ -2,7 +2,7 @@ use crate::export_flow::{
     ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, layout_description,
     layout_label, open_in_explorer, remember_export_dir,
 };
-use crate::model::{count_phrase, format_bytes, plural_word};
+use crate::model::{count_phrase, format_bytes, plural_word, truncate_middle};
 use crate::settings::Settings;
 use crate::theme::{self, Palette};
 use crate::worker::Notify;
@@ -190,6 +190,32 @@ fn draw_choose_step(
             .color(palette.text_secondary.color32()),
     );
 
+    ui.add_space(theme::SPACE_MD);
+    ui.label(RichText::new("Metadatos y etiquetas").strong());
+    ui.add_space(theme::SPACE_XS);
+
+    let mut write_xmp = wizard.write_xmp();
+    if ui
+        .checkbox(
+            &mut write_xmp,
+            "Guardar etiquetas en un archivo XMP junto a cada copia",
+        )
+        .changed()
+    {
+        wizard.set_write_xmp(write_xmp);
+    }
+
+    let mut embed_tags = wizard.embed_jpeg_tags();
+    if ui
+        .checkbox(
+            &mut embed_tags,
+            "Incrustar etiquetas en las copias JPEG (cambia sus bytes; el original no se toca)",
+        )
+        .changed()
+    {
+        wizard.set_embed_jpeg_tags(embed_tags);
+    }
+
     ui.add_space(theme::SPACE_LG);
     ui.separator();
     ui.add_space(theme::SPACE_SM);
@@ -261,13 +287,21 @@ fn draw_preview_ready(
     ui.add_space(theme::SPACE_XS);
 
     card_frame(palette).show(ui, |ui| {
-        info_row(
+        let dest_str = wizard.dest_input().display().to_string();
+        info_row_with_tooltip(
             ui,
             palette,
             "Destino",
-            &wizard.dest_input().display().to_string(),
+            &truncate_middle(&dest_str, 42),
+            &dest_str,
         );
         info_row(ui, palette, "Estructura", layout_label(wizard.layout()));
+        if wizard.write_xmp() {
+            info_row(ui, palette, "Archivo XMP", "Junto a cada copia");
+        }
+        if wizard.embed_jpeg_tags() {
+            info_row(ui, palette, "Etiquetas JPEG", "Incrustadas");
+        }
         ui.separator();
         info_row(
             ui,
@@ -535,7 +569,23 @@ fn info_row(ui: &mut egui::Ui, palette: &Palette, label: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).color(palette.text_secondary.color32()));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(value).strong());
+            ui.add(egui::Label::new(RichText::new(value).strong()).truncate());
+        });
+    });
+}
+
+fn info_row_with_tooltip(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    value: &str,
+    tooltip: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(palette.text_secondary.color32()));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(egui::Label::new(RichText::new(value).strong()).truncate())
+                .on_hover_text(tooltip);
         });
     });
 }

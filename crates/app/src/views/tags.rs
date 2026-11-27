@@ -218,24 +218,44 @@ pub fn draw(
                 state.load_editor(rule);
             }
 
-            ScrollArea::vertical().show(ui, |ui| {
-                ui.horizontal(|ui| {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                let mode_text = match (rule.mode, rule.kind) {
+                    (RuleMode::Type, _) => "Tipo exclusivo",
+                    (RuleMode::Independent, LabelKind::Category) => {
+                        "Categoría independiente"
+                    }
+                    (RuleMode::Independent, _) => "Etiqueta independiente",
+                };
+                if ui.available_width() < 280.0 {
                     ui.label(RichText::new(&rule.name).size(theme::FONT_HEADING).strong());
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let mode_text = match (rule.mode, rule.kind) {
-                            (RuleMode::Type, _) => "Tipo exclusivo",
-                            (RuleMode::Independent, LabelKind::Category) => {
-                                "Categoría independiente"
-                            }
-                            (RuleMode::Independent, _) => "Etiqueta independiente",
-                        };
-                        ui.label(
-                            RichText::new(mode_text)
-                                .size(theme::FONT_SMALL)
-                                .color(palette.text_secondary.color32()),
-                        );
-                    });
-                });
+                    ui.label(
+                        RichText::new(mode_text)
+                            .size(theme::FONT_SMALL)
+                            .color(palette.text_secondary.color32()),
+                    );
+                } else {
+                    egui::Sides::new().shrink_left().truncate().show(
+                        ui,
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&rule.name).size(theme::FONT_HEADING).strong(),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&rule.name);
+                        },
+                        |ui| {
+                            ui.label(
+                                RichText::new(mode_text)
+                                    .size(theme::FONT_SMALL)
+                                    .color(palette.text_secondary.color32()),
+                            );
+                        },
+                    );
+                }
                 ui.add_space(theme::SPACE_XS);
 
                 // Accuracy counts for this rule (accepted / rejected AI suggestions)

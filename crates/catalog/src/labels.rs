@@ -517,6 +517,36 @@ impl Catalog {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Returns the hierarchical category paths for the given asset (e.g. "Manga|Scanlation|Página promocional")
+    /// for categories that have parent categories.
+    pub fn hierarchical_categories_of(&self, asset: AssetId) -> Result<Vec<String>, CatalogError> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE cat_anc(id, name, parent_id, path) AS (
+                SELECT id, name, parent_id, name AS path
+                FROM label
+                WHERE kind = 'category' AND parent_id IS NULL
+                UNION ALL
+                SELECT l.id, l.name, l.parent_id, a.path || '|' || l.name
+                FROM label l
+                JOIN cat_anc a ON l.parent_id = a.id
+                WHERE l.kind = 'category'
+            )
+            SELECT ca.path
+            FROM asset_label al
+            JOIN cat_anc ca ON al.label_id = ca.id
+            WHERE al.asset_id = ?1
+              AND al.status <> 'rejected'
+              AND ca.parent_id IS NOT NULL
+            ORDER BY ca.path",
+        )?;
+        let rows = stmt.query_map([asset.0], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn find(&self, filter: &Filter) -> Result<Vec<PathBuf>, CatalogError> {
         let mut sql = String::from(
             "SELECT l.path FROM location l JOIN asset a ON a.id = l.asset_id WHERE l.missing = 0",
@@ -805,6 +835,14 @@ impl Catalog {
             params![id.0, trimmed],
         )?;
         Ok(RenameOutcome::Renamed)
+    }
+
+    /// Looks up the name of a label by its id.
+    pub fn label_name(&self, id: LabelId) -> Result<Option<String>, CatalogError> {
+        Ok(self
+            .conn
+            .query_row("SELECT name FROM label WHERE id = ?1", [id.0], |r| r.get(0))
+            .optional()?)
     }
 
     /// Moves a category under `new_parent` (or to the root when `None`). Rejects cycles.

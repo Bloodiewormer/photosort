@@ -220,13 +220,7 @@ pub fn draw(
                                 selection.clear();
                                 outcome.selection_changed = true;
                             }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new("Clic derecho para más opciones")
-                                        .size(theme::FONT_SMALL)
-                                        .color(palette.text_hint.color32()),
-                                );
-                            });
+                            draw_menu_hint(ui, palette);
                         });
                     });
                 ui.add_space(theme::SPACE_MD);
@@ -709,5 +703,88 @@ pub fn sort_label(sort: Sort) -> &'static str {
         Sort::SizeDesc => "Tamaño en disco (mayor)",
         Sort::ModifiedAsc => "Modificación (antigua)",
         Sort::ModifiedDesc => "Modificación (reciente)",
+    }
+}
+
+/// Shows the context-menu hint at the right of the selection bar, only when it fits in
+/// the space the buttons left on their row, so it never overlaps them.
+fn draw_menu_hint(ui: &mut egui::Ui, palette: &Palette) -> Option<egui::Response> {
+    let hint = RichText::new("Clic derecho para más opciones")
+        .size(theme::FONT_SMALL)
+        .color(palette.text_hint.color32());
+    let hint_w = egui::WidgetText::from(hint.clone())
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x;
+    (ui.available_size_before_wrap().x >= hint_w + ui.spacing().item_spacing.x).then(|| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(hint))
+            .inner
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Pos2, RawInput, Vec2};
+
+    /// Lays out the selection bar in a row `width` wide, with buttons and labels at `text_size`;
+    /// returns the buttons' and the hint's rects.
+    fn bar(width: f32, text_size: f32) -> (Vec<Rect>, Option<Rect>) {
+        let ctx = egui::Context::default();
+        let (mut buttons, mut hint) = (Vec::new(), None);
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 400.0))),
+                ..Default::default()
+            },
+            |ui| {
+                for style in [egui::TextStyle::Body, egui::TextStyle::Button] {
+                    ui.style_mut()
+                        .text_styles
+                        .insert(style, egui::FontId::proportional(text_size));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    buttons.push(ui.label(selected_phrase(2)).rect);
+                    for text in ["Volver a revisar", "Exportar…", "Quitar selección"] {
+                        buttons.push(ui.button(text).rect);
+                    }
+                    hint = draw_menu_hint(ui, &theme::LIGHT_PALETTE).map(|r| r.rect);
+                });
+            },
+        );
+        out.textures_delta.clear();
+        (buttons, hint)
+    }
+
+    #[test]
+    fn menu_hint_never_overlaps_the_selection_buttons() {
+        for text_size in [theme::FONT_BODY, 20.0, 28.0] {
+            for width in [220.0, 300.0, 432.0, 520.0, 700.0, 1000.0] {
+                let (buttons, hint) = bar(width, text_size);
+                if let Some(hint) = hint {
+                    assert!(
+                        buttons.iter().all(|b| !b.intersects(hint)),
+                        "a {width} px y texto de {text_size} el aviso pisa un botón"
+                    );
+                    assert!(
+                        hint.max.x <= width + 0.5,
+                        "a {width} px se sale de la barra"
+                    );
+                }
+            }
+        }
+        assert!(
+            bar(1000.0, theme::FONT_BODY).1.is_some(),
+            "a 1000 px debe caber"
+        );
+        assert!(
+            bar(432.0, theme::FONT_BODY).1.is_none(),
+            "a 432 px no cabe junto a los botones"
+        );
     }
 }

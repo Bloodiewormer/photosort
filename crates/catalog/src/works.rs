@@ -114,12 +114,32 @@ pub struct WorkMatch {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct WorkLineMatch {
+    pub label: LabelId,
+    pub confidence: f64,
+    pub rect: [f32; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssetWorkMatches {
     pub works: Vec<WorkMatch>,
+    pub work_rects: Vec<WorkLineMatch>,
     pub promo_confidence: Option<f64>,
     pub credits_confidence: Option<f64>,
     pub recruitment_confidence: Option<f64>,
     pub ad_confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetCover {
+    pub id: Option<i64>,
+    pub asset: AssetId,
+    pub cover_idx: usize,
+    pub rect: [f32; 4],
+    pub work: Option<LabelId>,
+    pub work_name: Option<String>,
+    pub confidence: f64,
+    pub status: Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,6 +300,7 @@ impl WorkMatcher {
         if candidates.is_empty() {
             return AssetWorkMatches {
                 works: Vec::new(),
+                work_rects: Vec::new(),
                 promo_confidence: None,
                 credits_confidence: None,
                 recruitment_confidence: None,
@@ -310,6 +331,7 @@ impl WorkMatcher {
                         key_len: alias.chars.len(),
                         confidence: score,
                         lines: cand.lines,
+                        rect: cand.rect,
                     });
                 }
             }
@@ -363,6 +385,7 @@ impl WorkMatcher {
                             key_len: alias.chars.len(),
                             confidence: score,
                             lines: cand.lines,
+                            rect: cand.rect,
                         });
                         continue;
                     }
@@ -398,6 +421,7 @@ impl WorkMatcher {
                                 key_len: alias.chars.len(),
                                 confidence: conf,
                                 lines: cand.lines,
+                                rect: cand.rect,
                             });
                         }
                     }
@@ -407,7 +431,7 @@ impl WorkMatcher {
 
         // Subsumption: if one matched work's key is contained in another matched work's longer key
         // within the same lines, keep only the longer one.
-        let mut best_per_work: HashMap<LabelId, (f64, usize)> = HashMap::new();
+        let mut best_per_work: HashMap<LabelId, (f64, usize, [f32; 4])> = HashMap::new();
         for (i, m) in raw_matches.iter().enumerate() {
             let subsumed = raw_matches.iter().enumerate().any(|(j, other)| {
                 i != j
@@ -421,23 +445,35 @@ impl WorkMatcher {
             }
             best_per_work
                 .entry(m.label)
-                .and_modify(|(best_conf, best_len)| {
+                .and_modify(|(best_conf, best_len, best_rect)| {
                     if m.confidence > *best_conf
                         || ((m.confidence - *best_conf).abs() < f64::EPSILON
                             && m.key_len > *best_len)
                     {
                         *best_conf = m.confidence;
                         *best_len = m.key_len;
+                        *best_rect = m.rect;
                     }
                 })
-                .or_insert((m.confidence, m.key_len));
+                .or_insert((m.confidence, m.key_len, m.rect));
         }
 
-        let mut works: Vec<WorkMatch> = best_per_work
-            .into_iter()
-            .map(|(label, (confidence, _))| WorkMatch { label, confidence })
-            .collect();
+        let mut works: Vec<WorkMatch> = Vec::with_capacity(best_per_work.len());
+        let mut work_rects: Vec<WorkLineMatch> = Vec::with_capacity(best_per_work.len());
+        for (label, (confidence, _, rect)) in best_per_work {
+            works.push(WorkMatch { label, confidence });
+            work_rects.push(WorkLineMatch {
+                label,
+                confidence,
+                rect,
+            });
+        }
         works.sort_by(|a, b| {
+            b.confidence
+                .total_cmp(&a.confidence)
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        work_rects.sort_by(|a, b| {
             b.confidence
                 .total_cmp(&a.confidence)
                 .then_with(|| a.label.cmp(&b.label))
@@ -466,6 +502,7 @@ impl WorkMatcher {
 
         AssetWorkMatches {
             works,
+            work_rects,
             promo_confidence,
             credits_confidence,
             recruitment_confidence,
@@ -1001,6 +1038,7 @@ struct Candidate {
     digits: Vec<char>,
     min_score: f32,
     lines: LineSet,
+    rect: [f32; 4],
 }
 
 struct RawMatch<'a> {
@@ -1009,6 +1047,7 @@ struct RawMatch<'a> {
     key_len: usize,
     confidence: f64,
     lines: LineSet,
+    rect: [f32; 4],
 }
 
 struct ValidLine {
@@ -1092,6 +1131,7 @@ fn build_candidates(lines: &[OcrLine], is_screenshot: bool) -> Vec<Candidate> {
             key: a.key.clone(),
             min_score: a.score,
             lines: LineSet::one(i),
+            rect: a.rect,
         });
 
         if let Some(j) = next_below[i] {
@@ -1102,12 +1142,19 @@ fn build_candidates(lines: &[OcrLine], is_screenshot: bool) -> Vec<Candidate> {
             let score2 = a.score.min(b.score);
             let chars2: Vec<char> = key2.chars().collect();
             let digits2: Vec<char> = chars2.iter().copied().filter(|c| c.is_numeric()).collect();
+            let rect2 = [
+                a.rect[0].min(b.rect[0]),
+                a.rect[1].min(b.rect[1]),
+                a.rect[2].max(b.rect[2]),
+                a.rect[3].max(b.rect[3]),
+            ];
             out.push(Candidate {
                 chars: chars2,
                 digits: digits2,
                 key: key2.clone(),
                 min_score: score2,
                 lines: LineSet::two(i, j),
+                rect: rect2,
             });
 
             if let Some(k) = next_below[j]
@@ -1121,12 +1168,19 @@ fn build_candidates(lines: &[OcrLine], is_screenshot: bool) -> Vec<Candidate> {
                 let chars3: Vec<char> = key3.chars().collect();
                 let digits3: Vec<char> =
                     chars3.iter().copied().filter(|c| c.is_numeric()).collect();
+                let rect3 = [
+                    rect2[0].min(c.rect[0]),
+                    rect2[1].min(c.rect[1]),
+                    rect2[2].max(c.rect[2]),
+                    rect2[3].max(c.rect[3]),
+                ];
                 out.push(Candidate {
                     chars: chars3,
                     digits: digits3,
                     key: key3,
                     min_score: score3,
                     lines: LineSet::three(i, j, k),
+                    rect: rect3,
                 });
             }
         }
@@ -1899,6 +1953,10 @@ impl Catalog {
         )?;
         tx.execute(
             &format!("DELETE FROM proposed_work_group WHERE work_id IN ({IS_WORK})"),
+            [work.0],
+        )?;
+        tx.execute(
+            &format!("DELETE FROM asset_cover WHERE work_id IN ({IS_WORK})"),
             [work.0],
         )?;
         for table in ["asset_label", "work_alias"] {
@@ -3201,6 +3259,151 @@ impl Catalog {
 
         tx.commit()?;
         Ok(changed)
+    }
+
+    /// Returns true if `asset` is currently suggested or accepted as a promotional page.
+    pub fn is_promo_page(&self, asset: AssetId) -> Result<bool, CatalogError> {
+        let is_promo: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM asset_label al
+                 JOIN label l ON l.id = al.label_id
+                 WHERE al.asset_id = ?1
+                   AND l.kind = 'category'
+                   AND l.name = ?2
+                   AND al.status IN ('suggested', 'accepted')
+             )",
+            params![asset.0, PROMO_CATEGORY],
+            |r| r.get(0),
+        )?;
+        Ok(is_promo != 0)
+    }
+
+    /// Returns all saved cover regions for `asset`, sorted by `cover_idx`.
+    pub fn asset_covers(&self, asset: AssetId) -> Result<Vec<AssetCover>, CatalogError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ac.id, ac.cover_idx, ac.x0, ac.y0, ac.x1, ac.y1, ac.work_id, l.name, ac.confidence, ac.status
+             FROM asset_cover ac
+             LEFT JOIN label l ON l.id = ac.work_id
+             WHERE ac.asset_id = ?1
+             ORDER BY ac.cover_idx ASC",
+        )?;
+        let rows = stmt.query_map([asset.0], |r| {
+            let status_str: String = r.get(9)?;
+            let status = Status::parse(&status_str).ok_or_else(|| unexpected(9, &status_str))?;
+            let work_id: Option<i64> = r.get(6)?;
+            Ok(AssetCover {
+                id: Some(r.get(0)?),
+                asset,
+                cover_idx: r.get::<_, i64>(1)? as usize,
+                rect: [
+                    r.get::<_, f64>(2)? as f32,
+                    r.get::<_, f64>(3)? as f32,
+                    r.get::<_, f64>(4)? as f32,
+                    r.get::<_, f64>(5)? as f32,
+                ],
+                work: work_id.map(LabelId),
+                work_name: r.get(7)?,
+                confidence: r.get(8)?,
+                status,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Replaces the suggested cover regions of `asset` with `covers`. Accepted and rejected rows
+    /// are never touched, region included; a new region overlapping one of them (IoU > 0.35) is
+    /// dropped, because the user already decided about that card. New rows take the lowest free
+    /// `cover_idx`, so they never collide with a decided one.
+    pub fn save_asset_covers(
+        &mut self,
+        asset: AssetId,
+        covers: &[AssetCover],
+    ) -> Result<(), CatalogError> {
+        let decided: Vec<AssetCover> = self
+            .asset_covers(asset)?
+            .into_iter()
+            .filter(|c| c.status != Status::Suggested)
+            .collect();
+        let mut used: HashSet<usize> = decided.iter().map(|d| d.cover_idx).collect();
+        let mut next_idx = 0usize;
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM asset_cover WHERE asset_id = ?1 AND status = 'suggested'",
+            [asset.0],
+        )?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO asset_cover
+                     (asset_id, cover_idx, x0, y0, x1, y1, work_id, confidence, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'suggested')",
+            )?;
+            for cover in covers {
+                if decided.iter().any(|d| rect_iou(d.rect, cover.rect) > 0.35) {
+                    continue;
+                }
+                while used.contains(&next_idx) {
+                    next_idx += 1;
+                }
+                used.insert(next_idx);
+                stmt.execute(params![
+                    asset.0,
+                    next_idx as i64,
+                    f64::from(cover.rect[0]),
+                    f64::from(cover.rect[1]),
+                    f64::from(cover.rect[2]),
+                    f64::from(cover.rect[3]),
+                    cover.work.map(|w| w.0),
+                    cover.confidence.clamp(0.0, 1.0),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Accepts an asset cover suggestion: sets `status = 'accepted'`.
+    pub fn accept_asset_cover(
+        &self,
+        asset: AssetId,
+        cover_idx: usize,
+    ) -> Result<bool, CatalogError> {
+        let changed = self.conn.execute(
+            "UPDATE asset_cover SET status = 'accepted' WHERE asset_id = ?1 AND cover_idx = ?2",
+            params![asset.0, cover_idx as i64],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Rejects an asset cover suggestion: sets `status = 'rejected'`.
+    pub fn reject_asset_cover(
+        &self,
+        asset: AssetId,
+        cover_idx: usize,
+    ) -> Result<bool, CatalogError> {
+        let changed = self.conn.execute(
+            "UPDATE asset_cover SET status = 'rejected' WHERE asset_id = ?1 AND cover_idx = ?2",
+            params![asset.0, cover_idx as i64],
+        )?;
+        Ok(changed > 0)
+    }
+}
+
+fn rect_iou(r1: [f32; 4], r2: [f32; 4]) -> f32 {
+    let inter_x0 = r1[0].max(r2[0]);
+    let inter_y0 = r1[1].max(r2[1]);
+    let inter_x1 = r1[2].min(r2[2]);
+    let inter_y1 = r1[3].min(r2[3]);
+    let inter_w = (inter_x1 - inter_x0).max(0.0);
+    let inter_h = (inter_y1 - inter_y0).max(0.0);
+    let inter_area = inter_w * inter_h;
+    let area1 = (r1[2] - r1[0]).max(0.0) * (r1[3] - r1[1]).max(0.0);
+    let area2 = (r2[2] - r2[0]).max(0.0) * (r2[3] - r2[1]).max(0.0);
+    let union_area = area1 + area2 - inter_area;
+    if union_area <= 0.0 {
+        0.0
+    } else {
+        inter_area / union_area
     }
 }
 

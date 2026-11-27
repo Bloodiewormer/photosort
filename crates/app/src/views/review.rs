@@ -121,39 +121,42 @@ pub fn draw(
             }
 
             let active_id = flow.active_group_label();
-            ScrollArea::vertical().show(ui, |ui| {
-                for group in flow.groups() {
-                    let is_active = active_id == Some(group.label);
-                    let bg = if is_active {
-                        palette.accent_bg.color32()
-                    } else {
-                        palette.bg_card.color32()
-                    };
-                    let stroke = if is_active {
-                        Stroke::new(theme::FOCUS_STROKE_WIDTH, palette.accent.color32())
-                    } else {
-                        Stroke::new(1.0, palette.border.color32())
-                    };
-                    let label_text = format!(
-                        "{} · {} ({})",
-                        kind_label(group.kind),
-                        group.name,
-                        group.count()
-                    );
-                    let btn = egui::Button::new(
-                        RichText::new(label_text)
-                            .size(theme::FONT_BODY)
-                            .color(palette.text_primary.color32()),
-                    )
-                    .fill(bg)
-                    .stroke(stroke)
-                    .min_size(Vec2::new(ui.available_width(), 34.0));
-                    if ui.add(btn).clicked() {
-                        selected_group = Some(group.label);
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for group in flow.groups() {
+                        let is_active = active_id == Some(group.label);
+                        let bg = if is_active {
+                            palette.accent_bg.color32()
+                        } else {
+                            palette.bg_card.color32()
+                        };
+                        let stroke = if is_active {
+                            Stroke::new(theme::FOCUS_STROKE_WIDTH, palette.accent.color32())
+                        } else {
+                            Stroke::new(1.0, palette.border.color32())
+                        };
+                        let label_text = format!(
+                            "{} · {} ({})",
+                            kind_label(group.kind),
+                            group.name,
+                            group.count()
+                        );
+                        let btn = egui::Button::new(
+                            RichText::new(label_text)
+                                .size(theme::FONT_BODY)
+                                .color(palette.text_primary.color32()),
+                        )
+                        .fill(bg)
+                        .stroke(stroke)
+                        .min_size(Vec2::new(ui.available_width(), 34.0))
+                        .truncate();
+                        if ui.add(btn).clicked() {
+                            selected_group = Some(group.label);
+                        }
+                        ui.add_space(theme::SPACE_XS);
                     }
-                    ui.add_space(theme::SPACE_XS);
-                }
-            });
+                });
         });
 
     if let Some(label) = selected_group {
@@ -275,7 +278,6 @@ pub fn draw(
                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                     .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new(format!(
@@ -287,14 +289,26 @@ pub fn draw(
                                 .strong()
                                 .color(palette.review_badge_fg.color32()),
                             );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Cancelar").clicked() {
-                                    cancel_group = true;
-                                }
-                                if ui.button("Confirmar").clicked() {
-                                    confirm_group = true;
-                                }
-                            });
+                            // Inside a wrapped row, only the space left on the row counts.
+                            if ui.available_size_before_wrap().x < 240.0 {
+                                ui.horizontal(|ui| {
+                                    if ui.button("Cancelar").clicked() {
+                                        cancel_group = true;
+                                    }
+                                    if ui.button("Confirmar").clicked() {
+                                        confirm_group = true;
+                                    }
+                                });
+                            } else {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.button("Cancelar").clicked() {
+                                        cancel_group = true;
+                                    }
+                                    if ui.button("Confirmar").clicked() {
+                                        confirm_group = true;
+                                    }
+                                });
+                            }
                         });
                     });
                 ui.add_space(theme::SPACE_SM);

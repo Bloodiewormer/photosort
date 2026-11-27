@@ -80,11 +80,12 @@ pub fn draw_top_bar(
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 let search_id = Id::unique(SEARCH_INPUT_ID);
+                let search_w = (ui.available_width() - 360.0).clamp(160.0, 280.0);
                 let search_resp = ui
                     .add(
                         egui::TextEdit::singleline(search)
                             .id(search_id)
-                            .desired_width(280.0)
+                            .desired_width(search_w)
                             .hint_text(theme::hint_text(palette, "Buscar en texto o ruta (/)")),
                     )
                     .on_hover_text("Busca en el texto leído y en la ruta (/ o Ctrl+F)");
@@ -768,7 +769,8 @@ fn draw_category_tree_group(
                 let btn = egui::Button::new(rt)
                     .fill(bg)
                     .stroke(stroke)
-                    .corner_radius(CornerRadius::same(theme::RADIUS_SM));
+                    .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                    .truncate();
                 let resp = ui
                     .add(btn)
                     .on_hover_text(format_chip_tooltip(mode, &node.name, count));
@@ -853,7 +855,8 @@ fn draw_flat_filter_group(
                 let btn = egui::Button::new(rt)
                     .fill(bg)
                     .stroke(stroke)
-                    .corner_radius(CornerRadius::same(theme::RADIUS_SM));
+                    .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                    .truncate();
                 let resp = ui
                     .add(btn)
                     .on_hover_text(format_chip_tooltip(mode, &lc.name, count));

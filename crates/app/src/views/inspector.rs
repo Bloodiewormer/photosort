@@ -18,6 +18,7 @@ pub struct InspectorState {
     pub asset: Option<AssetId>,
     pub labels: Vec<Assignment>,
     pub asset_work: Option<AssetWork>,
+    pub covers: Vec<catalog::AssetCover>,
     pub ocr_lines: Vec<OcrLine>,
     pub ocr_done: bool,
     pub faces: Vec<DetectedFace>,
@@ -37,6 +38,7 @@ impl Default for InspectorState {
             asset: None,
             labels: Vec::new(),
             asset_work: None,
+            covers: Vec::new(),
             ocr_lines: Vec::new(),
             ocr_done: false,
             faces: Vec::new(),
@@ -60,6 +62,8 @@ pub struct InspectorOutcome {
     pub reject_action: Option<(AssetId, LabelId)>,
     pub accept_work: Option<AssetId>,
     pub reject_work: Option<AssetId>,
+    pub accept_cover: Option<(AssetId, usize)>,
+    pub reject_cover: Option<(AssetId, usize)>,
     pub add_user_label: Option<(AssetId, LabelKind, String)>,
     pub create_work_from_ocr: Option<(AssetId, String)>,
     pub add_alias_from_ocr: Option<(AssetId, LabelId, String)>,
@@ -95,39 +99,65 @@ pub fn draw(
                 .stroke(Stroke::new(1.0, palette.border.color32())),
         )
         .show(ui, |ui| {
-            ScrollArea::vertical().show(ui, |ui| {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                 // Header: filename + actions
-                ui.horizontal(|ui| {
-                    if is_reviewed {
-                        let (mark_rect, mark_resp) =
-                            ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-                        theme::paint_reviewed_mark(ui.painter(), mark_rect, palette);
-                        mark_resp.on_hover_text("Revisada");
-                    }
-                    // The mark alone would say it by shape and colour only.
-                    ui.label(if is_reviewed {
-                        "Revisada"
-                    } else {
-                        "Sin revisar"
-                    });
-                    let review_lbl = if is_reviewed {
-                        "Volver a revisar"
-                    } else {
-                        "Revisar"
-                    };
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Visor").clicked() {
-                            outcome.open_viewer = true;
+                let review_lbl = if is_reviewed {
+                    "Volver a revisar"
+                } else {
+                    "Revisar"
+                };
+                if ui.available_width() < 270.0 {
+                    ui.horizontal(|ui| {
+                        if is_reviewed {
+                            let (mark_rect, mark_resp) =
+                                ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                            theme::paint_reviewed_mark(ui.painter(), mark_rect, palette);
+                            mark_resp.on_hover_text("Revisada");
                         }
+                        ui.label(if is_reviewed {
+                            "Revisada"
+                        } else {
+                            "Sin revisar"
+                        });
+                    });
+                    ui.horizontal(|ui| {
                         if ui.button(review_lbl).clicked() {
                             outcome.review_asset = Some(entry.asset);
                         }
+                        if ui.button("Visor").clicked() {
+                            outcome.open_viewer = true;
+                        }
                     });
-                });
+                } else {
+                    ui.horizontal(|ui| {
+                        if is_reviewed {
+                            let (mark_rect, mark_resp) =
+                                ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                            theme::paint_reviewed_mark(ui.painter(), mark_rect, palette);
+                            mark_resp.on_hover_text("Revisada");
+                        }
+                        // The mark alone would say it by shape and colour only.
+                        ui.label(if is_reviewed {
+                            "Revisada"
+                        } else {
+                            "Sin revisar"
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Visor").clicked() {
+                                outcome.open_viewer = true;
+                            }
+                            if ui.button(review_lbl).clicked() {
+                                outcome.review_asset = Some(entry.asset);
+                            }
+                        });
+                    });
+                }
                 ui.add_space(theme::SPACE_SM);
 
                 // Preview box
-                let preview_w = ui.available_width().max(120.0);
+                let preview_w = ui.available_width();
                 let preview_h = 200.0;
                 let (rect, _) =
                     ui.allocate_exact_size(Vec2::new(preview_w, preview_h), Sense::hover());
@@ -147,6 +177,60 @@ pub fn draw(
                             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             Color32::WHITE,
                         );
+
+                        // Draw cover region boxes on preview
+                        // Regions are in full-size pixels of the oriented image (as the OCR
+                        // lines), while the texture is a smaller preview: scale by the stored
+                        // size, swapped when EXIF rotation turned the picture. Unknown size: skip.
+                        let tex_size = tex.size_vec2();
+                        let (mut img_w, mut img_h) = (
+                            entry.width.unwrap_or(0) as f32,
+                            entry.height.unwrap_or(0) as f32,
+                        );
+                        if (img_w > img_h) != (tex_size.x > tex_size.y) {
+                            std::mem::swap(&mut img_w, &mut img_h);
+                        }
+
+                        if img_w > 0.0 && img_h > 0.0 {
+                            for cover in &state.covers {
+                                let x0_norm = (cover.rect[0] / img_w).clamp(0.0, 1.0);
+                                let y0_norm = (cover.rect[1] / img_h).clamp(0.0, 1.0);
+                                let x1_norm = (cover.rect[2] / img_w).clamp(0.0, 1.0);
+                                let y1_norm = (cover.rect[3] / img_h).clamp(0.0, 1.0);
+
+                                let cover_rect = Rect::from_min_max(
+                                    egui::pos2(
+                                        fit.min.x + x0_norm * fit.width(),
+                                        fit.min.y + y0_norm * fit.height(),
+                                    ),
+                                    egui::pos2(
+                                        fit.min.x + x1_norm * fit.width(),
+                                        fit.min.y + y1_norm * fit.height(),
+                                    ),
+                                );
+
+                                let border_color = match cover.status {
+                                    Status::Accepted => palette.status_accepted_fg.color32(),
+                                    Status::Rejected => palette.status_rejected_fg.color32(),
+                                    Status::Suggested => palette.accent.color32(),
+                                };
+
+                                ui.painter().rect_stroke(
+                                    cover_rect,
+                                    CornerRadius::same(2),
+                                    Stroke::new(1.5, border_color),
+                                    egui::StrokeKind::Inside,
+                                );
+                                // The number ties the box to its row in «Portadas», not only colour.
+                                ui.painter().text(
+                                    cover_rect.left_top() + Vec2::splat(3.0),
+                                    egui::Align2::LEFT_TOP,
+                                    (cover.cover_idx + 1).to_string(),
+                                    egui::FontId::proportional(theme::FONT_SMALL),
+                                    border_color,
+                                );
+                            }
+                        }
                     }
                     Some((p, Err(e))) if p == &entry.path => {
                         ui.painter().text(
@@ -276,11 +360,19 @@ pub fn draw(
                                 .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(&aw.work_name).strong());
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
+                                    // Sides lays out the status first, so the long name truncates instead of pushing it out.
+                                    egui::Sides::new().shrink_left().truncate().show(
+                                        ui,
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&aw.work_name).strong(),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&aw.work_name);
+                                        },
+                                        |ui| {
                                                 let (st_text, st_color) = match aw.status {
                                                     Status::Accepted => (
                                                         "Confirmada",
@@ -300,9 +392,8 @@ pub fn draw(
                                                         .size(theme::FONT_SMALL)
                                                         .color(st_color),
                                                 );
-                                            },
-                                        );
-                                    });
+                                        },
+                                    );
                                     let mut parts = Vec::new();
                                     if !aw.chapter.is_empty() {
                                         parts.push(format!("Capítulo {}", aw.chapter));
@@ -358,10 +449,14 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            let label = person_name.as_deref().unwrap_or("Sin nombre");
-                                            ui.label(RichText::new(label).strong());
-                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        let label = person_name.as_deref().unwrap_or("Sin nombre");
+                                        egui::Sides::new().shrink_left().truncate().show(
+                                            ui,
+                                            |ui| {
+                                                ui.add(egui::Label::new(RichText::new(label).strong()).truncate())
+                                                    .on_hover_text(label);
+                                            },
+                                            |ui| {
                                                 if let Some(pid) = face.person_id {
                                                     if ui.button("Quitar").on_hover_text("Quitar esta foto de la persona").clicked() {
                                                         outcome.remove_person_from_asset = Some((pid, entry.asset));
@@ -369,10 +464,119 @@ pub fn draw(
                                                 } else if ui.button("Poner nombre").clicked() {
                                                     outcome.open_persons = true;
                                                 }
-                                            });
-                                        });
+                                            },
+                                        );
                                     });
                                 ui.add_space(theme::SPACE_XS);
+                            }
+                        });
+                    ui.add_space(theme::SPACE_SM);
+                }
+
+                // Section 1d: Portadas (for promotional pages)
+                let is_promo = state.labels.iter().any(|a| {
+                    a.kind == LabelKind::Category
+                        && a.name == catalog::PROMO_CATEGORY
+                        && a.status != Status::Rejected
+                }) || !state.covers.is_empty();
+
+                if is_promo {
+                    let covers_title = if state.covers.is_empty() {
+                        "Portadas".to_string()
+                    } else {
+                        format!("Portadas ({})", state.covers.len())
+                    };
+                    egui::CollapsingHeader::new(RichText::new(covers_title).strong())
+                        .id_salt("inspector_sec_covers")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if state.covers.is_empty() {
+                                ui.label(
+                                    RichText::new("Sin portadas detectadas")
+                                        .size(theme::FONT_SMALL)
+                                        .color(palette.text_secondary.color32()),
+                                );
+                            } else {
+                                for cover in &state.covers {
+                                    Frame::new()
+                                        .fill(palette.bg_card.color32())
+                                        .stroke(Stroke::new(1.0, palette.border.color32()))
+                                        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                        .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                let work_title = cover
+                                                    .work_name
+                                                    .as_deref()
+                                                    .unwrap_or("Sin obra asociada");
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Portada {}: {}",
+                                                        cover.cover_idx + 1,
+                                                        work_title
+                                                    ))
+                                                    .strong(),
+                                                );
+                                                ui.with_layout(
+                                                    Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        let (st_text, st_color) = match cover.status
+                                                        {
+                                                            Status::Accepted => (
+                                                                "Confirmada",
+                                                                palette
+                                                                    .status_accepted_fg
+                                                                    .color32(),
+                                                            ),
+                                                            Status::Rejected => (
+                                                                "Descartada",
+                                                                palette
+                                                                    .status_rejected_fg
+                                                                    .color32(),
+                                                            ),
+                                                            Status::Suggested => (
+                                                                "Sugerida",
+                                                                palette
+                                                                    .status_suggested_fg
+                                                                    .color32(),
+                                                            ),
+                                                        };
+                                                        ui.label(
+                                                            RichText::new(st_text)
+                                                                .size(theme::FONT_SMALL)
+                                                                .color(st_color),
+                                                        );
+                                                    },
+                                                );
+                                            });
+                                            let conf_text = format!(
+                                                "{:.0}% de confianza",
+                                                cover.confidence * 100.0
+                                            );
+                                            ui.label(
+                                                RichText::new(conf_text)
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(palette.text_secondary.color32()),
+                                            );
+                                            ui.add_space(theme::SPACE_XS);
+                                            ui.horizontal_wrapped(|ui| {
+                                                if cover.status != Status::Accepted
+                                                    && ui.button("Confirmar").clicked()
+                                                {
+                                                    outcome.accept_cover =
+                                                        Some((entry.asset, cover.cover_idx));
+                                                }
+                                                if cover.status != Status::Rejected
+                                                    && ui.button("No es esta").clicked()
+                                                {
+                                                    outcome.reject_cover =
+                                                        Some((entry.asset, cover.cover_idx));
+                                                }
+                                            });
+                                        });
+                                    ui.add_space(theme::SPACE_XS);
+                                }
                             }
                         });
                     ui.add_space(theme::SPACE_SM);
@@ -468,6 +672,7 @@ pub fn draw(
                                                                 palette.text_secondary.color32(),
                                                             ),
                                                         )
+                                                        .wrap()
                                                         .selectable(true),
                                                     );
                                                     ui.label(
@@ -485,6 +690,7 @@ pub fn draw(
                                                                 palette.text_primary.color32(),
                                                             ),
                                                         )
+                                                        .wrap()
                                                         .selectable(true),
                                                     );
                                                 }
@@ -590,6 +796,7 @@ pub fn draw(
                                                         .size(theme::FONT_SMALL)
                                                         .color(palette.text_secondary.color32()),
                                                 )
+                                                .wrap()
                                                 .selectable(true),
                                             );
                                         }
@@ -625,18 +832,23 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{}: {}",
-                                                    kind_label(assign.kind),
-                                                    assign.name
-                                                ))
-                                                .strong(),
-                                            );
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
+                                        egui::Sides::new().shrink_left().truncate().show(
+                                            ui,
+                                            |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(format!(
+                                                            "{}: {}",
+                                                            kind_label(assign.kind),
+                                                            assign.name
+                                                        ))
+                                                        .strong(),
+                                                    )
+                                                    .truncate(),
+                                                )
+                                                .on_hover_text(&assign.name);
+                                            },
+                                            |ui| {
                                                     let (st_text, st_color) = match assign.status {
                                                         Status::Accepted => (
                                                             "Aceptada",
@@ -656,9 +868,8 @@ pub fn draw(
                                                             .size(theme::FONT_SMALL)
                                                             .color(st_color),
                                                     );
-                                                },
-                                            );
-                                        });
+                                            },
+                                        );
                                         ui.horizontal(|ui| {
                                             let src_text = if assign.source == Source::User {
                                                 "Usuario".to_string()
@@ -703,7 +914,7 @@ pub fn draw(
                         }
 
                         ui.add_space(theme::SPACE_SM);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             egui::ComboBox::from_id_salt("new_label_kind")
                                 .selected_text(kind_label(state.new_label_kind))
                                 .width(92.0)
@@ -717,10 +928,11 @@ pub fn draw(
                                         );
                                     }
                                 });
+                            let edit_w = (ui.available_width() - 72.0).clamp(60.0, 160.0);
                             let edit = ui.add(
                                 egui::TextEdit::singleline(&mut state.new_label_text)
                                     .id(Id::unique(NEW_LABEL_INPUT_ID))
-                                    .desired_width((ui.available_width() - 72.0).max(80.0))
+                                    .desired_width(edit_w)
                                     .hint_text(theme::hint_text(palette, "Nueva etiqueta")),
                             );
                             if state.focus_new_label_next_frame {
@@ -770,5 +982,141 @@ fn source_label(source: Source) -> &'static str {
         Source::Ocr => "OCR",
         Source::Rules => "Reglas",
         Source::User => "Usuario",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catalog::{AssetId, Entry, MediaType, OcrLine, OcrRecognizer};
+    use eframe::egui::{Event, PointerButton, Pos2, RawInput, Rect, Vec2};
+    use std::path::PathBuf;
+
+    fn sample_entry() -> Entry {
+        Entry {
+            asset: AssetId(1),
+            path: PathBuf::from(
+                "C:/photos/very_long_folder_name_that_should_not_cause_panel_to_jump/test_photo.jpg",
+            ),
+            size: 1024 * 500,
+            modified_ns: Some(1_700_000_000_000_000_000),
+            sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            width: Some(1920),
+            height: Some(1080),
+            format: Some("JPEG".to_string()),
+            media_type: MediaType::Image,
+            duration_ms: None,
+            captured_at_ns: None,
+        }
+    }
+
+    fn inspector_state() -> InspectorState {
+        InspectorState {
+            ocr_done: true,
+            ocr_lines: vec![OcrLine {
+                text: "時計仕掛けのクロニクル — 第12話 とても長いOCRテキスト".to_string(),
+                score: 0.95,
+                recognizer: OcrRecognizer::V6,
+                rect: [10.0, 10.0, 200.0, 30.0],
+                top_strip: false,
+            }],
+            labels: vec![catalog::Assignment {
+                label: catalog::LabelId(1),
+                name: "Manga › Scanlation › Página promocional o índice de proyectos muy largo"
+                    .to_string(),
+                kind: catalog::LabelKind::Category,
+                source: catalog::Source::Ai,
+                confidence: 0.85,
+                status: catalog::Status::Accepted,
+            }],
+            asset_work: Some(catalog::AssetWork {
+                asset: AssetId(1),
+                work: catalog::LabelId(2),
+                work_name: "Una obra con un título larguísimo que no cabe en el panel".to_string(),
+                chapter: "23".to_string(),
+                page: Some(7),
+                source: catalog::Source::Rules,
+                confidence: 0.9,
+                status: catalog::Status::Accepted,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Runs one frame and returns the inspector's stored outer width.
+    fn frame(ctx: &egui::Context, state: &mut InspectorState, events: Vec<Event>) -> f32 {
+        let entry = sample_entry();
+        let mut width = 0.0;
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                draw(
+                    ui,
+                    &theme::DARK_PALETTE,
+                    Some(&entry),
+                    true,
+                    state,
+                    &[],
+                    None,
+                );
+                // The size egui keeps for the panel: what it shows once the drag ends.
+                width = egui::PanelState::load(ui.ctx(), ui.scope_id().with("inspector"))
+                    .expect("estado del panel")
+                    .size()
+                    .x;
+            },
+        );
+        out.textures_delta.clear();
+        width
+    }
+
+    fn press(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn inspector_panel_resizes_to_minimum_width_without_bouncing() {
+        let ctx = egui::Context::default();
+        let mut state = inspector_state();
+        let start = frame(&ctx, &mut state, vec![]);
+        assert!(
+            (start - theme::INSPECTOR_WIDTH).abs() <= 1.0,
+            "inicial: {start}"
+        );
+
+        // Drag the panel's left border right, past the minimum, over several frames.
+        let border = Pos2::new(1000.0 - start, 300.0);
+        frame(&ctx, &mut state, vec![Event::PointerMoved(border)]);
+        frame(&ctx, &mut state, vec![press(border, true)]);
+        for x in [800.0, 850.0, 900.0] {
+            frame(
+                &ctx,
+                &mut state,
+                vec![Event::PointerMoved(Pos2::new(x, 300.0))],
+            );
+        }
+        let end = Pos2::new(900.0, 300.0);
+        frame(&ctx, &mut state, vec![press(end, false)]);
+
+        for _ in 0..3 {
+            let w = frame(
+                &ctx,
+                &mut state,
+                vec![Event::PointerMoved(Pos2::new(500.0, 300.0))],
+            );
+            assert!(
+                (w - 280.0).abs() <= 1.0,
+                "el panel rebotó a {w} en vez de quedarse en 280"
+            );
+        }
     }
 }

@@ -193,7 +193,9 @@ pub fn draw(
                 return;
             };
 
-            ScrollArea::vertical().show(ui, |ui| {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                 ui.label(RichText::new(&work.name).size(theme::FONT_HEADING).strong());
                 ui.add_space(theme::SPACE_XS);
                 ui.label(

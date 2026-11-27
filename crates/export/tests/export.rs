@@ -3,8 +3,8 @@
 
 use catalog::{Assignment, LabelId, LabelKind, Source, Status};
 use export::{
-    Control, ExportItem, ExportProgress, Layout, Outcome, Preview, export, export_with, preview,
-    preview_with, sanitize_folder_name,
+    Control, ExportItem, ExportOptions, ExportProgress, Layout, Outcome, Preview, export,
+    export_with, export_with_options, preview, preview_with, sanitize_folder_name,
 };
 use fsguard::{DestPath, LibraryRoot, ensure_export_dir};
 use std::fs::{self, FileTimes};
@@ -45,6 +45,7 @@ impl Setup {
             source: self.library.join(rel),
             labels: vec![],
             belongs_to: None,
+            ..Default::default()
         }
     }
 
@@ -278,6 +279,7 @@ fn the_csv_manifest_quotes_fields_that_contain_commas() {
                 source: weird,
                 labels: vec![],
                 belongs_to: None,
+                ..Default::default()
             },
         ],
         &s.dest,
@@ -705,6 +707,7 @@ fn preview_with_matches_export_with_for_all_four_layouts() {
                 write(&dest.as_path().join("2020"), "a.jpg", b"other");
                 write(&dest.as_path().join("2019"), "b.png", b"bravo");
             }
+            Layout::PreserveFolders => unreachable!(),
         }
 
         let items = [a, b, x, y, missing];
@@ -844,4 +847,194 @@ fn export_manifest_includes_belongs_to_in_json_and_csv_and_omits_rejected() {
         (row1[6].as_str(), row1[7].as_str(), row1[8].as_str()),
         ("", "", "")
     );
+}
+
+#[test]
+fn xmp_sidecar_escapes_xml_and_handles_collisions() {
+    let s = setup();
+    let mut item = s.item("a.jpg");
+    item.labels = vec![
+        label(LabelKind::Category, "Manga & Anime", Status::Accepted),
+        label(LabelKind::Tag, "portada <\"special\">", Status::Accepted),
+    ];
+    item.persons = vec!["O'Connor & Sons".into()];
+    item.hierarchical_categories = vec!["Manga|Scanlation|Página <1>".into()];
+
+    // Pre-create a.jpg.xmp to trigger collision handling
+    write(s.dest_dir(), "a.jpg.xmp", b"already existing xmp");
+
+    let options = ExportOptions {
+        layout: Layout::Flat,
+        write_xmp_sidecars: true,
+        embed_jpeg_tags: false,
+    };
+    let report =
+        export_with_options(&[item], &s.dest, options, &mut |_| Control::Continue).unwrap();
+    assert!(matches!(Setup::outcome(&report, 0), Outcome::Copied(_)));
+
+    // Collision check: a.jpg.xmp should be unchanged, and a.jpg (1).xmp should be created
+    assert_eq!(
+        fs::read(s.dest_dir().join("a.jpg.xmp")).unwrap(),
+        b"already existing xmp"
+    );
+    assert!(s.dest_dir().join("a.jpg (1).xmp").exists());
+
+    let content = fs::read_to_string(s.dest_dir().join("a.jpg (1).xmp")).unwrap();
+    assert!(content.contains("&amp;"));
+    assert!(content.contains("&lt;"));
+    assert!(content.contains("&gt;"));
+    assert!(content.contains("&quot;"));
+    assert!(content.contains("&apos;"));
+    assert!(content.contains("<rdf:li>Manga &amp; Anime</rdf:li>"));
+    assert!(content.contains("<rdf:li>portada &lt;&quot;special&quot;&gt;</rdf:li>"));
+    assert!(content.contains("<rdf:li>O&apos;Connor &amp; Sons</rdf:li>"));
+    assert!(content.contains("<rdf:li>Manga|Scanlation|Página &lt;1&gt;</rdf:li>"));
+}
+
+#[test]
+fn preserve_folders_single_root_does_not_prefix_root_name() {
+    let s = setup();
+    let mut item_a = s.item("a.jpg");
+    item_a.root = Some(s.library.clone());
+    let mut item_b = s.item("sub/b.png");
+    item_b.root = Some(s.library.clone());
+
+    let options = ExportOptions {
+        layout: Layout::PreserveFolders,
+        write_xmp_sidecars: false,
+        embed_jpeg_tags: false,
+    };
+    export_with_options(&[item_a, item_b], &s.dest, options, &mut |_| {
+        Control::Continue
+    })
+    .unwrap();
+
+    assert!(s.dest_dir().join("a.jpg").exists());
+    assert!(s.dest_dir().join("sub/b.png").exists());
+    // Root name "library" should NOT be prefixed because there is only 1 root
+    assert!(!s.dest_dir().join("library").exists());
+}
+
+#[test]
+fn preserve_folders_multiple_roots_prefixes_each_root_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib1 = tmp.path().join("lib1");
+    let lib2 = tmp.path().join("lib2");
+
+    write(&lib1, "vacaciones/playa.jpg", b"beach");
+    write(&lib2, "scans/ch01/01.png", b"page1");
+
+    let root1 = LibraryRoot::new(&lib1).unwrap();
+    let root2 = LibraryRoot::new(&lib2).unwrap();
+    let dest = ensure_export_dir(&tmp.path().join("export"), &[root1, root2]).unwrap();
+
+    let items = vec![
+        ExportItem {
+            source: lib1.join("vacaciones/playa.jpg"),
+            labels: vec![],
+            belongs_to: None,
+            persons: vec![],
+            hierarchical_categories: vec![],
+            root: Some(lib1.clone()),
+        },
+        ExportItem {
+            source: lib2.join("scans/ch01/01.png"),
+            labels: vec![],
+            belongs_to: None,
+            persons: vec![],
+            hierarchical_categories: vec![],
+            root: Some(lib2.clone()),
+        },
+    ];
+
+    let options = ExportOptions {
+        layout: Layout::PreserveFolders,
+        write_xmp_sidecars: false,
+        embed_jpeg_tags: false,
+    };
+    export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
+
+    // With multiple roots, the first level must be each root's folder name
+    assert!(dest.as_path().join("lib1/vacaciones/playa.jpg").exists());
+    assert!(dest.as_path().join("lib2/scans/ch01/01.png").exists());
+}
+
+#[test]
+fn preserve_folders_rejects_escaping_components() {
+    let s = setup();
+    let mut item = s.item("a.jpg");
+    item.source = s.library.join("../escaping.jpg");
+    item.root = Some(s.library.clone());
+
+    let options = ExportOptions {
+        layout: Layout::PreserveFolders,
+        write_xmp_sidecars: false,
+        embed_jpeg_tags: false,
+    };
+    let report =
+        export_with_options(&[item], &s.dest, options, &mut |_| Control::Continue).unwrap();
+    assert!(matches!(Setup::outcome(&report, 0), Outcome::Failed(_)));
+}
+
+#[test]
+fn preserve_folders_keeps_roots_with_the_same_name_apart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib1 = tmp.path().join("a").join("Fotos");
+    let lib2 = tmp.path().join("b").join("Fotos");
+    write(&lib1, "x.jpg", b"one");
+    write(&lib2, "x.jpg", b"two");
+    let roots = [
+        LibraryRoot::new(&lib1).unwrap(),
+        LibraryRoot::new(&lib2).unwrap(),
+    ];
+    let dest = ensure_export_dir(&tmp.path().join("export"), &roots).unwrap();
+    let items: Vec<ExportItem> = [&lib1, &lib2]
+        .into_iter()
+        .map(|lib| ExportItem {
+            root: Some(lib.clone()),
+            ..ExportItem::new(lib.join("x.jpg"))
+        })
+        .collect();
+    let options = ExportOptions {
+        layout: Layout::PreserveFolders,
+        ..Default::default()
+    };
+    let report = export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
+    let paths: Vec<PathBuf> = report
+        .outcomes
+        .iter()
+        .map(|(_, o)| match o {
+            Outcome::Copied(p) => p.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    // Each root gets its own first-level folder, so `x (1).jpg` never appears.
+    assert_ne!(paths[0].parent(), paths[1].parent());
+    for p in &paths {
+        assert_eq!(p.file_name().unwrap(), "x.jpg");
+    }
+}
+
+#[test]
+fn an_xmp_too_large_to_embed_leaves_the_verified_copy_and_is_reported() {
+    let s = setup();
+    let jpeg: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x04, 0x01, 0x02, 0x11, 0x22, 0xFF, 0xD9,
+    ];
+    write(&s.library, "big.jpg", jpeg);
+    let mut item = s.item("big.jpg");
+    item.labels = vec![label(LabelKind::Tag, &"x".repeat(70_000), Status::Accepted)];
+    let options = ExportOptions {
+        embed_jpeg_tags: true,
+        ..Default::default()
+    };
+    let report =
+        export_with_options(&[item], &s.dest, options, &mut |_| Control::Continue).unwrap();
+    assert!(matches!(Setup::outcome(&report, 0), Outcome::Copied(_)));
+    assert_eq!(fs::read(s.dest_dir().join("big.jpg")).unwrap(), jpeg);
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report.manifest_json).unwrap()).unwrap();
+    let f = &json["files"][0];
+    assert!(f.get("sha256_after_tagging").is_none());
+    assert!(f["warning"].as_str().unwrap().contains("65535"), "{f}");
 }

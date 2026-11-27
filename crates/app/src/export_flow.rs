@@ -3,8 +3,8 @@ use crate::settings::{self, Settings, SettingsError};
 use crate::worker::Notify;
 use catalog::{AssetId, Assignment, Catalog, CatalogError, Entry};
 use export::{
-    Control, ExportItem, ExportProgress, ExportReport, Layout, Outcome, Preview, export_with,
-    preview_with,
+    Control, ExportItem, ExportOptions, ExportProgress, ExportReport, Layout, Outcome, Preview,
+    export_with_options, preview_with_options,
 };
 use fsguard::{DestPath, GuardError, LibraryRoot, ensure_export_dir};
 use std::collections::HashMap;
@@ -14,11 +14,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
-pub const ALL_LAYOUTS: [Layout; 4] = [
+pub const ALL_LAYOUTS: [Layout; 5] = [
     Layout::Flat,
     Layout::ByCategory,
     Layout::ByEntity,
     Layout::ByYear,
+    Layout::PreserveFolders,
 ];
 
 pub fn layout_label(layout: Layout) -> &'static str {
@@ -27,6 +28,7 @@ pub fn layout_label(layout: Layout) -> &'static str {
         Layout::ByCategory => "Por categoría",
         Layout::ByEntity => "Por obra",
         Layout::ByYear => "Por año",
+        Layout::PreserveFolders => "Conservar carpetas",
     }
 }
 
@@ -40,6 +42,9 @@ pub fn layout_description(layout: Layout) -> &'static str {
             "Una subcarpeta por la primera obra o entidad de cada imagen (o «Sin obra»)."
         }
         Layout::ByYear => "Una subcarpeta por el año de modificación del archivo (o «Sin fecha»).",
+        Layout::PreserveFolders => {
+            "Replica la estructura de carpetas original de cada foto respecto a su biblioteca."
+        }
     }
 }
 
@@ -56,28 +61,43 @@ pub fn select_entries<'a>(entries: &'a [Entry], selection: &Selection) -> Vec<&'
     }
 }
 
+#[derive(Clone)]
+struct CachedAssetInfo {
+    labels: Vec<Assignment>,
+    belongs_to: Option<catalog::AssetWork>,
+    persons: Vec<String>,
+    hierarchical_categories: Vec<String>,
+}
+
 /// Builds export items by pairing each catalog entry with its catalog label assignments.
 pub fn build_export_items(
     catalog: &Catalog,
     entries: &[&Entry],
 ) -> Result<Vec<ExportItem>, CatalogError> {
-    let mut cache: HashMap<AssetId, (Vec<Assignment>, Option<catalog::AssetWork>)> = HashMap::new();
+    let mut cache: HashMap<AssetId, CachedAssetInfo> = HashMap::new();
     let mut items = Vec::with_capacity(entries.len());
     for entry in entries {
-        let (labels, belongs_to) = match cache.get(&entry.asset) {
+        let info = match cache.get(&entry.asset) {
             Some(cached) => cached.clone(),
             None => {
-                let loaded_labels = catalog.labels_of(entry.asset)?;
-                let loaded_work = catalog.asset_work(entry.asset)?;
-                let pair = (loaded_labels, loaded_work);
-                cache.insert(entry.asset, pair.clone());
-                pair
+                let loaded = CachedAssetInfo {
+                    labels: catalog.labels_of(entry.asset)?,
+                    belongs_to: catalog.asset_work(entry.asset)?,
+                    persons: catalog.named_persons_of(entry.asset)?,
+                    hierarchical_categories: catalog.hierarchical_categories_of(entry.asset)?,
+                };
+                cache.insert(entry.asset, loaded.clone());
+                loaded
             }
         };
+        let root = catalog.root_of_path(&entry.path)?;
         items.push(ExportItem {
             source: entry.path.clone(),
-            labels,
-            belongs_to,
+            labels: info.labels,
+            belongs_to: info.belongs_to,
+            persons: info.persons,
+            hierarchical_categories: info.hierarchical_categories,
+            root,
         });
     }
     Ok(items)
@@ -217,14 +237,14 @@ impl ExportWorker {
     fn start(
         items: Vec<ExportItem>,
         dest: DestPath,
-        layout: Layout,
+        options: ExportOptions,
         notify: Option<Notify>,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_bg = Arc::clone(&cancel);
         let (tx, rx) = mpsc::channel();
         let join = thread::spawn(move || {
-            let res = export_with(&items, &dest, layout, &mut |p| {
+            let res = export_with_options(&items, &dest, options, &mut |p| {
                 let _ = tx.send(ExportWorkerEvent::Progress(*p));
                 if let Some(cb) = &notify {
                     cb();
@@ -281,6 +301,8 @@ pub struct ExportWizard {
     dest_input: PathBuf,
     validated_dest: Option<DestPath>,
     layout: Layout,
+    write_xmp: bool,
+    embed_jpeg_tags: bool,
     phase: ExportPhase,
     validation_error: Option<String>,
     cancel_requested: bool,
@@ -321,6 +343,8 @@ impl ExportWizard {
             dest_input: last_export_dir.unwrap_or_default(),
             validated_dest: None,
             layout: Layout::Flat,
+            write_xmp: false,
+            embed_jpeg_tags: false,
             phase: ExportPhase::Choose,
             validation_error: None,
             cancel_requested: false,
@@ -348,6 +372,22 @@ impl ExportWizard {
 
     pub fn layout(&self) -> Layout {
         self.layout
+    }
+
+    pub fn write_xmp(&self) -> bool {
+        self.write_xmp
+    }
+
+    pub fn embed_jpeg_tags(&self) -> bool {
+        self.embed_jpeg_tags
+    }
+
+    pub fn options(&self) -> ExportOptions {
+        ExportOptions {
+            layout: self.layout,
+            write_xmp_sidecars: self.write_xmp,
+            embed_jpeg_tags: self.embed_jpeg_tags,
+        }
     }
 
     pub fn validation_error(&self) -> Option<&str> {
@@ -382,6 +422,22 @@ impl ExportWizard {
             return;
         }
         self.layout = layout;
+        self.invalidate_preview();
+    }
+
+    pub fn set_write_xmp(&mut self, val: bool) {
+        if self.is_running() || self.write_xmp == val {
+            return;
+        }
+        self.write_xmp = val;
+        self.invalidate_preview();
+    }
+
+    pub fn set_embed_jpeg_tags(&mut self, val: bool) {
+        if self.is_running() || self.embed_jpeg_tags == val {
+            return;
+        }
+        self.embed_jpeg_tags = val;
         self.invalidate_preview();
     }
 
@@ -429,12 +485,12 @@ impl ExportWizard {
         self.preview_gen = self.preview_gen.wrapping_add(1);
         let gen_id = self.preview_gen;
         let items = self.items.clone();
-        let layout = self.layout;
+        let options = self.options();
         let dest_bg = dest.clone();
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let res = preview_with(&items, &dest_bg, layout).map_err(|e| e.to_string());
+            let res = preview_with_options(&items, &dest_bg, options).map_err(|e| e.to_string());
             let _ = tx.send((gen_id, res));
             if let Some(cb) = &notify {
                 cb();
@@ -467,7 +523,7 @@ impl ExportWizard {
         self.export_worker = Some(ExportWorker::start(
             self.items.clone(),
             dest,
-            self.layout,
+            self.options(),
             notify,
         ));
         self.phase = ExportPhase::Running { done: 0, total };

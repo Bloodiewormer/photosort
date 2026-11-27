@@ -323,7 +323,7 @@ fn unsupported_extensions_return_unsupported() {
     let thumbs = Thumbs::new(&cache_dir, 100).unwrap();
     let valid_sha = "a".repeat(64);
 
-    for name in ["photo.heic", "photo.heif", "notes.txt", "no_extension"] {
+    for name in ["photo.raw", "notes.txt", "no_extension"] {
         let p = src_dir.join(name);
         fs::write(&p, b"dummy").unwrap();
         let err = thumbs.get(&p, &valid_sha).unwrap_err();
@@ -450,4 +450,180 @@ fn concurrent_calls_for_same_key_succeed_with_one_valid_file() {
     let entries = cache_entries(cache_dir.as_path());
     assert_eq!(entries.len(), 1, "expected only 1 file, found {entries:?}");
     assert_no_tmp_files(cache_dir.as_path());
+}
+
+#[test]
+fn wic_decodes_synthetic_png_and_bmp() {
+    let (_tmp, src_dir, _cache_dir) = setup_dirs();
+
+    // 1. Synthetic PNG
+    let png_path = src_dir.join("synthetic.png");
+    write_rgb_image(&png_path, 120, 80, ImageFormat::Png);
+    let decoded_png = thumbs::decode_wic(&png_path, 200).expect("WIC decode PNG full");
+    assert_eq!(decoded_png.width(), 120);
+    assert_eq!(decoded_png.height(), 80);
+
+    let resized_png = thumbs::decode_wic(&png_path, 60).expect("WIC decode PNG resized");
+    assert_eq!(resized_png.width(), 60);
+    assert_eq!(resized_png.height(), 40);
+
+    // 2. Synthetic BMP
+    let bmp_path = src_dir.join("synthetic.bmp");
+    write_rgb_image(&bmp_path, 100, 50, ImageFormat::Bmp);
+    let decoded_bmp = thumbs::decode_wic(&bmp_path, 200).expect("WIC decode BMP full");
+    assert_eq!(decoded_bmp.width(), 100);
+    assert_eq!(decoded_bmp.height(), 50);
+
+    let resized_bmp = thumbs::decode_wic(&bmp_path, 50).expect("WIC decode BMP resized");
+    assert_eq!(resized_bmp.width(), 50);
+    assert_eq!(resized_bmp.height(), 25);
+}
+
+#[test]
+fn heic_corrupt_returns_decode_error_not_missing_codec() {
+    let (_tmp, src_dir, cache_dir) = setup_dirs();
+    let thumbs = Thumbs::new(&cache_dir, 100).unwrap();
+
+    for name in ["corrupt_test.heic", "corrupt_test.avif", "corrupt_test.jxl"] {
+        let p = src_dir.join(name);
+        fs::write(&p, b"not a real container header").unwrap();
+        let sha = "e".repeat(64);
+
+        let dec_err = thumbs::decode(&p, 100).unwrap_err();
+        assert!(
+            matches!(dec_err, ThumbError::Decode(_)),
+            "expected Decode error for corrupt {name}, got {dec_err:?}"
+        );
+
+        let wic_err = thumbs::decode_wic(&p, 100).unwrap_err();
+        assert!(
+            matches!(wic_err, ThumbError::Decode(_)),
+            "expected Decode error for corrupt {name}, got {wic_err:?}"
+        );
+
+        let get_err = thumbs.get(&p, &sha).unwrap_err();
+        assert!(
+            matches!(get_err, ThumbError::Decode(_)),
+            "expected Decode error for corrupt {name}, got {get_err:?}"
+        );
+    }
+
+    // Valid JXL container header: if WIC lacks a JXL codec it must report missing image codec
+    // (Unsupported); if a JXL codec is installed it rejects the truncated payload as Decode.
+    let jxl_valid_hdr = src_dir.join("valid_header.jxl");
+    fs::write(
+        &jxl_valid_hdr,
+        [
+            0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A,
+        ],
+    )
+    .unwrap();
+    match thumbs::decode(&jxl_valid_hdr, 100).unwrap_err() {
+        ThumbError::Unsupported(msg) => {
+            assert!(
+                msg.contains("códec de imagen no disponible"),
+                "unexpected Unsupported message: {msg}"
+            );
+        }
+        ThumbError::Decode(_) => {}
+        other => panic!("expected Unsupported or Decode for JXL header, got {other:?}"),
+    }
+}
+
+#[test]
+fn wic_preserves_channel_order_alpha_and_exif_orientation() {
+    let (_tmp, src_dir, _cache_dir) = setup_dirs();
+
+    // 1. Opaque RGB PNG: channels must stay RGB (not BGR) and drop redundant alpha channel.
+    let rgb_path = src_dir.join("channels.png");
+    let mut rgb = RgbImage::new(16, 16);
+    for px in rgb.pixels_mut() {
+        *px = Rgb([220, 40, 10]);
+    }
+    rgb.save_with_format(&rgb_path, ImageFormat::Png).unwrap();
+
+    let decoded = thumbs::decode_wic(&rgb_path, 100).expect("WIC decode opaque PNG");
+    assert!(
+        !decoded.color().has_alpha(),
+        "opaque image decoded by WIC should not report alpha"
+    );
+    let px = decoded.to_rgb8().get_pixel(8, 8).0;
+    assert_eq!(px, [220, 40, 10], "R/G/B channel order must not be swapped");
+
+    // 2. Transparent RGBA PNG: alpha must be preserved.
+    let rgba_path = src_dir.join("alpha.png");
+    write_rgba_png(&rgba_path, 32, 16);
+    let decoded_rgba = thumbs::decode_wic(&rgba_path, 100).expect("WIC decode RGBA PNG");
+    assert!(decoded_rgba.color().has_alpha());
+    let rgba = decoded_rgba.to_rgba8();
+    assert_eq!(rgba.get_pixel(2, 8)[3], 0);
+    assert_eq!(rgba.get_pixel(28, 8).0, [0, 200, 40, 255]);
+
+    // 3. Oriented JPEG (Orientation=6, 90° CW): dimensions and pixel placement must rotate.
+    let oriented_path = src_dir.join("oriented_wic.jpg");
+    write_oriented_jpeg(&oriented_path, 200, 100);
+    let oriented = thumbs::decode_wic(&oriented_path, 100)
+        .expect("WIC decode oriented JPEG")
+        .to_rgb8();
+    assert_eq!((oriented.width(), oriented.height()), (50, 100));
+    let left_px = oriented.get_pixel(10, 50);
+    let right_px = oriented.get_pixel(40, 50);
+    assert!(
+        left_px[2] > 150 && left_px[0] < 80,
+        "expected blue on left after WIC EXIF rotation, got {left_px:?}"
+    );
+    assert!(
+        right_px[0] > 150 && right_px[2] < 80,
+        "expected red on right after WIC EXIF rotation, got {right_px:?}"
+    );
+}
+
+#[test]
+fn wic_decodes_concurrently_across_threads() {
+    let (_tmp, src_dir, _cache_dir) = setup_dirs();
+    let png_path = src_dir.join("concurrent.png");
+    write_rgb_image(&png_path, 80, 40, ImageFormat::Png);
+
+    let threads = 8;
+    let barrier = Arc::new(Barrier::new(threads));
+    let mut handles = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        let p = png_path.clone();
+        let b = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            b.wait();
+            let img = thumbs::decode_wic(&p, 40).expect("concurrent decode_wic");
+            assert_eq!((img.width(), img.height()), (40, 20));
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn jfif_is_indexed_and_decoded() {
+    let (_tmp, src_dir, cache_dir) = setup_dirs();
+    let thumbs = Thumbs::new(&cache_dir, 100).unwrap();
+
+    let jfif_path = src_dir.join("photo.jfif");
+    let sha = write_rgb_image(&jfif_path, 200, 100, ImageFormat::Jpeg);
+
+    // Scanner recognizes jfif as Image
+    let scan_report = scanner::scan(&src_dir).unwrap();
+    let found = scan_report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("photo.jfif"))
+        .expect("photo.jfif must be found by scanner");
+    assert_eq!(found.media_type, scanner::MediaType::Image);
+
+    // decode works
+    let img = thumbs::decode(&jfif_path, 100).expect("decode jfif");
+    assert_eq!(img.width(), 100);
+    assert_eq!(img.height(), 50);
+
+    // get thumbnail works
+    let thumb_path = thumbs.get(&jfif_path, &sha).expect("get jfif thumb");
+    assert!(thumb_path.is_file());
 }
