@@ -294,7 +294,10 @@ impl Catalog {
         if source == target {
             return Ok(());
         }
-        let tx = self.conn.transaction()?;
+        // Immediate: a deferred read-then-write fails at once if another connection is writing.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let source_name: Option<String> = tx
             .query_row("SELECT name FROM person WHERE id = ?1", [source.0], |r| {
                 r.get::<_, Option<String>>(0)
@@ -354,7 +357,10 @@ impl Catalog {
         person: PersonId,
         user_assigned: bool,
     ) -> Result<(), CatalogError> {
-        let tx = self.conn.transaction()?;
+        // Immediate: a deferred read-then-write fails at once if another connection is writing.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let prev_pid: Option<i64> = tx
             .query_row(
                 "SELECT person_id FROM asset_face WHERE id = ?1",
@@ -511,7 +517,10 @@ impl Catalog {
         threshold: f32,
     ) -> Result<Option<PersonId>, CatalogError> {
         let blob = encode_face_embedding(embedding);
-        let tx = self.conn.transaction()?;
+        // Immediate: a deferred read-then-write fails at once if another connection is writing.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         // 1. Check if user assigned (either pinned to a person or explicitly removed)
         let current: Option<(Option<i64>, i64)> = tx
