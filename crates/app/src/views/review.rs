@@ -357,64 +357,9 @@ pub fn draw(
                                     );
                                     ui.add_space(theme::SPACE_SM);
 
-                                    // The buttons take their place first; the text gets what is left.
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if ui.button("Rechazar").clicked() {
-                                            row_action = Some((idx, ReviewDecision::Reject));
-                                        }
-                                        if ui.button("Aceptar").clicked() {
-                                            row_action = Some((idx, ReviewDecision::Accept));
-                                        }
-                                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                                            let filename = row
-                                                .path
-                                                .file_name()
-                                                .map(|n| n.to_string_lossy().into_owned())
-                                                .unwrap_or_else(|| row.path.display().to_string());
-                                            ui.label(
-                                                RichText::new(filename)
-                                                    .size(theme::FONT_BODY)
-                                                    .strong(),
-                                            );
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(row.path.display().to_string())
-                                                        .size(theme::FONT_SMALL)
-                                                        .color(palette.text_secondary.color32()),
-                                                )
-                                                .truncate(),
-                                            );
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{}: {}",
-                                                        kind_label(row.label_kind),
-                                                        row.label_name
-                                                    ))
-                                                    .size(theme::FONT_SMALL)
-                                                    .strong(),
-                                                );
-                                                ui.separator();
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "Confianza: {:.0}%",
-                                                        row.confidence * 100.0
-                                                    ))
-                                                    .size(theme::FONT_SMALL)
-                                                    .color(palette.status_suggested_fg.color32()),
-                                                );
-                                                ui.separator();
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "Fuente: {}",
-                                                        source_label(row.source)
-                                                    ))
-                                                    .size(theme::FONT_SMALL)
-                                                    .color(palette.text_secondary.color32()),
-                                                );
-                                            });
-                                        });
-                                    });
+                                    if let Some(decision) = draw_row_body(ui, palette, row) {
+                                        row_action = Some((idx, decision));
+                                    }
                                 });
                             });
                         if card_resp.response.interact(Sense::click()).clicked() {
@@ -505,6 +450,69 @@ fn apply_undo(flow: &mut ReviewFlow, cat: &Catalog, outcome: &mut ReviewViewOutc
     }
 }
 
+/// File name, path and suggestion of a row, with its buttons at the end.
+fn draw_row_body(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    row: &crate::review_flow::ReviewRow,
+) -> Option<ReviewDecision> {
+    let ((), decision) = crate::views::row_with_end(
+        ui,
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.vertical(|ui| {
+                let filename = row
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| row.path.display().to_string());
+                ui.label(RichText::new(filename).size(theme::FONT_BODY).strong());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(row.path.display().to_string())
+                            .size(theme::FONT_SMALL)
+                            .color(palette.text_secondary.color32()),
+                    )
+                    .truncate(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}: {}",
+                            kind_label(row.label_kind),
+                            row.label_name
+                        ))
+                        .size(theme::FONT_SMALL)
+                        .strong(),
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Confianza: {:.0}%", row.confidence * 100.0))
+                            .size(theme::FONT_SMALL)
+                            .color(palette.status_suggested_fg.color32()),
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Fuente: {}", source_label(row.source)))
+                            .size(theme::FONT_SMALL)
+                            .color(palette.text_secondary.color32()),
+                    );
+                });
+            });
+        },
+        |ui| {
+            let accept = ui.button("Aceptar").clicked();
+            let reject = ui.button("Rechazar").clicked();
+            if accept {
+                Some(ReviewDecision::Accept)
+            } else {
+                reject.then_some(ReviewDecision::Reject)
+            }
+        },
+    );
+    decision
+}
+
 fn draw_thumb_box(
     ui: &egui::Ui,
     palette: &Palette,
@@ -567,5 +575,32 @@ fn source_label(source: Source) -> &'static str {
         Source::Ocr => "OCR",
         Source::Rules => "Reglas",
         Source::User => "Usuario",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review_flow::ReviewRow;
+    use catalog::{AssetId, LabelId};
+
+    #[test]
+    fn tab_visits_a_review_row_in_reading_order() {
+        let row = ReviewRow {
+            asset: AssetId(1),
+            label: LabelId(1),
+            label_name: "Gatos".into(),
+            label_kind: LabelKind::Tag,
+            confidence: 0.5,
+            source: Source::Ai,
+            path: "C:/fotos/una foto.jpg".into(),
+            sha256: String::new(),
+        };
+        for screen_reader in [false, true] {
+            let order = crate::views::tab_order(700.0, screen_reader, |ui| {
+                draw_row_body(ui, &theme::DARK_PALETTE, &row);
+            });
+            crate::views::assert_reading_order(&order);
+        }
     }
 }

@@ -925,7 +925,6 @@ fn draw_rule_row(
     rule: &VisionRule,
     test_ready: bool,
 ) -> Option<RuleRowAction> {
-    let mut action = None;
     let name = RichText::new(&rule.name)
         .color(if rule.enabled {
             palette.text_primary.color32()
@@ -943,59 +942,61 @@ fn draw_rule_row(
         "Umbral coseno: {:.3} · Aceptadas: {} · Rechazadas: {} · Pendientes: {}",
         rule.threshold, rule.accepted_ai, rule.rejected_ai, rule.suggested_ai
     );
-    let mut stats_below = false;
+    let needed = ui.spacing().interact_size.x
+        + text_width(ui, name.clone(), egui::TextStyle::Button)
+        + text_width(ui, stats.clone(), egui::TextStyle::Body)
+        + text_width(ui, "Probar", egui::TextStyle::Button)
+        + 2.0 * ui.spacing().button_padding.x
+        + 4.0 * ui.spacing().item_spacing.x;
+    let stats_below = ui.available_width() < needed;
 
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add_enabled(
-                    test_ready && !rule.positives.is_empty(),
-                    egui::Button::new("Probar"),
-                )
-                .on_hover_text("Ordenar la galería por similitud con esta regla")
-                .clicked()
-            {
-                action = Some(RuleRowAction::Test);
-            }
-            let needed = ui.spacing().interact_size.x
-                + text_width(ui, name.clone(), egui::TextStyle::Button)
-                + text_width(ui, stats.clone(), egui::TextStyle::Body)
-                + 3.0 * ui.spacing().item_spacing.x;
-            stats_below = ui.available_width() < needed;
-            if !stats_below {
-                ui.label(stats.clone()).on_hover_text(&stats_tip);
-            }
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let mut enabled = rule.enabled;
-                let chk = ui
-                    .checkbox(&mut enabled, "")
-                    .on_hover_text("Activar o desactivar esta regla");
-                chk.widget_info(|| {
-                    egui::WidgetInfo::selected(
-                        egui::Role::CheckBox,
-                        true,
-                        enabled,
-                        format!("Regla activada: {}", rule.name),
+    let (start, end) = ui
+        .horizontal(|ui| {
+            crate::views::row_with_end(
+                ui,
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    let mut enabled = rule.enabled;
+                    let chk = ui
+                        .checkbox(&mut enabled, "")
+                        .on_hover_text("Activar o desactivar esta regla");
+                    chk.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::Role::CheckBox,
+                            true,
+                            enabled,
+                            format!("Regla activada: {}", rule.name),
+                        )
+                    });
+                    let selected = ui
+                        .add(egui::Button::new(name).frame(false).truncate())
+                        .on_hover_text(&rule.name)
+                        .clicked();
+                    if chk.changed() {
+                        Some(RuleRowAction::Toggle(enabled))
+                    } else {
+                        selected.then_some(RuleRowAction::Select)
+                    }
+                },
+                |ui| {
+                    if !stats_below {
+                        ui.label(stats.clone()).on_hover_text(&stats_tip);
+                    }
+                    ui.add_enabled(
+                        test_ready && !rule.positives.is_empty(),
+                        egui::Button::new("Probar"),
                     )
-                });
-                if chk.changed() {
-                    action = Some(RuleRowAction::Toggle(enabled));
-                }
-                if ui
-                    .add(egui::Button::new(name).frame(false).truncate())
-                    .on_hover_text(&rule.name)
+                    .on_hover_text("Ordenar la galería por similitud con esta regla")
                     .clicked()
-                {
-                    action = Some(RuleRowAction::Select);
-                }
-            });
-        });
-    });
+                    .then_some(RuleRowAction::Test)
+                },
+            )
+        })
+        .inner;
     if stats_below {
         ui.label(stats).on_hover_text(stats_tip);
     }
-
-    action
+    start.or(end)
 }
 
 fn draw_catalog_labels_section(
@@ -1088,14 +1089,10 @@ fn draw_catalog_label_row(
         ))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // The button takes its place first, so a long name truncates before it.
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.menu_button("Acciones", |ui| {
-                        if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
-                            outcome.label_action = Some(act);
-                        }
-                    });
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                crate::views::row_with_end(
+                    ui,
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
                         if depth > 0 {
                             ui.add_space((depth.min(6) as f32) * 16.0);
                             ui.label(
@@ -1125,8 +1122,15 @@ fn draw_catalog_label_row(
                             );
                         });
                         ui.label(count);
-                    });
-                });
+                    },
+                    |ui| {
+                        ui.menu_button("Acciones", |ui| {
+                            if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
+                                outcome.label_action = Some(act);
+                            }
+                        });
+                    },
+                );
             });
         })
         .response
@@ -1211,7 +1215,15 @@ mod tests {
             let painted = texts(width, |ui| {
                 draw_rule_row(ui, palette, &rule, true);
             });
-            assert!(painted.iter().any(|(t, _)| t == "Probar"));
+            let probar = painted
+                .iter()
+                .find(|(t, _)| t == "Probar")
+                .expect("Probar")
+                .1;
+            assert!(
+                probar.max.x > width - 16.0,
+                "a {width} px «Probar» no va al final"
+            );
             assert_no_overlap(width, &painted);
 
             let mut outcome = TagsViewOutcome::default();
@@ -1220,6 +1232,147 @@ mod tests {
             });
             assert!(painted.iter().any(|(t, _)| t == "12345 fotos"));
             assert_no_overlap(width, &painted);
+
+            let painted = texts(width, |ui| {
+                draw_catalog_labels_section(ui, palette, &[], &mut outcome);
+            });
+            assert!(painted.iter().any(|(t, _)| t == "Nueva etiqueta"));
+            assert_no_overlap(width, &painted);
         }
+    }
+
+    #[test]
+    fn detail_panel_resizes_to_minimum_width_without_bouncing() {
+        let long = "Una etiqueta personalizada con un nombre larguísimo de verdad";
+        let rules: Vec<VisionRule> = (1..=8)
+            .map(|i| VisionRule {
+                id: RuleId(i),
+                label: LabelId(i),
+                kind: LabelKind::Tag,
+                name: format!("{long} {i}"),
+                mode: RuleMode::Independent,
+                threshold: 0.06,
+                enabled: true,
+                positives: vec![long.into()],
+                negatives: vec![long.into()],
+                builtin_key: None,
+                accepted_ai: 12345,
+                rejected_ai: 678,
+                suggested_ai: 9,
+            })
+            .collect();
+        let labels: Vec<LabelNode> = (1..=8)
+            .map(|i| LabelNode {
+                label: LabelId(i),
+                kind: LabelKind::Category,
+                name: format!("{long} {i}"),
+                parent: (i > 1).then_some(LabelId(i - 1)),
+                images: 12345,
+            })
+            .collect();
+        let mut state = TagsViewState {
+            selected: Some(RuleId(1)),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut width = 0.0;
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    draw(
+                        ui,
+                        &theme::DARK_PALETTE,
+                        &mut state,
+                        &rules,
+                        &labels,
+                        100,
+                        None,
+                        false,
+                        false,
+                        None,
+                    );
+                    width = egui::PanelState::load(ui.ctx(), ui.scope_id().with("tags_detail"))
+                        .expect("estado del panel")
+                        .size()
+                        .x;
+                },
+            )
+            .textures_delta
+            .clear();
+            width
+        };
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        let start = frame(vec![]);
+        assert!((start - 380.0).abs() <= 1.0, "inicial: {start}");
+        // Drag the panel's left border right, past the minimum, over several frames.
+        let border = Pos2::new(1000.0 - start, 300.0);
+        frame(vec![egui::Event::PointerMoved(border)]);
+        frame(vec![press(border, true)]);
+        for x in [800.0, 850.0, 900.0] {
+            frame(vec![egui::Event::PointerMoved(Pos2::new(x, 300.0))]);
+        }
+        frame(vec![press(Pos2::new(900.0, 300.0), false)]);
+        for _ in 0..3 {
+            let w = frame(vec![egui::Event::PointerMoved(Pos2::new(500.0, 300.0))]);
+            assert!(
+                (w - 300.0).abs() <= 1.0,
+                "el panel rebotó a {w} en vez de quedarse en 300"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_visits_a_rule_row_from_left_to_right() {
+        let rule = VisionRule {
+            id: RuleId(1),
+            label: LabelId(1),
+            kind: LabelKind::Tag,
+            name: "Gatos".into(),
+            mode: RuleMode::Independent,
+            threshold: 0.06,
+            enabled: true,
+            positives: vec!["a".into()],
+            negatives: Vec::new(),
+            builtin_key: None,
+            accepted_ai: 1,
+            rejected_ai: 0,
+            suggested_ai: 0,
+        };
+        for screen_reader in [false, true] {
+            let order = crate::views::tab_order(600.0, screen_reader, |ui| {
+                draw_rule_row(ui, &theme::LIGHT_PALETTE, &rule, true);
+            });
+            crate::views::assert_reading_order(&order);
+        }
+        let node = LabelNode {
+            label: LabelId(1),
+            kind: LabelKind::Category,
+            name: "Gatos".into(),
+            parent: None,
+            images: 3,
+        };
+        let mut order = crate::views::tab_order(600.0, true, |ui| {
+            draw_catalog_label_row(
+                ui,
+                &theme::LIGHT_PALETTE,
+                &node,
+                0,
+                &mut TagsViewOutcome::default(),
+            );
+        });
+        // The whole card, which takes the right click, comes after its content.
+        order.retain(|r| r.width() < 600.0);
+        crate::views::assert_reading_order(&order);
     }
 }
