@@ -125,16 +125,13 @@ impl WorksWorker {
                     break;
                 }
 
-                if let Some(r) = &roots {
-                    let in_roots = if let Ok(Some(entry)) = cat.entry_for(asset) {
-                        r.iter().any(|root| entry.path.starts_with(root))
-                    } else {
-                        false
-                    };
-                    if !in_roots {
-                        continue;
-                    }
-                }
+                let entry = match &roots {
+                    Some(r) => cat.entry_for_in_roots(asset, r),
+                    None => cat.entry_for(asset),
+                };
+                let Ok(Some(entry)) = entry else {
+                    continue;
+                };
 
                 match cat.apply_work_matches(asset, &matcher) {
                     Ok(res) => {
@@ -148,26 +145,13 @@ impl WorksWorker {
                             suggestions += count;
                         }
 
-                        if cat.is_promo_page(asset).unwrap_or(false)
-                            && let Ok(Some(entry)) = cat.entry_for(asset)
-                            && let Ok(img) = thumbs::decode(&entry.path, u32::MAX)
-                        {
-                            let lines = cat.ocr_lines(asset).unwrap_or_default();
-                            let is_screenshot =
-                                cat.labels_of(asset).unwrap_or_default().iter().any(|a| {
-                                    a.kind == catalog::LabelKind::Category
-                                        && a.name.eq_ignore_ascii_case(catalog::SCREENSHOT_CATEGORY)
-                                        && a.status != catalog::Status::Rejected
-                                });
-                            let covers = crate::promo_covers::detect_and_associate(
+                        if cat.is_promo_page(asset).unwrap_or(false) {
+                            let _ = crate::promo_covers::refresh_covers(
+                                &mut cat,
                                 asset,
-                                &img,
-                                &lines,
-                                &matcher,
-                                &cat,
-                                is_screenshot,
+                                &entry.path,
+                                &res.work_rects,
                             );
-                            let _ = cat.save_asset_covers(asset, &covers);
                         }
                     }
                     Err(e) => {

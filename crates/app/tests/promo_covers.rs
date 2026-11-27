@@ -338,3 +338,80 @@ fn test_user_decision_preserved_across_recalculation() {
         "Unmodified status remains suggested"
     );
 }
+
+#[test]
+fn works_worker_decodes_each_promo_page_once_and_stays_in_roots() {
+    use app::works_worker::{WorksEvent, WorksWorker};
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    let img_path = library.join("promo_grid.png");
+    create_synthetic_promo_grid().save(&img_path).unwrap();
+    let root = LibraryRoot::new(&library).unwrap();
+    let db_path = tmp.path().join("catalog.sqlite");
+    let db = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.index(&root).unwrap();
+    let asset = cat
+        .asset_of(&dunce::canonicalize(&img_path).unwrap())
+        .unwrap()
+        .unwrap();
+    let line = |text: &str, rect: [f32; 4]| OcrLine {
+        text: text.to_string(),
+        score: 0.95,
+        recognizer: OcrRecognizer::V6,
+        rect,
+        top_strip: false,
+    };
+    for title in [
+        "Crónicas del Relojero",
+        "Academia Nebulosa",
+        "El Jardín de Papel",
+    ] {
+        cat.create_work(title).unwrap();
+    }
+    cat.save_ocr_lines(
+        asset,
+        &[
+            line(
+                "PROYECTOS ACTIVOS DE NUESTRO GRUPO",
+                [14.0, 14.0, 226.0, 32.0],
+            ),
+            line("Crónicas del Relojero", [18.0, 122.0, 112.0, 138.0]),
+            line("Academia Nebulosa", [128.0, 122.0, 222.0, 138.0]),
+            line("El Jardín de Papel", [18.0, 226.0, 112.0, 242.0]),
+        ],
+    )
+    .unwrap();
+    cat.mark_done(asset, catalog::OCR_STAGE, catalog::OCR_VERSION)
+        .unwrap();
+
+    let run = |roots: Vec<std::path::PathBuf>| {
+        let db = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+        let worker = WorksWorker::start_in_roots(db, Some(roots), None);
+        while let Ok(ev) = worker.recv() {
+            match ev {
+                WorksEvent::Finished { .. } => break,
+                WorksEvent::Failed(e) => panic!("{e}"),
+                WorksEvent::Progress { .. } => {}
+            }
+        }
+    };
+
+    // Outside the registered folders nothing is computed.
+    run(vec![tmp.path().join("other")]);
+    assert!(cat.asset_covers(asset).unwrap().is_empty());
+
+    run(vec![root.as_path().to_path_buf()]);
+    assert_eq!(cat.asset_covers(asset).unwrap().len(), 6);
+
+    // A second run must not decode the image again: replacing it with a blank one (in this temp
+    // fixture) would yield no regions if it did.
+    DynamicImage::ImageRgba8(RgbaImage::from_pixel(240, 360, Rgba([200, 200, 200, 255])))
+        .save(&img_path)
+        .unwrap();
+    run(vec![root.as_path().to_path_buf()]);
+    let covers = cat.asset_covers(asset).unwrap();
+    assert_eq!(covers.len(), 6);
+    assert!(covers.iter().filter(|c| c.work.is_some()).count() >= 3);
+}

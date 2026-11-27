@@ -1,5 +1,11 @@
 use catalog::{AssetCover, AssetId, Catalog, OcrLine, Status, WorkLineMatch, WorkMatcher};
 use image::{DynamicImage, GenericImageView, RgbImage};
+use std::path::Path;
+
+/// Analysis stage that records the cover regions of an image as detected. Bump the version when
+/// the detection changes, so every promotional page is decoded again once.
+pub const COVERS_STAGE: &str = "covers";
+pub const COVERS_VERSION: u32 = 1;
 
 /// Minimum number of cover cards required to consider a page a promotional grid.
 const MIN_COVERS: usize = 2;
@@ -556,4 +562,31 @@ pub fn detect_and_associate(
 
     let matches = matcher.match_asset(lines, is_screenshot);
     associate_covers(asset, &covers, &matches.work_rects, cat)
+}
+
+/// Updates the cover regions of a promotional page and their works. The image is decoded only the
+/// first time (per `COVERS_VERSION`); later runs reuse the stored regions and only redo the
+/// association, which changes when works or their aliases change.
+pub fn refresh_covers(
+    cat: &mut Catalog,
+    asset: AssetId,
+    path: &Path,
+    works: &[WorkLineMatch],
+) -> Result<(), String> {
+    let done = cat
+        .is_stage_done(asset, COVERS_STAGE, COVERS_VERSION)
+        .map_err(|e| e.to_string())?;
+    let regions: Vec<[f32; 4]> = if done {
+        let stored = cat.asset_covers(asset).map_err(|e| e.to_string())?;
+        stored.into_iter().map(|c| c.rect).collect()
+    } else {
+        // Full size so the regions share the pixel space of the OCR lines.
+        let img = thumbs::decode(path, u32::MAX).map_err(|e| e.to_string())?;
+        detect_cover_regions(&img)
+    };
+    let covers = associate_covers(asset, &regions, works, cat);
+    cat.save_asset_covers(asset, &covers)
+        .map_err(|e| e.to_string())?;
+    cat.mark_done(asset, COVERS_STAGE, COVERS_VERSION)
+        .map_err(|e| e.to_string())
 }
