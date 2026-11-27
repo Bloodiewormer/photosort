@@ -153,11 +153,17 @@ pub fn draw(
                         );
 
                         // Draw cover region boxes on preview
-                        let (img_w, img_h) = if let (Some(w), Some(h)) = (entry.width, entry.height) {
-                            (w as f32, h as f32)
-                        } else {
-                            (tex.size_vec2().x, tex.size_vec2().y)
-                        };
+                        // Regions are in full-size pixels of the oriented image (as the OCR
+                        // lines), while the texture is a smaller preview: scale by the stored
+                        // size, swapped when EXIF rotation turned the picture. Unknown size: skip.
+                        let tex_size = tex.size_vec2();
+                        let (mut img_w, mut img_h) = (
+                            entry.width.unwrap_or(0) as f32,
+                            entry.height.unwrap_or(0) as f32,
+                        );
+                        if (img_w > img_h) != (tex_size.x > tex_size.y) {
+                            std::mem::swap(&mut img_w, &mut img_h);
+                        }
 
                         if img_w > 0.0 && img_h > 0.0 {
                             for cover in &state.covers {
@@ -188,6 +194,14 @@ pub fn draw(
                                     CornerRadius::same(2),
                                     Stroke::new(1.5, border_color),
                                     egui::StrokeKind::Inside,
+                                );
+                                // The number ties the box to its row in «Portadas», not only colour.
+                                ui.painter().text(
+                                    cover_rect.left_top() + Vec2::splat(3.0),
+                                    egui::Align2::LEFT_TOP,
+                                    (cover.cover_idx + 1).to_string(),
+                                    egui::FontId::proportional(theme::FONT_SMALL),
+                                    border_color,
                                 );
                             }
                         }
