@@ -1,5 +1,6 @@
 use crate::model::count_phrase;
 use crate::theme::{self, Palette};
+use crate::worker::ThumbRequest;
 use catalog::{AssetId, Catalog, FaceDetail, Person, PersonId};
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Frame, Layout, Margin, Pos2, Rect, RichText, ScrollArea,
@@ -19,10 +20,63 @@ pub struct PersonsViewState {
     pub postponed_persons: HashSet<PersonId>,
 }
 
+/// Faces shown on the naming card.
+const NAMING_SAMPLE_FACES: usize = 4;
+
+/// What the person cards and the naming card show. Read from the catalog when it changes, so
+/// drawing them asks the database nothing.
+#[derive(Default)]
+pub struct PersonCards {
+    covers: HashMap<PersonId, FaceDetail>,
+    /// The unnamed person to ask about, with its sample faces.
+    pub naming: Option<(Person, Vec<FaceDetail>)>,
+    /// Thumbnail of each photo those faces are cut from.
+    pub thumbs: HashMap<AssetId, ThumbRequest>,
+}
+
+impl PersonCards {
+    pub fn load(cat: &Catalog, postponed: &HashSet<PersonId>) -> Self {
+        let mut cards = Self::default();
+        // One query for every cover: a query per person took ~24 ms with 500 persons.
+        for (face, path, sha256) in cat.person_covers().unwrap_or_default() {
+            if let Some(source) = path {
+                cards
+                    .thumbs
+                    .insert(face.asset_id, ThumbRequest { source, sha256 });
+            }
+            if let Some(pid) = face.person_id {
+                cards.covers.insert(pid, face);
+            }
+        }
+        cards.naming = cat
+            .unnamed_persons_with_min_photos(3)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| !postponed.contains(&p.id))
+            .map(|p| {
+                let mut faces = cat.person_faces(p.id).unwrap_or_default();
+                faces.truncate(NAMING_SAMPLE_FACES);
+                (p, faces)
+            });
+        let naming_faces = cards.naming.iter().flat_map(|(_, faces)| faces);
+        for face in naming_faces {
+            if !cards.thumbs.contains_key(&face.asset_id)
+                && let Ok(Some(entry)) = cat.entry_for(face.asset_id)
+            {
+                let thumb = ThumbRequest {
+                    source: entry.path,
+                    sha256: entry.sha256,
+                };
+                cards.thumbs.insert(face.asset_id, thumb);
+            }
+        }
+        cards
+    }
+}
+
 #[derive(Default)]
 pub struct PersonsOutcome {
     pub open_in_gallery: Option<PersonId>,
-    pub filter_changed: bool,
     pub renamed: Option<(PersonId, String)>,
     pub merged: Option<(PersonId, PersonId)>,
     /// Persons to fold into the first one of the list.
@@ -43,7 +97,7 @@ pub fn draw_naming_card(
     state: &mut PersonsViewState,
     cat: &Catalog,
     thumb_textures: &HashMap<String, TextureHandle>,
-    asset_paths: &HashMap<AssetId, String>,
+    thumbs: &HashMap<AssetId, ThumbRequest>,
 ) -> PersonsOutcome {
     let mut outcome = PersonsOutcome::default();
 
@@ -55,8 +109,8 @@ pub fn draw_naming_card(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 // Display sample face crops (up to 4)
-                for face in sample_faces.iter().take(4) {
-                    draw_face_chip(ui, palette, face, thumb_textures, asset_paths, 44.0);
+                for face in sample_faces {
+                    draw_face_chip(ui, palette, face, thumb_textures, thumbs, 44.0);
                 }
 
                 ui.add_space(theme::SPACE_SM);
@@ -158,10 +212,10 @@ fn draw_face_chip(
     palette: &Palette,
     face: &FaceDetail,
     thumb_textures: &HashMap<String, TextureHandle>,
-    asset_paths: &HashMap<AssetId, String>,
+    thumbs: &HashMap<AssetId, ThumbRequest>,
     size_px: f32,
 ) {
-    let sha256 = asset_paths.get(&face.asset_id);
+    let sha256 = thumbs.get(&face.asset_id).map(|t| &t.sha256);
     let texture = sha256.and_then(|sha| thumb_textures.get(sha));
 
     let (rect, _response) = ui.allocate_exact_size(Vec2::splat(size_px), egui::Sense::hover());
@@ -222,8 +276,9 @@ pub fn draw(
     palette: &Palette,
     state: &mut PersonsViewState,
     cat: &Catalog,
+    all: &[Person],
+    cards: &PersonCards,
     thumb_textures: &HashMap<String, TextureHandle>,
-    asset_paths: &HashMap<AssetId, String>,
 ) -> PersonsOutcome {
     let mut outcome = PersonsOutcome::default();
 
@@ -246,9 +301,7 @@ pub fn draw(
                 );
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.checkbox(&mut state.show_hidden, "Mostrar ocultas").changed() {
-                        outcome.filter_changed = true;
-                    }
+                    ui.checkbox(&mut state.show_hidden, "Mostrar ocultas");
                     ui.add_space(theme::SPACE_MD);
                     theme::named(
                         ui.add(
@@ -264,7 +317,6 @@ pub fn draw(
             ui.add_space(theme::SPACE_MD);
 
             if !state.selected.is_empty() {
-                let all = cat.list_persons(true).unwrap_or_default();
                 state.selected.retain(|id| all.iter().any(|p| p.id == *id));
                 let chosen: Vec<&Person> = state
                     .selected
@@ -332,21 +384,16 @@ pub fn draw(
             }
 
             // Naming proposals card (unnamed persons with >= 3 photos)
-            if let Ok(unnamed_candidates) = cat.unnamed_persons_with_min_photos(3)
-                && let Some(candidate) = unnamed_candidates
-                    .iter()
-                    .find(|p| !state.postponed_persons.contains(&p.id))
-            {
-                let faces = cat.person_faces(candidate.id).unwrap_or_default();
+            if let Some((candidate, faces)) = &cards.naming {
                 let card_outcome = draw_naming_card(
                     ui,
                     palette,
                     candidate,
-                    &faces,
+                    faces,
                     state,
                     cat,
                     thumb_textures,
-                    asset_paths,
+                    &cards.thumbs,
                 );
                 if card_outcome.renamed.is_some() {
                     outcome.renamed = card_outcome.renamed;
@@ -364,11 +411,15 @@ pub fn draw(
             }
 
             // List / Grid of persons
-            let persons = cat.list_persons(state.show_hidden).unwrap_or_default();
+            let persons: Vec<&Person> = all
+                .iter()
+                .filter(|p| state.show_hidden || !p.hidden)
+                .collect();
 
             let filter_lower = state.filter.trim().to_lowercase();
             let filtered_persons: Vec<&Person> = persons
                 .iter()
+                .copied()
                 .filter(|p| {
                     if filter_lower.is_empty() {
                         true
@@ -415,9 +466,8 @@ pub fn draw(
                                     person,
                                     state,
                                     &mut outcome,
-                                    cat,
+                                    cards,
                                     thumb_textures,
-                                    asset_paths,
                                 );
                             }
                         });
@@ -435,9 +485,8 @@ fn draw_person_card(
     person: &Person,
     state: &mut PersonsViewState,
     outcome: &mut PersonsOutcome,
-    cat: &Catalog,
+    cards: &PersonCards,
     thumb_textures: &HashMap<String, TextureHandle>,
-    asset_paths: &HashMap<AssetId, String>,
 ) {
     let selected = state.selected.contains(&person.id);
     let border = if selected {
@@ -455,18 +504,8 @@ fn draw_person_card(
 
             ui.horizontal(|ui| {
                 // Representative face crop
-                let representative_face = person.cover_face_id.and_then(|fid| {
-                    if let Some(aid) = person.cover_asset_id {
-                        cat.asset_face_details(aid)
-                            .ok()
-                            .and_then(|faces| faces.into_iter().find(|f| f.id == fid))
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(face) = &representative_face {
-                    draw_face_chip(ui, palette, face, thumb_textures, asset_paths, 56.0);
+                if let Some(face) = cards.covers.get(&person.id) {
+                    draw_face_chip(ui, palette, face, thumb_textures, &cards.thumbs, 56.0);
                 } else {
                     let rect = ui
                         .allocate_exact_size(Vec2::splat(56.0), egui::Sense::hover())
