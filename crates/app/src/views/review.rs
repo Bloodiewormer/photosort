@@ -1,6 +1,7 @@
 use crate::model::count_phrase;
 use crate::review_flow::{ReviewDecision, ReviewFlow, THRESHOLD_MAX, THRESHOLD_MIN, UndoOutcome};
 use crate::theme::{self, Palette};
+use crate::views::push_buttons_to_row_end;
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::{Catalog, LabelKind, Source};
 use eframe::egui::{
@@ -252,14 +253,16 @@ pub fn draw(
                     .size(theme::FONT_HEADING)
                     .strong(),
                 );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Rechazar todo el grupo").clicked() {
-                        request_group = Some(ReviewDecision::Reject);
-                    }
-                    if ui.button("Aceptar todo el grupo").clicked() {
-                        request_group = Some(ReviewDecision::Accept);
-                    }
-                });
+                push_buttons_to_row_end(
+                    ui,
+                    &["Aceptar todo el grupo", "Rechazar todo el grupo"],
+                );
+                if ui.button("Aceptar todo el grupo").clicked() {
+                    request_group = Some(ReviewDecision::Accept);
+                }
+                if ui.button("Rechazar todo el grupo").clicked() {
+                    request_group = Some(ReviewDecision::Reject);
+                }
             });
             ui.add_space(theme::SPACE_SM);
 
@@ -289,25 +292,12 @@ pub fn draw(
                                 .strong()
                                 .color(palette.review_badge_fg.color32()),
                             );
-                            // Inside a wrapped row, only the space left on the row counts.
-                            if ui.available_size_before_wrap().x < 240.0 {
-                                ui.horizontal(|ui| {
-                                    if ui.button("Cancelar").clicked() {
-                                        cancel_group = true;
-                                    }
-                                    if ui.button("Confirmar").clicked() {
-                                        confirm_group = true;
-                                    }
-                                });
-                            } else {
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Cancelar").clicked() {
-                                        cancel_group = true;
-                                    }
-                                    if ui.button("Confirmar").clicked() {
-                                        confirm_group = true;
-                                    }
-                                });
+                            push_buttons_to_row_end(ui, &["Confirmar", "Cancelar"]);
+                            if ui.button("Confirmar").clicked() {
+                                confirm_group = true;
+                            }
+                            if ui.button("Cancelar").clicked() {
+                                cancel_group = true;
                             }
                         });
                     });
@@ -363,61 +353,9 @@ pub fn draw(
                                     );
                                     ui.add_space(theme::SPACE_SM);
 
-                                    ui.vertical(|ui| {
-                                        let filename = row
-                                            .path
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().into_owned())
-                                            .unwrap_or_else(|| row.path.display().to_string());
-                                        ui.label(
-                                            RichText::new(filename)
-                                                .size(theme::FONT_BODY)
-                                                .strong(),
-                                        );
-                                        ui.label(
-                                            RichText::new(row.path.display().to_string())
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.text_secondary.color32()),
-                                        );
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{}: {}",
-                                                    kind_label(row.label_kind),
-                                                    row.label_name
-                                                ))
-                                                .size(theme::FONT_SMALL)
-                                                .strong(),
-                                            );
-                                            ui.separator();
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "Confianza: {:.0}%",
-                                                    row.confidence * 100.0
-                                                ))
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.status_suggested_fg.color32()),
-                                            );
-                                            ui.separator();
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "Fuente: {}",
-                                                    source_label(row.source)
-                                                ))
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.text_secondary.color32()),
-                                            );
-                                        });
-                                    });
-
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if ui.button("Rechazar").clicked() {
-                                            row_action = Some((idx, ReviewDecision::Reject));
-                                        }
-                                        if ui.button("Aceptar").clicked() {
-                                            row_action = Some((idx, ReviewDecision::Accept));
-                                        }
-                                    });
+                                    if let Some(decision) = draw_row_body(ui, palette, row) {
+                                        row_action = Some((idx, decision));
+                                    }
                                 });
                             });
                         // Pointer only: the arrow keys move between rows.
@@ -509,6 +447,70 @@ fn apply_undo(flow: &mut ReviewFlow, cat: &Catalog, outcome: &mut ReviewViewOutc
     }
 }
 
+/// File name, path and suggestion of a row, with its buttons at the end.
+fn draw_row_body(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    row: &crate::review_flow::ReviewRow,
+) -> Option<ReviewDecision> {
+    let ((), decision) = crate::views::row_with_end(
+        ui,
+        (row.asset, row.label),
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.vertical(|ui| {
+                let filename = row
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| row.path.display().to_string());
+                ui.label(RichText::new(filename).size(theme::FONT_BODY).strong());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(row.path.display().to_string())
+                            .size(theme::FONT_SMALL)
+                            .color(palette.text_secondary.color32()),
+                    )
+                    .truncate(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}: {}",
+                            kind_label(row.label_kind),
+                            row.label_name
+                        ))
+                        .size(theme::FONT_SMALL)
+                        .strong(),
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Confianza: {:.0}%", row.confidence * 100.0))
+                            .size(theme::FONT_SMALL)
+                            .color(palette.status_suggested_fg.color32()),
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Fuente: {}", source_label(row.source)))
+                            .size(theme::FONT_SMALL)
+                            .color(palette.text_secondary.color32()),
+                    );
+                });
+            });
+        },
+        |ui| {
+            let accept = ui.button("Aceptar").clicked();
+            let reject = ui.button("Rechazar").clicked();
+            if accept {
+                Some(ReviewDecision::Accept)
+            } else {
+                reject.then_some(ReviewDecision::Reject)
+            }
+        },
+    );
+    decision
+}
+
 fn draw_thumb_box(
     ui: &egui::Ui,
     palette: &Palette,
@@ -571,5 +573,32 @@ fn source_label(source: Source) -> &'static str {
         Source::Ocr => "OCR",
         Source::Rules => "Reglas",
         Source::User => "Usuario",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review_flow::ReviewRow;
+    use catalog::{AssetId, LabelId};
+
+    #[test]
+    fn tab_visits_a_review_row_in_reading_order() {
+        let row = ReviewRow {
+            asset: AssetId(1),
+            label: LabelId(1),
+            label_name: "Gatos".into(),
+            label_kind: LabelKind::Tag,
+            confidence: 0.5,
+            source: Source::Ai,
+            path: "C:/fotos/una foto.jpg".into(),
+            sha256: String::new(),
+        };
+        for screen_reader in [false, true] {
+            let order = crate::views::tab_order(700.0, screen_reader, |ui| {
+                draw_row_body(ui, &theme::DARK_PALETTE, &row);
+            });
+            crate::views::assert_reading_order(&order);
+        }
     }
 }
