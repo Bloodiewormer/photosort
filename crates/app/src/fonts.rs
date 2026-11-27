@@ -1,137 +1,112 @@
-use eframe::egui::{Context, FontDefinitions, FontFamily};
-use std::env;
-use std::path::PathBuf;
+use eframe::egui::{Context, FontData, FontDefinitions, FontFamily};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
-/// Report on fallback CJK fonts loaded at startup.
-#[derive(Debug, Clone, Default)]
-pub struct FontsLoadReport {
-    pub loaded_fonts: Vec<String>,
-    pub total_bytes: usize,
-    pub elapsed_ms: f64,
-}
+/// Windows system fonts used as fallback for OCR text, one per group, first found wins.
+/// Microsoft YaHei covers kana as well as Han (GBK includes them), so one font serves
+/// Japanese and Chinese; the Japanese fonts are only for systems without it.
+/// Hangul needs its own font. Each file is ~13–19 MB kept in memory, hence one per group.
+const FALLBACK_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "cjk_han",
+        &["msyh.ttc", "YuGothR.ttc", "msgothic.ttc", "simsun.ttc"],
+    ),
+    ("cjk_hangul", &["malgun.ttf", "gulim.ttc"]),
+];
 
-/// Resolves the Windows Fonts directory from `%WINDIR%` or `%SystemRoot%`, defaulting to `C:\Windows\Fonts`.
+/// `%WINDIR%\Fonts`, or `C:\Windows\Fonts` when the variable is missing.
 pub fn windows_fonts_dir() -> PathBuf {
-    let windir = env::var_os("WINDIR")
-        .or_else(|| env::var_os("SystemRoot"))
+    std::env::var_os("WINDIR")
+        .or_else(|| std::env::var_os("SystemRoot"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    windir.join("Fonts")
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("Fonts")
 }
 
-/// Adds Windows system fonts as fallbacks for Japanese, Chinese, and Korean text.
-///
-/// Only loads existing fonts in read-only mode, never fails if some or all are missing,
-/// and appends them to egui's `Proportional` and `Monospace` families so Latin typography
-/// and base metrics remain unchanged.
-pub fn configure_cjk_fallback_fonts(ctx: &Context) -> FontsLoadReport {
-    let start = Instant::now();
-    let fonts_dir = windows_fonts_dir();
+/// Adds Windows' CJK fonts as fallbacks so Japanese, Chinese and Korean OCR text does not
+/// render as empty boxes. Returns the files loaded.
+pub fn configure_cjk_fallback_fonts(ctx: &Context) -> Vec<&'static str> {
+    configure_from(ctx, &windows_fonts_dir())
+}
 
-    // Priority lists: Japanese, Chinese (Simplified/Traditional), Korean.
-    // Pick the first candidate found for each language to keep memory footprint bounded.
-    let japanese_candidates = ["YuGothR.ttc", "msgothic.ttc", "meiryo.ttc"];
-    let chinese_candidates = ["msyh.ttc", "simsun.ttc"];
-    let korean_candidates = ["malgun.ttf", "gulim.ttc"];
-
-    let mut report = FontsLoadReport::default();
-    let mut font_defs = FontDefinitions::default();
-
-    let groups: &[(&str, &[&str])] = &[
-        ("cjk_japanese", &japanese_candidates),
-        ("cjk_chinese", &chinese_candidates),
-        ("cjk_korean", &korean_candidates),
-    ];
-
-    let mut newly_added = Vec::new();
-
-    for (name, candidates) in groups {
-        for &filename in *candidates {
-            let path = fonts_dir.join(filename);
-            if path.is_file() {
-                match std::fs::read(&path) {
-                    Ok(bytes) => {
-                        let len = bytes.len();
-                        report.total_bytes += len;
-                        let font_name = name.to_string();
-                        font_defs.font_data.insert(
-                            font_name.clone(),
-                            Arc::new(eframe::egui::FontData::from_owned(bytes)),
-                        );
-                        newly_added.push(font_name);
-                        report
-                            .loaded_fonts
-                            .push(format!("{filename} ({:.1} MB)", len as f64 / 1_048_576.0));
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("Advertencia: no se pudo leer la fuente {filename}: {e}");
-                    }
-                }
+fn configure_from(ctx: &Context, fonts_dir: &Path) -> Vec<&'static str> {
+    let mut defs = FontDefinitions::default();
+    let mut loaded = Vec::new();
+    for (name, candidates) in FALLBACK_GROUPS {
+        let found = candidates.iter().find_map(|&file| {
+            // A missing or unreadable font only means that script falls back to boxes.
+            std::fs::read(fonts_dir.join(file))
+                .ok()
+                .map(|bytes| (file, bytes))
+        });
+        if let Some((file, bytes)) = found {
+            defs.font_data
+                .insert(name.to_string(), Arc::new(FontData::from_owned(bytes)));
+            // Appended after egui's own fonts, so Latin text keeps its typeface and metrics.
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                defs.families
+                    .entry(family)
+                    .or_default()
+                    .push(name.to_string());
             }
+            loaded.push(file);
         }
     }
-
-    if !newly_added.is_empty() {
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            if let Some(list) = font_defs.families.get_mut(&family) {
-                for font_name in &newly_added {
-                    list.push(font_name.clone());
-                }
-            }
-        }
-        ctx.set_fonts(font_defs);
+    if !loaded.is_empty() {
+        ctx.set_fonts(defs);
     }
-
-    report.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-    report
+    loaded
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::egui::{Color32, RawInput};
+    use eframe::egui::{Color32, FontId, RawInput};
+
+    const JAPANESE: &str = "時計仕掛けのクロニクル第話";
+    const CHINESE: &str = "简体中文测试时钟编年史第十二话";
+    const KOREAN: &str = "바람공주제화한국어";
+
+    /// Runs a frame so `set_fonts` takes effect, then reports glyph coverage and Latin width.
+    fn coverage(ctx: &Context) -> ([bool; 3], f32) {
+        let mut out = ctx.run_ui(RawInput::default(), |_| {});
+        out.textures_delta.clear();
+        let font = FontId::proportional(14.0);
+        ctx.fonts_mut(|f| {
+            let has = [JAPANESE, CHINESE, KOREAN].map(|s| f.has_glyphs(&font, s));
+            let latin = f
+                .layout_no_wrap("Etiquetas áéíóú ñ 123".into(), font.clone(), Color32::WHITE)
+                .size()
+                .x;
+            (has, latin)
+        })
+    }
 
     #[test]
-    fn configure_cjk_fallback_fonts_does_not_panic() {
+    fn system_fonts_cover_cjk_without_changing_latin_text() {
+        let (plain_has, plain_latin) = coverage(&Context::default());
+        assert_eq!(plain_has, [false; 3], "egui solo no trae fuentes CJK");
+
         let ctx = Context::default();
-        let report = configure_cjk_fallback_fonts(&ctx);
-        // On Windows with standard fonts, at least one CJK font should be detected.
-        if windows_fonts_dir().is_dir() {
-            println!(
-                "Fuentes CJK cargadas: {:?} ({:.1} MB en {:.2} ms)",
-                report.loaded_fonts,
-                report.total_bytes as f64 / 1_048_576.0,
-                report.elapsed_ms
+        let loaded = configure_cjk_fallback_fonts(&ctx);
+        let (has, latin) = coverage(&ctx);
+        assert_eq!(latin, plain_latin, "la fuente latina no debe cambiar");
+        if loaded.contains(&"msyh.ttc") {
+            assert!(
+                has[0] && has[1],
+                "Microsoft YaHei cubre japonés y chino: {loaded:?}"
             );
+        }
+        if loaded.contains(&"malgun.ttf") {
+            assert!(has[2], "Malgun Gothic cubre coreano: {loaded:?}");
         }
     }
 
     #[test]
-    fn cjk_text_renders_without_panic() {
+    fn missing_fonts_leave_egui_defaults() {
+        let empty = tempfile::tempdir().unwrap();
         let ctx = Context::default();
-        let _ = configure_cjk_fallback_fonts(&ctx);
-
-        let input = RawInput::default();
-        let mut output = ctx.run_ui(input, |ui| {
-            // Japanese text
-            ui.label("時計仕掛けのクロニクル — 第12話");
-            // Chinese text
-            ui.label("简体中文测试：时钟编年史 第十二话");
-            // Korean text
-            ui.label("바람 공주 · 제3화 (한국어 OCR)");
-
-            // Layout test directly in painter
-            let font_id = eframe::egui::FontId::proportional(14.0);
-            let gal = ui.painter().layout_no_wrap(
-                "時計仕掛け / 바람 공주 / 中文".to_string(),
-                font_id,
-                Color32::WHITE,
-            );
-            assert!(gal.rect.width() > 0.0);
-        });
-        output.textures_delta.clear();
+        assert!(configure_from(&ctx, empty.path()).is_empty());
+        assert_eq!(coverage(&ctx).0, [false; 3]);
     }
 }
