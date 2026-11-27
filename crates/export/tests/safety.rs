@@ -462,18 +462,37 @@ fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
             embed_jpeg_tags: true,
         };
 
-        preview_with_options(&items, &dest, options).unwrap();
+        // The blocked item is counted apart from the unreadable ones.
+        let p = preview_with_options(&items, &dest, options).unwrap();
+        assert_eq!((p.blocked, p.unreadable, p.files), (1, 0, 1), "{name}");
         let report =
             export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
 
         assert_eq!(before, snapshot(&library), "{name}: the library changed");
         match &report.outcomes[0].1 {
-            Outcome::Failed(reason) => assert!(reason.contains("library"), "{reason}"),
-            other => panic!("{name}: expected a failure, got {other:?}"),
+            Outcome::Blocked(reason) => assert_eq!(
+                reason,
+                "la ruta lleva dentro de la biblioteca «library», donde no se escribe nada"
+            ),
+            other => panic!("{name}: expected a blocked item, got {other:?}"),
         }
         assert!(matches!(report.outcomes[1].1, Outcome::Copied(_)));
         assert!(dest_path.join(copied).is_file());
         assert!(dest_path.join(format!("{copied}.xmp")).is_file());
+
+        // The manifest keeps recording a blocked item as failed, and the summary adds up.
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report.manifest_json).unwrap()).unwrap();
+        let status = |i: usize| json["files"][i]["status"].as_str().unwrap().to_owned();
+        assert!(status(0).starts_with("failed: la ruta lleva"), "{name}");
+        assert!(json["files"][0]["dest_path"].is_null(), "{name}");
+        assert_eq!(status(1), "copied", "{name}");
+        assert_eq!(json["summary"]["failed"], 1, "{name}");
+        assert_eq!(json["summary"]["copied"], 1, "{name}");
+        assert_eq!(json["summary"]["already_present"], 0, "{name}");
+        let csv = fs::read_to_string(&report.manifest_csv).unwrap();
+        // Quoted: the reason has a comma.
+        assert!(csv.contains(",\"failed: la ruta lleva"), "{name}: {csv}");
     }
 
     // A link where a sidecar would go: the copy is made and the report carries the warning.
@@ -491,7 +510,9 @@ fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
     assert_eq!(before, snapshot(&library), "sidecar: the library changed");
     assert!(matches!(report.outcomes[0].1, Outcome::Copied(_)));
     assert!(
-        report.warnings[0].1.contains("XMP sidecar not written"),
+        report.warnings[0]
+            .1
+            .starts_with("no se escribió el archivo XMP: la ruta lleva dentro de la biblioteca"),
         "{:?}",
         report.warnings
     );

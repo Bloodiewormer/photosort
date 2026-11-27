@@ -349,6 +349,16 @@ fn draw_preview_ready(
             plural_word(preview.unreadable, "Origen ilegible", "Orígenes ilegibles"),
             &count_phrase(preview.unreadable, "archivo", "archivos"),
         );
+        info_row(
+            ui,
+            palette,
+            plural_word(
+                preview.blocked,
+                "Bloqueado por un enlace",
+                "Bloqueados por un enlace",
+            ),
+            &count_phrase(preview.blocked, "archivo", "archivos"),
+        );
     });
 
     if !preview.fits() {
@@ -473,6 +483,16 @@ fn draw_done_step(
         info_row(
             ui,
             palette,
+            plural_word(
+                summary.blocked.len(),
+                "Bloqueado por un enlace",
+                "Bloqueados por un enlace",
+            ),
+            &count_phrase(summary.blocked.len(), "archivo", "archivos"),
+        );
+        info_row(
+            ui,
+            palette,
             plural_word(summary.failed.len(), "Fallido", "Fallidos"),
             &count_phrase(summary.failed.len(), "archivo", "archivos"),
         );
@@ -487,27 +507,20 @@ fn draw_done_step(
         });
     });
 
-    if !summary.failed.is_empty() {
-        ui.add_space(theme::SPACE_SM);
-        ui.label(
-            RichText::new("Archivos fallidos:")
-                .strong()
-                .color(palette.status_rejected_fg.color32()),
-        );
-        ui.add_space(theme::SPACE_XS);
-        ScrollArea::vertical()
-            .id_salt("export_failed_list")
-            .max_height(140.0)
-            .show(ui, |ui| {
-                for (path, reason) in &summary.failed {
-                    ui.label(
-                        RichText::new(format!("{} — {reason}", path.display()))
-                            .size(theme::FONT_SMALL)
-                            .color(palette.status_rejected_fg.color32()),
-                    );
-                }
-            });
-    }
+    draw_not_exported(
+        ui,
+        palette,
+        "Archivos bloqueados por un enlace:",
+        "export_blocked_list",
+        &summary.blocked,
+    );
+    draw_not_exported(
+        ui,
+        palette,
+        "Archivos fallidos:",
+        "export_failed_list",
+        &summary.failed,
+    );
 
     if !summary.warnings.is_empty() {
         ui.add_space(theme::SPACE_SM);
@@ -549,6 +562,37 @@ fn draw_done_step(
             }
         });
     });
+}
+
+fn draw_not_exported(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    title: &str,
+    id: &str,
+    files: &[(PathBuf, String)],
+) {
+    if files.is_empty() {
+        return;
+    }
+    ui.add_space(theme::SPACE_SM);
+    ui.label(
+        RichText::new(title)
+            .strong()
+            .color(palette.status_rejected_fg.color32()),
+    );
+    ui.add_space(theme::SPACE_XS);
+    ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(100.0)
+        .show(ui, |ui| {
+            for (path, reason) in files {
+                ui.label(
+                    RichText::new(format!("{} — {reason}", path.display()))
+                        .size(theme::FONT_SMALL)
+                        .color(palette.status_rejected_fg.color32()),
+                );
+            }
+        });
 }
 
 fn draw_error_step(

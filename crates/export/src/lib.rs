@@ -5,7 +5,7 @@ pub use jpeg::{embed_xmp_in_jpeg, extract_xmp_from_jpeg, is_jpeg};
 pub use xmp::{XmpData, generate_xmp, xml_escape};
 
 use catalog::{AssetWork, Assignment, LabelKind, Status};
-use fsguard::DestPath;
+use fsguard::{DestPath, GuardError, io_reason};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -80,6 +80,8 @@ pub enum Outcome {
     Copied(PathBuf),
     /// An identical file (same SHA-256) was already there, so nothing was written.
     AlreadyPresent(PathBuf),
+    /// The guard refused to follow a link in the destination. The manifest records it as failed.
+    Blocked(String),
     Failed(String),
 }
 
@@ -103,6 +105,8 @@ pub struct Preview {
     pub already_present: usize,
     /// Sources that could not be read.
     pub unreadable: usize,
+    /// Sources whose place in the destination goes through a link the guard refuses to follow.
+    pub blocked: usize,
     /// Available bytes on the destination volume, queried from its nearest existing ancestor.
     pub free_bytes: Option<u64>,
 }
@@ -111,6 +115,14 @@ impl Preview {
     /// True when the bytes to copy fit in the destination volume's free space (or when unknown).
     pub fn fits(&self) -> bool {
         self.free_bytes.is_none_or(|free| self.bytes <= free)
+    }
+
+    fn count_refused(&mut self, e: &GuardError) {
+        if e.is_link() {
+            self.blocked += 1;
+        } else {
+            self.unreadable += 1;
+        }
     }
 }
 
@@ -262,14 +274,10 @@ fn subfolder_components_for(
         )]),
         Layout::PreserveFolders => {
             let Some(root) = &item.root else {
-                return Err("item has no library root specified for PreserveFolders".to_string());
+                return Err("no se sabe de qué biblioteca es el archivo".to_string());
             };
             let Some(rel) = relative_to_root(&item.source, root) else {
-                return Err(format!(
-                    "source {} is not inside library root {}",
-                    item.source.display(),
-                    root.display()
-                ));
+                return Err("el archivo no está dentro de su biblioteca".to_string());
             };
             let rel_parent = rel.parent().unwrap_or_else(|| Path::new(""));
             let mut comps = Vec::new();
@@ -279,7 +287,7 @@ fn subfolder_components_for(
             for c in rel_parent.components() {
                 match c {
                     Component::Normal(p) => comps.push(p.to_os_string()),
-                    _ => return Err(format!("path contains invalid component: {c:?}")),
+                    _ => return Err("la ruta de origen tiene una parte no válida".to_string()),
                 }
             }
             Ok(comps)
@@ -305,7 +313,7 @@ fn resolve(
     sha: &str,
     reserved: &HashMap<String, String>,
     tagged: Option<&[u8]>,
-) -> Result<Resolved, String> {
+) -> Result<Resolved, GuardError> {
     let path = Path::new(name);
     let stem = path.file_stem().unwrap_or(name);
     let mut n = 0u32;
@@ -321,7 +329,7 @@ fn resolve(
             }
         }
         n += 1;
-        let target = dest.join_name(&candidate).map_err(|e| e.to_string())?;
+        let target = dest.join_name(&candidate)?;
         if let Some(existing_sha) = reserved.get(&key(&candidate)) {
             if existing_sha == sha {
                 return Ok(Resolved { target, same: true });
@@ -344,11 +352,11 @@ fn resolve(
 
 /// Metadata is read before the bytes so the original's access time is the one that gets restored.
 fn read_source(path: &Path) -> Result<(fs::Metadata, String), String> {
-    let md = fs::metadata(path).map_err(|e| e.to_string())?;
+    let md = fs::metadata(path).map_err(|e| io_reason(&e))?;
     if !md.is_file() {
-        return Err("not a file".into());
+        return Err("no es un archivo".into());
     }
-    let sha = scanner::sha256_file(path).map_err(|e| e.to_string())?;
+    let sha = scanner::sha256_file(path).map_err(|e| io_reason(&e))?;
     Ok((md, sha))
 }
 
@@ -416,12 +424,12 @@ fn ensure_dir_chain(dest: &DestPath, comps: &[OsString]) -> io::Result<DestPath>
 }
 
 /// Resolves target directory by traversing subfolder components using `join_name`.
-fn resolve_target_dir(dest: &DestPath, comps: &[OsString]) -> Option<DestPath> {
+fn resolve_target_dir(dest: &DestPath, comps: &[OsString]) -> Result<DestPath, GuardError> {
     let mut cur = dest.clone();
     for comp in comps {
-        cur = cur.join_name(comp).ok()?;
+        cur = cur.join_name(comp)?;
     }
-    Some(cur)
+    Ok(cur)
 }
 
 /// Writes `part`, checks it against `sha`, gives it the original's dates and renames it to `target`.
@@ -449,7 +457,7 @@ fn write_verified(
         out.sync_all()?;
         if scanner::sha256_file(part.as_path())? != sha {
             return Err(io::Error::other(
-                "the copy does not match the original (SHA-256)",
+                "la copia no coincide con el original (SHA-256)",
             ));
         }
         out.set_times(times_of(md)?)?;
@@ -459,7 +467,7 @@ fn write_verified(
         if fs::symlink_metadata(target.as_path()).is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "the name was taken while copying",
+                "otro archivo ocupó el nombre mientras se copiaba",
             ));
         }
         fs::rename(part.as_path(), target.as_path())
@@ -483,7 +491,7 @@ fn embed_jpeg_copy(
     if !starts_as_jpeg(target.as_path()) {
         return Ok(None);
     }
-    let bytes = fs::read(target.as_path()).map_err(|e| e.to_string())?;
+    let bytes = fs::read(target.as_path()).map_err(|e| io_reason(&e))?;
     let tagged = jpeg::embed_xmp_in_jpeg(&bytes, xmp_xml.as_bytes())?;
 
     let mut tagpart_name = target.as_path().file_name().unwrap().to_owned();
@@ -503,7 +511,7 @@ fn embed_jpeg_copy(
         f.sync_all()?;
         if fs::read(tagpart.as_path())? != tagged {
             return Err(io::Error::other(
-                "the tagged copy was not written correctly",
+                "la copia con etiquetas no se escribió bien",
             ));
         }
         // Hashed before the dates are set, like write_verified, so reading it does not move them.
@@ -520,7 +528,7 @@ fn embed_jpeg_copy(
             if created {
                 let _ = fs::remove_file(tagpart.as_path()); // our own temporary file, in the destination
             }
-            Err(e.to_string())
+            Err(io_reason(&e))
         }
     }
 }
@@ -589,18 +597,23 @@ fn copy_one(
     dest: &DestPath,
     options: ExportOptions,
     root_folders: &HashMap<&Path, OsString>,
-) -> Result<Done, String> {
-    let (md, sha) = read_source(&item.source)?;
-    let name = item.source.file_name().ok_or("the path has no file name")?;
-    let comps = subfolder_components_for(item, &md, options.layout, root_folders)?;
-    let target_dir = ensure_dir_chain(dest, &comps).map_err(|e| e.to_string())?;
+) -> io::Result<Done> {
+    let (md, sha) = read_source(&item.source).map_err(io::Error::other)?;
+    let name = item
+        .source
+        .file_name()
+        .ok_or_else(|| io::Error::other("la ruta no tiene nombre de archivo"))?;
+    let comps = subfolder_components_for(item, &md, options.layout, root_folders)
+        .map_err(io::Error::other)?;
+    let target_dir = ensure_dir_chain(dest, &comps)?;
 
     let xmp_xml = (options.write_xmp_sidecars || options.embed_jpeg_tags).then(|| xmp_for(item));
     let tagged = match &xmp_xml {
         Some(x) if options.embed_jpeg_tags => tagged_bytes_of(&item.source, x),
         _ => None,
     };
-    let resolved = resolve(&target_dir, name, &sha, &HashMap::new(), tagged.as_deref())?;
+    let resolved = resolve(&target_dir, name, &sha, &HashMap::new(), tagged.as_deref())
+        .map_err(io::Error::other)?;
     let path = resolved.target.as_path().to_path_buf();
     let mut tagged_sha = None;
     let mut warnings: Vec<String> = Vec::new();
@@ -608,7 +621,7 @@ fn copy_one(
     let outcome = if resolved.same {
         if tagged.is_some() {
             // The copy found may be the tagged one an earlier export left.
-            let on_disk = scanner::sha256_file(&path).map_err(|e| e.to_string())?;
+            let on_disk = scanner::sha256_file(&path)?;
             if on_disk != sha {
                 tagged_sha = Some(on_disk);
             }
@@ -617,11 +630,8 @@ fn copy_one(
     } else {
         let mut part_name = resolved.target.as_path().file_name().unwrap().to_owned();
         part_name.push(".part");
-        let part = target_dir
-            .join_name(&part_name)
-            .map_err(|e| e.to_string())?;
-        write_verified(&item.source, &part, &resolved.target, &sha, &md)
-            .map_err(|e| e.to_string())?;
+        let part = target_dir.join_name(&part_name).map_err(io::Error::other)?;
+        write_verified(&item.source, &part, &resolved.target, &sha, &md)?;
         Outcome::Copied(path.clone())
     };
 
@@ -638,13 +648,15 @@ fn copy_one(
                 .join_name(OsStr::new(&format!("{base_name}.xmp")))
                 .is_ok_and(|p| fs::read(p.as_path()).is_ok_and(|b| b == xmp_xml.as_bytes()));
             if !same && let Err(e) = write_new(&target_dir, &base_name, "xmp", xmp_xml) {
-                warnings.push(format!("XMP sidecar not written: {e}"));
+                warnings.push(format!("no se escribió el archivo XMP: {}", io_reason(&e)));
             }
         }
         if options.embed_jpeg_tags && matches!(outcome, Outcome::Copied(_)) {
             match embed_jpeg_copy(&resolved.target, &target_dir, xmp_xml, &md) {
                 Ok(new_sha) => tagged_sha = new_sha,
-                Err(e) => warnings.push(format!("tags not embedded, the copy is untagged: {e}")),
+                Err(e) => warnings.push(format!(
+                    "no se incrustaron las etiquetas, la copia queda sin ellas: {e}"
+                )),
             }
         }
     }
@@ -656,6 +668,19 @@ fn copy_one(
         warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
         size: md.len(),
     })
+}
+
+/// Why an item was not exported: [`Outcome::Blocked`] when the guard refused a link.
+fn failure(e: &io::Error) -> Outcome {
+    let by_link = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<GuardError>())
+        .is_some_and(GuardError::is_link);
+    if by_link {
+        Outcome::Blocked(io_reason(e))
+    } else {
+        Outcome::Failed(io_reason(e))
+    }
 }
 
 /// Copies the originals byte for byte into `dest` using [`Layout::Flat`], verifies every copy
@@ -728,11 +753,11 @@ pub fn export_with_options(
                 }) => {
                     let path = match &outcome {
                         Outcome::Copied(p) | Outcome::AlreadyPresent(p) => Some(p.clone()),
-                        Outcome::Failed(_) => None,
+                        Outcome::Blocked(_) | Outcome::Failed(_) => None,
                     };
                     (outcome, path, Some(sha), tagged_sha, warning, Some(size))
                 }
-                Err(msg) => (Outcome::Failed(msg), None, None, None, None, None),
+                Err(e) => (failure(&e), None, None, None, None, None),
             };
         let status = match &outcome {
             Outcome::Copied(_) => {
@@ -744,7 +769,7 @@ pub fn export_with_options(
                 present += 1;
                 "already_present".to_string()
             }
-            Outcome::Failed(msg) => {
+            Outcome::Blocked(msg) | Outcome::Failed(msg) => {
                 failed += 1;
                 format!("failed: {msg}")
             }
@@ -900,6 +925,7 @@ pub fn preview_with_options(
         renamed: 0,
         already_present: 0,
         unreadable: 0,
+        blocked: 0,
         free_bytes: available_space(dest.as_path()),
     };
     let mut reserved: HashMap<Option<String>, HashMap<String, String>> = HashMap::new();
@@ -922,9 +948,9 @@ pub fn preview_with_options(
             }
         };
         let target_dir = match resolve_target_dir(dest, &comps) {
-            Some(d) => d,
-            None => {
-                p.unreadable += 1;
+            Ok(d) => d,
+            Err(e) => {
+                p.count_refused(&e);
                 continue;
             }
         };
@@ -945,10 +971,12 @@ pub fn preview_with_options(
         } else {
             None
         };
-        let Ok(resolved) = resolve(&target_dir, name, &sha, folder_reserved, tagged.as_deref())
-        else {
-            p.unreadable += 1;
-            continue;
+        let resolved = match resolve(&target_dir, name, &sha, folder_reserved, tagged.as_deref()) {
+            Ok(r) => r,
+            Err(e) => {
+                p.count_refused(&e);
+                continue;
+            }
         };
         if resolved.same {
             p.already_present += 1;

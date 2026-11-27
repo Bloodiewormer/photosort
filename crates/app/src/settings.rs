@@ -116,7 +116,11 @@ impl fmt::Display for SettingsError {
                 f,
                 "La carpeta elegida está dentro del directorio de datos de photosort; elige otra carpeta."
             ),
-            Self::Guard(e) => write!(f, "Ruta rechazada por el guardián de seguridad: {e}"),
+            // Only the data folder reaches the guard from here, and the guard's text no longer names it.
+            Self::Guard(e) => write!(
+                f,
+                "El guardián de seguridad rechazó la carpeta de datos de photosort: {e}"
+            ),
             Self::Io(e) => write!(f, "Error de lectura o escritura de configuración: {e}"),
             Self::Json(e) => write!(f, "Error al serializar la configuración: {e}"),
         }

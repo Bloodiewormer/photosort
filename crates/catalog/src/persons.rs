@@ -548,7 +548,7 @@ impl Catalog {
 
         let Some((existing_pid, user_assigned)) = current else {
             return Err(CatalogError::InvalidOperation(format!(
-                "face {face_id} not found"
+                "no se encontró el rostro {face_id}"
             )));
         };
 

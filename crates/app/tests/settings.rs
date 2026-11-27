@@ -240,3 +240,20 @@ fn save_safely_replaces_single_link_leftover_temp_file() {
     assert!(loaded.warning.is_none());
     assert_eq!(loaded.settings.theme, Theme::System);
 }
+
+#[test]
+fn a_data_dir_refused_by_the_guard_is_named_in_the_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    let s = Settings {
+        library_roots: vec![library.clone()],
+        ..Settings::default()
+    };
+
+    let err = save(&library.join("data"), &s).unwrap_err();
+    assert!(matches!(err, SettingsError::Guard(_)), "{err:?}");
+    let text = err.to_string();
+    assert!(text.contains("carpeta de datos"), "{text}");
+    assert!(text.contains("«library»"), "{text}");
+}

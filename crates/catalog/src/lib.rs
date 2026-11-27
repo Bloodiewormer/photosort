@@ -275,8 +275,8 @@ pub enum CatalogError {
 impl fmt::Display for CatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Db(e) => write!(f, "catalog database error: {e}"),
-            Self::Io(e) => write!(f, "could not read the library: {e}"),
+            Self::Db(e) => write!(f, "error en la base de datos del catálogo: {e}"),
+            Self::Io(e) => write!(f, "no se pudo leer la biblioteca: {e}"),
             Self::InvalidOperation(msg) => write!(f, "{msg}"),
         }
     }
