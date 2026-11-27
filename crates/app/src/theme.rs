@@ -190,6 +190,86 @@ pub fn hint_text(palette: &Palette, text: &str) -> egui::RichText {
     egui::RichText::new(text).color(palette.text_hint.color32())
 }
 
+/// Gives a control the name a screen reader says, for those whose text on screen does not name them.
+pub fn named(response: egui::Response, name: &str) -> egui::Response {
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_label(name));
+    response
+}
+
+/// Says in Spanish the names egui gives its own controls, which it has no setting for.
+pub struct SpanishNames;
+
+impl egui::Plugin for SpanishNames {
+    fn debug_name(&self) -> &'static str {
+        "photosort_spanish_names"
+    }
+
+    fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
+        let Some(update) = &mut output.platform_output.accesskit_update else {
+            return;
+        };
+        for (_, node) in &mut update.nodes {
+            let spanish = match node.label() {
+                Some("Close window") => "Cerrar ventana",
+                Some("Resize panel") => "Cambiar el tamaño del panel",
+                _ => continue,
+            };
+            node.set_label(spanish);
+        }
+    }
+}
+
+/// Draws the keyboard focus ring around any focused control. Buttons with their own stroke or
+/// no frame hide egui's focus stroke, so it is painted here, once, outside the control.
+pub fn paint_focus_ring(ctx: &egui::Context) {
+    let Some(focused) = ctx
+        .memory(|m| m.focused())
+        .and_then(|id| ctx.read_response(id))
+    else {
+        return;
+    };
+    if focused.interact_rect.is_positive() {
+        ctx.layer_painter(focused.layer_id).rect_stroke(
+            focused.interact_rect.expand(2.0),
+            CornerRadius::same(RADIUS_MD),
+            Stroke::new(FOCUS_STROKE_WIDTH, palette_for(ctx).accent.color32()),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
+/// Scrolls a control that the keyboard focused out of view back into it, which egui does not do
+/// by itself. Call it before drawing. It asks the way a screen reader does.
+pub fn scroll_focus_into_view(ctx: &egui::Context) {
+    let focused = ctx.memory(|m| m.focused());
+    let key = egui::Id::unique("photosort_last_focus");
+    let previous = ctx.data(|d| d.get_temp::<Option<egui::Id>>(key)).flatten();
+    ctx.data_mut(|d| d.insert_temp(key, focused));
+    if focused == previous || ctx.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+        return;
+    }
+    let Some(response) = focused.and_then(|id| ctx.read_response(id)) else {
+        return;
+    };
+    // Only a clipped control: with no scroll area around it, the request would reach another one.
+    if !response
+        .interact_rect
+        .expand(1.0)
+        .contains_rect(response.rect)
+    {
+        let request = egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::ScrollIntoView,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: response.id.accesskit_id(),
+            data: None,
+        };
+        ctx.input_mut(|i| i.events.push(egui::Event::AccessKitActionRequest(request)));
+        ctx.request_repaint();
+    }
+}
+
 /// Builds the primary ochre button (`#d9a416` fill with `#1c1608` text in both themes).
 pub fn primary_button<'a>(palette: &Palette, text: impl Into<String>) -> egui::Button<'a> {
     egui::Button::new(

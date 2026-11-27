@@ -295,10 +295,13 @@ pub fn draw(
 
                 // Add alias row
                 ui.horizontal(|ui| {
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut state.new_alias_input)
-                            .desired_width((ui.available_width() - 108.0).max(120.0))
-                            .hint_text(theme::hint_text(palette, "Añadir alias…")),
+                    let edit = theme::named(
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.new_alias_input)
+                                .desired_width((ui.available_width() - 108.0).max(120.0))
+                                .hint_text(theme::hint_text(palette, "Añadir alias…")),
+                        ),
+                        "Añadir alias",
                     );
                     let submit = ui.button("Añadir alias").clicked()
                         || (edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
@@ -633,10 +636,13 @@ pub fn draw(
 
             // Create new work + filter bar
             ui.horizontal(|ui| {
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut state.new_work_input)
-                        .desired_width(240.0)
-                        .hint_text(theme::hint_text(palette, "Nueva obra o grupo…")),
+                let edit = theme::named(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_work_input)
+                            .desired_width(240.0)
+                            .hint_text(theme::hint_text(palette, "Nueva obra o grupo…")),
+                    ),
+                    "Nueva obra o grupo",
                 );
                 let submit = ui.button("Crear obra").clicked()
                     || (edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
@@ -650,10 +656,13 @@ pub fn draw(
 
                 ui.separator();
 
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.filter)
-                        .desired_width((ui.available_width() - 80.0).max(160.0))
-                        .hint_text(theme::hint_text(palette, "Filtrar obras…")),
+                theme::named(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.filter)
+                            .desired_width((ui.available_width() - 80.0).max(160.0))
+                            .hint_text(theme::hint_text(palette, "Filtrar obras…")),
+                    ),
+                    "Filtrar obras",
                 );
                 if !state.filter.is_empty() && ui.button("Limpiar").clicked() {
                     state.filter.clear();

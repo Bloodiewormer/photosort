@@ -142,7 +142,8 @@ pub fn draw(
                                                 .on_hover_text(&full_path);
                                             })
                                             .response
-                                            .interact(egui::Sense::click());
+                                            // Right click only; «Quitar» is the keyboard path.
+                                            .interact(egui::Sense::CLICK);
 
                                         row_resp.context_menu(|ui| {
                                             if ui.button("Mostrar en el Explorador").clicked() {
@@ -813,7 +814,7 @@ fn option_pill(ui: &mut egui::Ui, palette: &Palette, label: &str, selected: bool
     } else {
         Stroke::new(1.0, palette.border.color32())
     };
-    ui.add(
+    let resp = ui.add(
         egui::Button::new(
             RichText::new(label)
                 .size(theme::FONT_BODY)
@@ -823,6 +824,7 @@ fn option_pill(ui: &mut egui::Ui, palette: &Palette, label: &str, selected: bool
         .stroke(stroke)
         .corner_radius(CornerRadius::same(theme::RADIUS_MD))
         .min_size(Vec2::new(88.0, 32.0)),
-    )
-    .clicked()
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, label));
+    resp.clicked()
 }

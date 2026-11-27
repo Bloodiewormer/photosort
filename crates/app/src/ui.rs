@@ -139,6 +139,7 @@ impl PhotosortApp {
         let settings = loaded.settings;
         let (thumbs, thumbs_warning) = open_thumbnails(&data_dir, &settings.valid_roots());
         theme::configure_styles(&cc.egui_ctx, settings.theme);
+        cc.egui_ctx.add_plugin(theme::SpanishNames);
 
         let logo_texture = theme::logo_color_image().map(|img| {
             cc.egui_ctx
@@ -1213,8 +1214,12 @@ impl PhotosortApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.photo_menu.is_some() || self.label_modal.is_open() {
-            // While a modal or context menu is open, it owns keyboard keys.
+        if self.photo_menu.is_some()
+            || self.label_modal.is_open()
+            || self.export_wizard.is_some()
+            || egui::Popup::is_any_open(ctx)
+        {
+            // While a dialog or menu is open, it owns keyboard keys.
             return;
         }
         let wants_text = ctx.egui_wants_keyboard_input();
@@ -1239,20 +1244,6 @@ impl PhotosortApp {
                 }
             }
             if wants_text {
-                return;
-            }
-
-            // Shift+F10 opens the photo context menu for the current photo.
-            // Note: egui 0.37's Key enum does not expose the Windows Application/Menu key;
-            // Shift+F10 is the standard Windows keyboard equivalent supported here.
-            if i.consume_key(Modifiers::SHIFT, Key::F10)
-                && self.selection.primary().is_some()
-                && !self.viewer_open
-            {
-                let pos = self
-                    .last_primary_cell_pos
-                    .unwrap_or_else(|| ctx.content_rect().center());
-                self.photo_menu = Some(PhotoMenuState::at(pos));
                 return;
             }
 
@@ -1470,6 +1461,15 @@ impl PhotosortApp {
 
 impl eframe::App for PhotosortApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        theme::scroll_focus_into_view(&ctx);
+        self.draw(ui);
+        theme::paint_focus_ring(&ctx);
+    }
+}
+
+impl PhotosortApp {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll_workers(&ctx);
         self.handle_shortcuts(&ctx);
@@ -1699,6 +1699,20 @@ impl eframe::App for PhotosortApp {
                     self.sync_inspector(false);
                 }
                 if let Some((_idx, pos)) = gal_out.open_photo_menu {
+                    self.photo_menu = Some(PhotoMenuState::at(pos));
+                }
+                // The gallery opens the menu for a focused thumbnail; this covers any other focus.
+                if self.photo_menu.is_none()
+                    && self.selection.primary().is_some()
+                    && !self.viewer_open
+                    && !self.label_modal.is_open()
+                    && self.export_wizard.is_none()
+                    && !ctx.text_edit_focused()
+                    && views::context_menu::menu_key_pressed(&ctx)
+                {
+                    let pos = self
+                        .last_primary_cell_pos
+                        .unwrap_or_else(|| ctx.content_rect().center());
                     self.photo_menu = Some(PhotoMenuState::at(pos));
                 }
                 if gal_out.review_selected {

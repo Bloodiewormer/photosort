@@ -345,11 +345,14 @@ pub fn draw(
                                             .size(theme::FONT_SMALL)
                                             .color(palette.text_secondary.color32()),
                                     );
-                                    ui.add_enabled(
-                                        state.running.is_none(),
-                                        egui::Slider::new(&mut state.threshold, 0.80..=0.99)
-                                            .step_by(0.01)
-                                            .fixed_decimals(2),
+                                    theme::named(
+                                        ui.add_enabled(
+                                            state.running.is_none(),
+                                            egui::Slider::new(&mut state.threshold, 0.80..=0.99)
+                                                .step_by(0.01)
+                                                .fixed_decimals(2),
+                                        ),
+                                        "Umbral de similitud",
                                     );
 
                                     if let Some((done, total)) = state.running {

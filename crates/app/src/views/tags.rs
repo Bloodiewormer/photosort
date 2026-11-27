@@ -291,7 +291,7 @@ pub fn draw(
                     let slider = egui::Slider::new(&mut state.edit_threshold, 0.0..=0.50)
                         .step_by(0.005)
                         .fixed_decimals(3);
-                    if ui.add(slider).changed() {
+                    if theme::named(ui.add(slider), "Umbral de similitud coseno").changed() {
                         state.edit_dirty = true;
                     }
                 });
@@ -313,8 +313,8 @@ pub fn draw(
                     .color(palette.text_secondary.color32()),
                 );
                 ui.add_space(theme::SPACE_XS);
-                if ui
-                    .add(
+                if theme::named(
+                    ui.add(
                         egui::TextEdit::multiline(&mut state.edit_positives)
                             .desired_width(ui.available_width())
                             .desired_rows(4)
@@ -322,8 +322,10 @@ pub fn draw(
                                 palette,
                                 "Una descripción por línea…",
                             )),
-                    )
-                    .changed()
+                    ),
+                    "Descripciones positivas",
+                )
+                .changed()
                 {
                     state.edit_dirty = true;
                 }
@@ -333,8 +335,8 @@ pub fn draw(
                     RichText::new("Descripciones negativas (opcional, una por línea)").strong(),
                 );
                 ui.add_space(theme::SPACE_XS);
-                if ui
-                    .add(
+                if theme::named(
+                    ui.add(
                         egui::TextEdit::multiline(&mut state.edit_negatives)
                             .desired_width(ui.available_width())
                             .desired_rows(3)
@@ -342,8 +344,10 @@ pub fn draw(
                                 palette,
                                 "Descripciones que descartan esta etiqueta…",
                             )),
-                    )
-                    .changed()
+                    ),
+                    "Descripciones negativas",
+                )
+                .changed()
                 {
                     state.edit_dirty = true;
                 }
@@ -583,13 +587,16 @@ pub fn draw(
                     ui.label(RichText::new("Buscar por descripción").strong());
                     ui.add_space(theme::SPACE_XS);
                     ui.horizontal(|ui| {
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(&mut state.search_query)
-                                .desired_width((ui.available_width() - 150.0).max(180.0))
-                                .hint_text(theme::hint_text(
-                                    palette,
-                                    "Describe lo que buscas (inglés o español)…",
-                                )),
+                        let edit = theme::named(
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.search_query)
+                                    .desired_width((ui.available_width() - 150.0).max(180.0))
+                                    .hint_text(theme::hint_text(
+                                        palette,
+                                        "Describe lo que buscas (inglés o español)…",
+                                    )),
+                            ),
+                            "Buscar por descripción",
                         );
                         let can_search = analyzed_count > 0
                             && !state.search_query.trim().is_empty()
@@ -641,10 +648,13 @@ pub fn draw(
                         ui.add_space(theme::SPACE_XS);
                         ui.horizontal(|ui| {
                             ui.label("Nombre:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut state.new_name)
-                                    .desired_width(220.0)
-                                    .hint_text(theme::hint_text(palette, "p. ej. paisaje, gato…")),
+                            theme::named(
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut state.new_name)
+                                        .desired_width(220.0)
+                                        .hint_text(theme::hint_text(palette, "p. ej. paisaje, gato…")),
+                                ),
+                                "Nombre de la etiqueta",
                             );
                         });
                         ui.add_space(theme::SPACE_XS);
@@ -653,14 +663,17 @@ pub fn draw(
                                 .size(theme::FONT_SMALL)
                                 .color(palette.text_secondary.color32()),
                         );
-                        ui.add(
-                            egui::TextEdit::multiline(&mut state.new_positives)
-                                .desired_width(ui.available_width())
-                                .desired_rows(2)
-                                .hint_text(theme::hint_text(
-                                    palette,
-                                    "a photo of a cat\nuna foto de un gato",
-                                )),
+                        theme::named(
+                            ui.add(
+                                egui::TextEdit::multiline(&mut state.new_positives)
+                                    .desired_width(ui.available_width())
+                                    .desired_rows(2)
+                                    .hint_text(theme::hint_text(
+                                        palette,
+                                        "a photo of a cat\nuna foto de un gato",
+                                    )),
+                            ),
+                            "Descripciones positivas de la etiqueta nueva",
                         );
                         ui.add_space(theme::SPACE_XS);
                         ui.horizontal(|ui| {
@@ -1081,7 +1094,8 @@ fn draw_catalog_label_row(
             });
         })
         .response
-        .interact(egui::Sense::click());
+        // Right click only; «Acciones» is the keyboard path.
+        .interact(egui::Sense::CLICK);
 
     row_resp.context_menu(|ui| {
         if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
