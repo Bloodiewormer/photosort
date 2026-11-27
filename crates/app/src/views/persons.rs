@@ -12,7 +12,8 @@ pub struct PersonsViewState {
     pub filter: String,
     pub show_hidden: bool,
     pub renaming: Option<(PersonId, String)>,
-    pub merging: Option<(PersonId, Option<PersonId>)>,
+    /// Cards marked as the same person, in the order they were marked.
+    pub selected: Vec<PersonId>,
     pub naming_input: String,
     pub merge_conflict: Option<(PersonId, PersonId, String)>,
     pub postponed_persons: HashSet<PersonId>,
@@ -24,6 +25,8 @@ pub struct PersonsOutcome {
     pub filter_changed: bool,
     pub renamed: Option<(PersonId, String)>,
     pub merged: Option<(PersonId, PersonId)>,
+    /// Persons to fold into the first one of the list.
+    pub merged_many: Option<Vec<PersonId>>,
     pub toggled_hidden: Option<(PersonId, bool)>,
     pub ignored: Option<PersonId>,
     pub postponed: Option<PersonId>,
@@ -254,6 +257,74 @@ pub fn draw(
 
             ui.add_space(theme::SPACE_MD);
 
+            if !state.selected.is_empty() {
+                let all = cat.list_persons(true).unwrap_or_default();
+                state.selected.retain(|id| all.iter().any(|p| p.id == *id));
+                let chosen: Vec<&Person> = state
+                    .selected
+                    .iter()
+                    .filter_map(|id| all.iter().find(|p| p.id == *id))
+                    .collect();
+                // Keep a name the user gave; among several, the person with most photos.
+                let keep = chosen
+                    .iter()
+                    .max_by_key(|p| (p.name.is_some(), p.photo_count))
+                    .map(|p| p.id);
+                let lost_names = chosen.iter().filter(|p| p.name.is_some()).count() > 1;
+                Frame::new()
+                    .fill(palette.bg_panel.color32())
+                    .stroke(Stroke::new(1.0, palette.accent.color32()))
+                    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+                    .inner_margin(Margin::same(theme::SPACE_MD as i8))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            let text = if chosen.len() < 2 {
+                                "Marca otra tarjeta que sea la misma persona".to_string()
+                            } else {
+                                let name = chosen
+                                    .iter()
+                                    .find(|p| Some(p.id) == keep)
+                                    .and_then(|p| p.name.clone());
+                                match name {
+                                    Some(n) if lost_names => format!(
+                                        "{} se unirán como «{n}»; los demás nombres se descartan",
+                                        count_phrase(chosen.len(), "persona", "personas")
+                                    ),
+                                    Some(n) => format!(
+                                        "{} se unirán como «{n}»",
+                                        count_phrase(chosen.len(), "persona", "personas")
+                                    ),
+                                    None => format!(
+                                        "{} se unirán en una",
+                                        count_phrase(chosen.len(), "persona", "personas")
+                                    ),
+                                }
+                            };
+                            ui.label(text);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Cancelar").clicked() {
+                                    state.selected.clear();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        chosen.len() >= 2,
+                                        theme::primary_button(palette, "Unir"),
+                                    )
+                                    .clicked()
+                                    && let Some(keep) = keep
+                                {
+                                    let mut ids = vec![keep];
+                                    ids.extend(chosen.iter().map(|p| p.id).filter(|id| *id != keep));
+                                    outcome.merged_many = Some(ids);
+                                    state.selected.clear();
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(theme::SPACE_MD);
+            }
+
             // Naming proposals card (unnamed persons with >= 3 photos)
             if let Ok(unnamed_candidates) = cat.unnamed_persons_with_min_photos(3)
                 && let Some(candidate) = unnamed_candidates
@@ -336,7 +407,6 @@ pub fn draw(
                                     ui,
                                     palette,
                                     person,
-                                    &persons,
                                     state,
                                     &mut outcome,
                                     cat,
@@ -357,16 +427,21 @@ fn draw_person_card(
     ui: &mut egui::Ui,
     palette: &Palette,
     person: &Person,
-    all_persons: &[Person],
     state: &mut PersonsViewState,
     outcome: &mut PersonsOutcome,
     cat: &Catalog,
     thumb_textures: &HashMap<String, TextureHandle>,
     asset_paths: &HashMap<AssetId, String>,
 ) {
+    let selected = state.selected.contains(&person.id);
+    let border = if selected {
+        Stroke::new(2.0, palette.accent.color32())
+    } else {
+        Stroke::new(1.0, palette.border.color32())
+    };
     Frame::new()
         .fill(palette.bg_panel.color32())
-        .stroke(Stroke::new(1.0, palette.border.color32()))
+        .stroke(border)
         .corner_radius(CornerRadius::same(theme::RADIUS_MD))
         .inner_margin(Margin::same(theme::SPACE_MD as i8))
         .show(ui, |ui| {
@@ -455,81 +530,25 @@ fn draw_person_card(
                                 Some((person.id, person.name.clone().unwrap_or_default()));
                         }
 
-                        if ui
-                            .button("Son la misma...")
-                            .on_hover_text("Unir con otra persona existente")
-                            .clicked()
-                        {
-                            state.merging = Some((person.id, None));
-                        }
-
                         let hide_label = if person.hidden { "Mostrar" } else { "Ocultar" };
                         if ui.button(hide_label).clicked() {
                             outcome.toggled_hidden = Some((person.id, !person.hidden));
                         }
-                    });
-
-                    // Merge dialog inline if active for this person
-                    let is_merging = state
-                        .merging
-                        .as_ref()
-                        .map(|(id, _)| *id == person.id)
-                        .unwrap_or(false);
-                    if is_merging {
-                        let mut chosen_target = state.merging.as_ref().unwrap().1;
-                        let mut cancel = false;
-                        let mut confirm_target = None;
-                        ui.add_space(theme::SPACE_XS);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Unir a:").size(theme::FONT_SMALL));
-                            egui::ComboBox::from_id_salt(("merge_target", person.id.0))
-                                .selected_text(match chosen_target {
-                                    Some(tid) => all_persons
-                                        .iter()
-                                        .find(|p| p.id == tid)
-                                        .and_then(|p| p.name.as_deref())
-                                        .unwrap_or("Sin nombre"),
-                                    None => "Elegir persona...",
-                                })
-                                .show_ui(ui, |ui| {
-                                    for other in all_persons {
-                                        if other.id != person.id {
-                                            let other_name =
-                                                other.name.as_deref().unwrap_or("Sin nombre");
-                                            let label = format!(
-                                                "{other_name} ({} fotos)",
-                                                other.photo_count
-                                            );
-                                            ui.selectable_value(
-                                                &mut chosen_target,
-                                                Some(other.id),
-                                                label,
-                                            );
-                                        }
-                                    }
-                                });
-
-                            if let Some(target) = chosen_target
-                                && ui
-                                    .add(theme::primary_button(palette, "Confirmar unión"))
-                                    .clicked()
-                            {
-                                confirm_target = Some(target);
+                        let mut mark = selected;
+                        if ui
+                            .checkbox(&mut mark, "Misma persona")
+                            .on_hover_text(
+                                "Marca dos o más tarjetas que sean la misma persona y pulsa «Unir»",
+                            )
+                            .changed()
+                        {
+                            if mark {
+                                state.selected.push(person.id);
+                            } else {
+                                state.selected.retain(|id| *id != person.id);
                             }
-                            if ui.button("Cancelar").clicked() {
-                                cancel = true;
-                            }
-                        });
-
-                        if let Some(target) = confirm_target {
-                            outcome.merged = Some((person.id, target));
-                            state.merging = None;
-                        } else if cancel {
-                            state.merging = None;
-                        } else {
-                            state.merging = Some((person.id, chosen_target));
                         }
-                    }
+                    });
                 });
             });
         });
