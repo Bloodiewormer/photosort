@@ -637,3 +637,72 @@ fn row_buttons_get_their_own_clicks_in_suggestions_and_tags() {
         "«Acciones» no abrió su menú"
     );
 }
+
+#[test]
+fn removing_the_only_folder_of_a_filtered_person_drops_the_filter() {
+    // Its own demo plus a second folder holding a copy of one faceless photo.
+    let setup = demo::prepare_demo(
+        None,
+        DemoConfig {
+            count: 40,
+            seed: demo::DEFAULT_SEED,
+        },
+        None,
+    )
+    .expect("datos de demostración");
+    let db = app::settings::db_dest_path(&setup.data_dir, &[]).expect("ruta del catálogo");
+    let mut cat = catalog::Catalog::open(&db).expect("catálogo");
+    let faceless = walkdir::WalkDir::new(&setup.library_dir)
+        .into_iter()
+        .map(|e| e.expect("entrada").into_path())
+        .filter(|p| p.is_file())
+        .find(|p| {
+            let canonical = dunce::canonicalize(p).expect("ruta");
+            cat.asset_of(&canonical)
+                .expect("consulta")
+                .is_some_and(|a| cat.asset_face_details(a).expect("caras").is_empty())
+        })
+        .expect("foto sin caras");
+    let extra = tempfile::tempdir().expect("segunda carpeta");
+    let name = faceless.file_name().expect("nombre").to_owned();
+    // A fixture: a copy of a demo photo into a temp dir, never into a library root.
+    #[allow(clippy::disallowed_methods)]
+    std::fs::copy(&faceless, extra.path().join(&name)).expect("copia");
+    let extra_root = fsguard::LibraryRoot::new(extra.path()).expect("raíz");
+    cat.index(&extra_root).expect("indexar");
+    let mut settings = app::settings::load(&setup.data_dir).settings;
+    settings
+        .add_library_root(extra.path(), &setup.data_dir)
+        .expect("añadir carpeta");
+    app::settings::save(&setup.data_dir, &settings).expect("guardar ajustes");
+    let copy = name.to_string_lossy().into_owned();
+
+    // Alex only appears in the demo folder; filtering by Alex hides the copy.
+    let mut h = Harness::open(&setup, CaptureView::Gallery, Theme::Dark);
+    let header = h
+        .nodes
+        .values()
+        .find(|n| h.name(n) == "Personas (2)")
+        .map(|n| n.role())
+        .expect("grupo Personas");
+    h.activate(header, "Personas (2)");
+    let alex = h
+        .nodes
+        .values()
+        .map(|n| h.name(n))
+        .find(|n| n.starts_with("Alex ("))
+        .expect("botón de Alex");
+    h.click(&alex);
+    let copy_shown = |h: &Harness| h.nodes.values().any(|n| h.name(n).starts_with(&copy));
+    assert!(!copy_shown(&h), "el filtro por Alex no se aplicó");
+
+    // Removing the demo folder takes Alex away, and his filter with him.
+    h.click("Configuración");
+    h.mouse_click("Quitar");
+    h.mouse_click("Quitar de la app");
+    h.click("Todas, 1");
+    assert!(
+        copy_shown(&h),
+        "el filtro de una persona que ya no se ve sigue activo"
+    );
+}

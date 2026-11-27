@@ -413,7 +413,13 @@ impl PhotosortApp {
             self.vision_analyzed_count = n;
         }
         match cat.list_persons_in_roots(true, &roots) {
-            Ok(p) => self.persons = p,
+            Ok(p) => {
+                // A person no longer shown has no button to clear its filter.
+                self.filter
+                    .persons
+                    .retain(|id| p.iter().any(|person| person.id == *id));
+                self.persons = p;
+            }
             Err(e) => self.banner_error = Some(format!("Error al cargar personas: {e}")),
         }
         self.reload_person_cards();
