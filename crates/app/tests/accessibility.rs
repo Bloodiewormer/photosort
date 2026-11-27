@@ -267,14 +267,17 @@ fn tab_stops(harness: &mut Harness) -> Vec<String> {
         }
         seen.push(harness.focus);
         stops.push(harness.focused_name());
-        if let Some(bounds) = harness.nodes.get(&harness.focus).and_then(|n| n.bounds()) {
-            let center = (bounds.y0 + bounds.y1) / 2.0;
-            assert!(
-                (0.0..=f64::from(SCREEN.y)).contains(&center),
-                "el foco quedó fuera de la vista en «{}»: {bounds:?}",
-                harness.focused_name()
-            );
-        }
+        let bounds = harness
+            .nodes
+            .get(&harness.focus)
+            .and_then(|n| n.bounds())
+            .unwrap_or_else(|| panic!("el foco no tiene posición: {:?}", harness.focus));
+        let center = (bounds.y0 + bounds.y1) / 2.0;
+        assert!(
+            (0.0..=f64::from(SCREEN.y)).contains(&center),
+            "el foco quedó fuera de la vista en «{}»: {bounds:?}",
+            harness.focused_name()
+        );
     }
     stops
 }
