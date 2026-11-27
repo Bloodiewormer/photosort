@@ -125,6 +125,17 @@ impl WorksWorker {
                     break;
                 }
 
+                if let Some(r) = &roots {
+                    let in_roots = if let Ok(Some(entry)) = cat.entry_for(asset) {
+                        r.iter().any(|root| entry.path.starts_with(root))
+                    } else {
+                        false
+                    };
+                    if !in_roots {
+                        continue;
+                    }
+                }
+
                 match cat.apply_work_matches(asset, &matcher) {
                     Ok(res) => {
                         processed += 1;
@@ -135,6 +146,28 @@ impl WorksWorker {
                         if count > 0 {
                             matched_assets += 1;
                             suggestions += count;
+                        }
+
+                        if cat.is_promo_page(asset).unwrap_or(false)
+                            && let Ok(Some(entry)) = cat.entry_for(asset)
+                            && let Ok(img) = thumbs::decode(&entry.path, u32::MAX)
+                        {
+                            let lines = cat.ocr_lines(asset).unwrap_or_default();
+                            let is_screenshot =
+                                cat.labels_of(asset).unwrap_or_default().iter().any(|a| {
+                                    a.kind == catalog::LabelKind::Category
+                                        && a.name.eq_ignore_ascii_case(catalog::SCREENSHOT_CATEGORY)
+                                        && a.status != catalog::Status::Rejected
+                                });
+                            let covers = crate::promo_covers::detect_and_associate(
+                                asset,
+                                &img,
+                                &lines,
+                                &matcher,
+                                &cat,
+                                is_screenshot,
+                            );
+                            let _ = cat.save_asset_covers(asset, &covers);
                         }
                     }
                     Err(e) => {
