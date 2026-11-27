@@ -560,3 +560,79 @@ fn persons_view_reuses_what_it_loaded_until_the_app_changes_the_catalog() {
     assert!(harness.has_name_containing("Misma persona: Renombrada por fuera"));
     assert!(!harness.has_name_containing("Misma persona: Sin nombre"));
 }
+
+impl Harness {
+    /// Clicks a button with the mouse, the way a user does, at the centre of its box.
+    fn mouse_click(&mut self, name: &str) {
+        // The topmost one that is on screen: a click outside the window does nothing.
+        let at = self
+            .nodes
+            .values()
+            .filter(|n| n.role() == Role::Button && self.name(n) == name)
+            .filter_map(|n| n.bounds())
+            .map(|b| Pos2::new(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32))
+            .filter(|p| p.x < SCREEN.x && p.y < SCREEN.y)
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .unwrap_or_else(|| panic!("no hay botón «{name}» a la vista"));
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        self.run(vec![Event::PointerMoved(at)]);
+        self.run(vec![button(true)]);
+        self.run(vec![button(false)]);
+        self.settle();
+    }
+}
+
+#[test]
+fn the_remove_folder_button_works_with_the_mouse() {
+    // Its own demo: removing the folder must not affect the other tests.
+    let setup = demo::prepare_demo(
+        None,
+        DemoConfig {
+            count: 12,
+            seed: demo::DEFAULT_SEED,
+        },
+        None,
+    )
+    .expect("datos de demostración");
+    let mut h = Harness::open(&setup, CaptureView::Settings, Theme::Dark);
+    h.mouse_click("Quitar");
+    assert!(
+        h.find(Role::Button, "Quitar de la app").is_some(),
+        "«Quitar» no abrió la confirmación"
+    );
+    h.mouse_click("Quitar de la app");
+    assert!(
+        h.find(Role::Button, "Quitar").is_none(),
+        "la carpeta sigue en la lista"
+    );
+}
+
+#[test]
+fn row_buttons_get_their_own_clicks_in_suggestions_and_tags() {
+    // Accepting a suggestion with the mouse removes it from the list.
+    let mut h = Harness::new(CaptureView::Suggestions, Theme::Dark);
+    let accepts = |h: &Harness| {
+        h.nodes
+            .values()
+            .filter(|n| n.role() == Role::Button && h.name(n) == "Aceptar")
+            .count()
+    };
+    let before = accepts(&h);
+    assert!(before > 0, "no hay sugerencias en la demo");
+    h.mouse_click("Aceptar");
+    assert!(accepts(&h) < before, "«Aceptar» no respondió al ratón");
+
+    // «Acciones» opens its menu with the mouse.
+    let mut h = Harness::new(CaptureView::Tags, Theme::Dark);
+    h.mouse_click("Acciones");
+    assert!(
+        h.find(Role::Button, "Renombrar").is_some()
+            || h.find(Role::MenuItem, "Renombrar").is_some(),
+        "«Acciones» no abrió su menú"
+    );
+}

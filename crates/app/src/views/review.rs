@@ -331,7 +331,9 @@ pub fn draw(
                             Stroke::new(1.0, palette.border.color32())
                         };
 
-                        let card_resp = Frame::new()
+                        let card_id = egui::Id::new(("review_card", idx));
+                        let ((), card_area) = crate::views::row_with_click_area(ui, card_id, |ui| {
+                        Frame::new()
                             .fill(bg)
                             .stroke(stroke)
                             .corner_radius(CornerRadius::same(theme::RADIUS_MD))
@@ -357,9 +359,10 @@ pub fn draw(
                                         row_action = Some((idx, decision));
                                     }
                                 });
-                            });
+                            })
+                        });
                         // Pointer only: the arrow keys move between rows.
-                        if card_resp.response.interact(Sense::CLICK).clicked() {
+                        if card_area.is_some_and(|r| r.clicked()) {
                             row_clicked = Some(idx);
                         }
                         ui.add_space(theme::SPACE_SM);

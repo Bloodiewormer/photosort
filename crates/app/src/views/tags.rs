@@ -1091,70 +1091,74 @@ fn draw_catalog_label_row(
     depth: usize,
     outcome: &mut TagsViewOutcome,
 ) {
-    let row_resp = Frame::new()
-        .fill(palette.bg_card.color32())
-        .stroke(Stroke::new(1.0, palette.border.color32()))
-        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
-        .inner_margin(Margin::symmetric(
-            theme::SPACE_SM as i8,
-            theme::SPACE_XS as i8,
-        ))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                crate::views::row_with_end(
-                    ui,
-                    node.label,
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        if depth > 0 {
-                            ui.add_space((depth.min(6) as f32) * 16.0);
-                            ui.label(
-                                RichText::new("└")
-                                    .size(theme::FONT_SMALL)
-                                    .color(palette.text_hint.color32()),
-                            );
-                        }
-                        let count = RichText::new(count_phrase(
-                            node.images.max(0) as usize,
-                            "foto",
-                            "fotos",
-                        ))
-                        .size(theme::FONT_SMALL)
-                        .color(palette.text_hint.color32());
-                        let count_w = text_width(ui, count.clone(), egui::TextStyle::Body)
-                            + ui.spacing().item_spacing.x;
-                        ui.scope(|ui| {
-                            ui.set_max_width((ui.available_width() - count_w).max(0.0));
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&node.name)
-                                        .color(palette.text_primary.color32())
-                                        .strong(),
-                                )
-                                .truncate(),
-                            );
-                        });
-                        ui.label(count);
-                    },
-                    |ui| {
-                        ui.menu_button("Acciones", |ui| {
-                            if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
-                                outcome.label_action = Some(act);
+    let row_id = egui::Id::new(("catalog_label_row", node.label));
+    let ((), row_area) = crate::views::row_with_click_area(ui, row_id, |ui| {
+        Frame::new()
+            .fill(palette.bg_card.color32())
+            .stroke(Stroke::new(1.0, palette.border.color32()))
+            .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+            .inner_margin(Margin::symmetric(
+                theme::SPACE_SM as i8,
+                theme::SPACE_XS as i8,
+            ))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    crate::views::row_with_end(
+                        ui,
+                        node.label,
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            if depth > 0 {
+                                ui.add_space((depth.min(6) as f32) * 16.0);
+                                ui.label(
+                                    RichText::new("└")
+                                        .size(theme::FONT_SMALL)
+                                        .color(palette.text_hint.color32()),
+                                );
                             }
-                        });
-                    },
-                );
-            });
-        })
-        .response
-        // Right click only; «Acciones» is the keyboard path.
-        .interact(egui::Sense::CLICK);
-
-    row_resp.context_menu(|ui| {
-        if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
-            outcome.label_action = Some(act);
-        }
+                            let count = RichText::new(count_phrase(
+                                node.images.max(0) as usize,
+                                "foto",
+                                "fotos",
+                            ))
+                            .size(theme::FONT_SMALL)
+                            .color(palette.text_hint.color32());
+                            let count_w = text_width(ui, count.clone(), egui::TextStyle::Body)
+                                + ui.spacing().item_spacing.x;
+                            ui.scope(|ui| {
+                                ui.set_max_width((ui.available_width() - count_w).max(0.0));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&node.name)
+                                            .color(palette.text_primary.color32())
+                                            .strong(),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                            ui.label(count);
+                        },
+                        |ui| {
+                            ui.menu_button("Acciones", |ui| {
+                                if let Some(act) = draw_label_menu_items(ui, node.kind, node.label)
+                                {
+                                    outcome.label_action = Some(act);
+                                }
+                            });
+                        },
+                    );
+                });
+            })
     });
+
+    // Right click only; «Acciones» is the keyboard path.
+    if let Some(row_resp) = row_area {
+        row_resp.context_menu(|ui| {
+            if let Some(act) = draw_label_menu_items(ui, node.kind, node.label) {
+                outcome.label_action = Some(act);
+            }
+        });
+    }
     ui.add_space(2.0);
 }
 
