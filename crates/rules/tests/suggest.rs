@@ -11,6 +11,8 @@ fn plain() -> Facts {
         has_camera_exif: false,
         captured_at_ns: None,
         captured_year: None,
+        media_type: catalog::MediaType::Image,
+        duration_ms: None,
     }
 }
 
@@ -219,6 +221,8 @@ fn screenshot_name_and_screen_size_emit_once_with_higher_confidence() {
         has_camera_exif: false,
         captured_at_ns: None,
         captured_year: None,
+        media_type: catalog::MediaType::Image,
+        duration_ms: None,
     };
     let out = suggest(&facts);
     assert_eq!(
@@ -339,6 +343,8 @@ fn multiple_rules_can_fire_together() {
         has_camera_exif: false,
         captured_at_ns: None,
         captured_year: None,
+        media_type: catalog::MediaType::Image,
+        duration_ms: None,
     };
     let out = suggest(&facts);
     assert_eq!(

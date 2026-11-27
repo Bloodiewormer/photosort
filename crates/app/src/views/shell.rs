@@ -473,6 +473,7 @@ pub fn draw_sidebar(
                     if visible_cats.is_empty()
                         && visible_tags.is_empty()
                         && visible_ents.is_empty()
+                        && metadata_facets.media_types.is_empty()
                         && metadata_facets.formats.is_empty()
                         && metadata_facets.orientations.is_empty()
                         && metadata_facets.years.is_empty()
@@ -483,6 +484,13 @@ pub fn draw_sidebar(
                                 .color(palette.text_hint.color32()),
                         );
                     } else {
+                        draw_media_type_filter_group(
+                            ui,
+                            palette,
+                            metadata_facets,
+                            filter,
+                            &mut outcome,
+                        );
                         draw_category_tree_group(
                             ui,
                             palette,
@@ -893,6 +901,44 @@ fn draw_toggle_chip(
         .stroke(stroke)
         .corner_radius(CornerRadius::same(theme::RADIUS_SM));
     ui.add(btn)
+}
+
+fn draw_media_type_filter_group(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    facets: &MetadataFacets,
+    filter: &mut FilterState,
+    outcome: &mut SidebarOutcome,
+) {
+    if facets.media_types.is_empty() {
+        return;
+    }
+    let header_title = format!("Tipo de medio ({})", facets.media_types.len());
+    egui::CollapsingHeader::new(
+        RichText::new(header_title)
+            .size(theme::FONT_SMALL)
+            .color(palette.text_secondary.color32()),
+    )
+    .id_salt("filter_group_media_type")
+    .default_open(true)
+    .show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for mtc in &facets.media_types {
+                let active = filter.media_types.contains(&mtc.media_type);
+                let count = mtc.count.max(0) as usize;
+                let label = match mtc.media_type {
+                    catalog::MediaType::Image => "Fotos",
+                    catalog::MediaType::Video => "Vídeos",
+                };
+                if draw_toggle_chip(ui, palette, label, count, active).clicked() {
+                    filter.toggle_media_type(mtc.media_type);
+                    outcome.filter_changed = true;
+                    outcome.switch_view = Some(ActiveView::Gallery);
+                }
+            }
+        });
+    });
+    ui.add_space(theme::SPACE_XS);
 }
 
 fn draw_format_filter_group(

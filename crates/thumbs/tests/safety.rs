@@ -126,3 +126,42 @@ fn generating_thumbnails_leaves_the_originals_untouched() {
 
     assert_eq!(before, snapshot(&library));
 }
+
+#[test]
+fn reading_video_frames_leaves_the_original_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+
+    let mp4 = library.join("clip.mp4");
+    if let Err(e) = thumbs::create_synthetic_video(&mp4, 320, 240, 30, 1) {
+        eprintln!("Media Foundation video creation skipped: {e}");
+        return;
+    }
+
+    let root = LibraryRoot::new(&library).unwrap();
+    let cache = ensure_writable(&tmp.path().join("cache"), &[root]).unwrap();
+    let thumbs = Thumbs::new(&cache, 100).unwrap();
+
+    let sha = scanner::sha256_file(&mp4).unwrap();
+
+    // NTFS refreshes lazy directory attributes on first listing.
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    // 1. Extract 10% frame
+    let frame_10 = thumbs::extract_frame(&mp4, 0.1, 0).expect("extract 10% frame");
+    assert!(frame_10.width() > 0 && frame_10.height() > 0);
+
+    // 2. Extract multiple frames
+    let frames = thumbs::extract_frames(&mp4, 4, 0).expect("extract 4 frames");
+    assert_eq!(frames.len(), 4);
+
+    // 3. Thumbnails cache get
+    let thumb_res1 = thumbs.get(&mp4, &sha).expect("thumb get 1");
+    let thumb_res2 = thumbs.get(&mp4, &sha).expect("thumb get 2");
+    assert_eq!(thumb_res1, thumb_res2);
+
+    // 4. Assert library original is 100% byte-for-byte untouched and no sidecars created
+    assert_eq!(before, snapshot(&library));
+}

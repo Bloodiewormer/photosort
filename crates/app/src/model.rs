@@ -1,4 +1,4 @@
-use catalog::{Entry, Filter, LabelId, Orientation, Sort};
+use catalog::{Entry, Filter, LabelId, MediaType, Orientation, Sort};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -311,6 +311,7 @@ pub fn format_chip_tooltip(mode: Option<ChipMode>, name: &str, count: usize) -> 
 pub struct FilterState {
     pub search: String,
     pub chips: BTreeMap<LabelId, ChipMode>,
+    pub media_types: BTreeSet<MediaType>,
     pub formats: BTreeSet<String>,
     pub orientations: BTreeSet<Orientation>,
     pub capture_years: BTreeSet<i32>,
@@ -323,6 +324,7 @@ impl Default for FilterState {
         Self {
             search: String::new(),
             chips: BTreeMap::new(),
+            media_types: BTreeSet::new(),
             formats: BTreeSet::new(),
             orientations: BTreeSet::new(),
             capture_years: BTreeSet::new(),
@@ -358,6 +360,12 @@ impl FilterState {
         self.set_chip(id, next);
     }
 
+    pub fn toggle_media_type(&mut self, media_type: MediaType) {
+        if !self.media_types.remove(&media_type) {
+            self.media_types.insert(media_type);
+        }
+    }
+
     pub fn toggle_format(&mut self, format: &str) {
         if !self.formats.remove(format) {
             self.formats.insert(format.to_owned());
@@ -379,6 +387,7 @@ impl FilterState {
     pub fn clear_filters(&mut self) {
         self.search.clear();
         self.chips.clear();
+        self.media_types.clear();
         self.formats.clear();
         self.orientations.clear();
         self.capture_years.clear();
@@ -387,6 +396,7 @@ impl FilterState {
     pub fn has_active_filters(&self) -> bool {
         !self.search.trim().is_empty()
             || !self.chips.is_empty()
+            || !self.media_types.is_empty()
             || !self.formats.is_empty()
             || !self.orientations.is_empty()
             || !self.capture_years.is_empty()
@@ -401,6 +411,7 @@ impl FilterState {
                 ChipMode::Exclude => filter.exclude.push(id),
             }
         }
+        filter.media_types = self.media_types.iter().copied().collect();
         filter.formats = self.formats.iter().cloned().collect();
         filter.orientations = self.orientations.iter().copied().collect();
         filter.capture_years = self.capture_years.iter().copied().collect();
@@ -422,6 +433,19 @@ impl FilterState {
             filter.reviewed = Some((self.reviewed, stages.to_vec()));
         }
         filter
+    }
+}
+
+/// Formats a duration in milliseconds as `M:SS` or `H:MM:SS`.
+pub fn format_duration(duration_ms: u64) -> String {
+    let total_secs = (duration_ms + 500) / 1000;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -524,4 +548,33 @@ pub fn truncate_middle(text: &str, max_chars: usize) -> String {
     out.push('…');
     out.extend(&chars[chars.len() - tail..]);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catalog::MediaType;
+
+    #[test]
+    fn format_duration_samples() {
+        assert_eq!(format_duration(0), "0:00");
+        assert_eq!(format_duration(12_000), "0:12");
+        assert_eq!(format_duration(65_000), "1:05");
+        assert_eq!(format_duration(3_665_000), "1:01:05");
+    }
+
+    #[test]
+    fn filter_state_media_type_toggle() {
+        let mut filter = FilterState::default();
+        assert!(!filter.has_active_filters());
+        filter.toggle_media_type(MediaType::Video);
+        assert!(filter.has_active_filters());
+        assert!(filter.media_types.contains(&MediaType::Video));
+        assert_eq!(
+            filter.to_catalog_filter().media_types,
+            vec![MediaType::Video]
+        );
+        filter.toggle_media_type(MediaType::Video);
+        assert!(!filter.has_active_filters());
+    }
 }

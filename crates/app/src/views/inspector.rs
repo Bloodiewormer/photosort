@@ -180,6 +180,12 @@ pub fn draw(
                         if let Some(parent) = entry.path.parent() {
                             meta_row(ui, palette, "Carpeta", &parent.display().to_string());
                         }
+                        if entry.media_type == catalog::MediaType::Video {
+                            meta_row(ui, palette, "Tipo de medio", "Vídeo");
+                            if let Some(ms) = entry.duration_ms {
+                                meta_row(ui, palette, "Duración", &crate::model::format_duration(ms));
+                            }
+                        }
                         meta_row(ui, palette, "Tamaño", &format_bytes(entry.size));
                         if let (Some(w), Some(h)) = (entry.width, entry.height) {
                             meta_row(ui, palette, "Dimensiones", &format!("{w} × {h} px"));
@@ -240,12 +246,14 @@ pub fn draw(
                             } else {
                                 meta_row(ui, palette, "Reconocimiento visual", "Pendiente");
                             }
-                            meta_row(
-                                ui,
-                                palette,
-                                "Lectura OCR",
-                                if state.ocr_done { "Hecha" } else { "Pendiente" },
-                            );
+                            if entry.media_type != catalog::MediaType::Video {
+                                meta_row(
+                                    ui,
+                                    palette,
+                                    "Lectura OCR",
+                                    if state.ocr_done { "Hecha" } else { "Pendiente" },
+                                );
+                            }
                         });
                     });
 
@@ -334,6 +342,7 @@ pub fn draw(
                 }
 
                 // Section 2: Texto (OCR)
+                if entry.media_type != catalog::MediaType::Video {
                 let is_screenshot = state.labels.iter().any(|a| {
                     a.kind == LabelKind::Category
                         && a.name.eq_ignore_ascii_case(SCREENSHOT_CATEGORY)
@@ -552,7 +561,8 @@ pub fn draw(
                         }
                     });
 
-                ui.add_space(theme::SPACE_SM);
+                    ui.add_space(theme::SPACE_SM);
+                }
 
                 // Section 3: Etiquetas
                 let labels_title = if state.labels.is_empty() {

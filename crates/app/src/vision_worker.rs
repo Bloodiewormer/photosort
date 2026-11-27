@@ -62,6 +62,55 @@ pub trait VisionReader: Send + 'static {
             .map(|img| img.to_rgb8())
             .map_err(|_| "no se pudo decodificar la imagen".to_string())
     }
+
+    fn decode_media(&self, path: &Path) -> Result<Vec<RgbImage>, String> {
+        if thumbs::is_video_path(path) {
+            thumbs::extract_frames(path, 4, VISION_DECODE_MAX_PX)
+                .map_err(|e| format!("no se pudieron extraer fotogramas del vídeo: {e}"))
+        } else {
+            self.decode_image(path).map(|img| vec![img])
+        }
+    }
+
+    fn analyze_asset_media(&mut self, frames: &[RgbImage]) -> Result<VisionImageOutput, String> {
+        if frames.is_empty() {
+            return Err("sin fotogramas para analizar".into());
+        }
+        let frame_refs: Vec<&RgbImage> = frames.iter().collect();
+        let outputs = self.analyze_images(&frame_refs)?;
+        if outputs.is_empty() {
+            return Err("resultado de visión vacío".into());
+        }
+        let embs: Vec<Vec<f32>> = outputs.iter().map(|o| o.embedding.clone()).collect();
+        let combined_emb = combine_embeddings(&embs);
+        let mut all_faces = Vec::new();
+        for out in outputs {
+            all_faces.extend(out.faces);
+        }
+        Ok(VisionImageOutput {
+            embedding: combined_emb,
+            faces: all_faces,
+        })
+    }
+}
+
+pub fn combine_embeddings(embeddings: &[Vec<f32>]) -> Vec<f32> {
+    if embeddings.is_empty() {
+        return vec![0.0; catalog::EMBEDDING_DIM];
+    }
+    let mut avg = vec![0.0f32; embeddings[0].len()];
+    for emb in embeddings {
+        for (a, &b) in avg.iter_mut().zip(emb) {
+            *a += b;
+        }
+    }
+    let norm: f32 = avg.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in &mut avg {
+            *x /= norm;
+        }
+    }
+    avg
 }
 
 pub fn session_options(device: OcrDevice) -> SessionOptions {
@@ -268,20 +317,20 @@ impl VisionWorker {
                     break;
                 }
 
-                // 1. Decode each image in the batch independently; a bad/panicking image does not
-                //    stop its batch mates.
-                let mut decoded: Vec<(AssetId, RgbImage)> = Vec::with_capacity(chunk.len());
+                // 1. Decode each asset (image or video frames) in the batch independently;
+                //    a bad/panicking file does not stop its batch mates.
+                let mut decoded: Vec<(AssetId, Vec<RgbImage>)> = Vec::with_capacity(chunk.len());
                 for item in chunk {
                     if cancel_bg.load(Ordering::Relaxed) {
                         stopped = true;
                         break;
                     }
                     let dec = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        reader.decode_image(&item.path)
+                        reader.decode_media(&item.path)
                     }))
-                    .unwrap_or_else(|_| Err("error interno al decodificar la imagen".into()));
+                    .unwrap_or_else(|_| Err("error interno al decodificar el archivo".into()));
                     match dec {
-                        Ok(img) => decoded.push((item.asset, img)),
+                        Ok(frames) => decoded.push((item.asset, frames)),
                         Err(_) => {
                             errors += 1;
                             done += 1;
@@ -303,47 +352,54 @@ impl VisionWorker {
                     continue;
                 }
 
-                // 2. Run inference on the batch. If a multi-image batch fails or panics, isolate
-                //    by falling back to single-image calls so healthy batch mates still succeed.
+                // 2. Run inference on the batch. If all items have 1 frame, run standard multi-image batching.
+                //    Otherwise or on failure, fall back to per-asset analysis.
                 let outcomes: Vec<(AssetId, Result<VisionImageOutput, String>)> = {
-                    let img_refs: Vec<&RgbImage> = decoded.iter().map(|(_, img)| img).collect();
-                    let batch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        reader.analyze_images(&img_refs)
-                    }))
-                    .unwrap_or_else(|_| Err("error interno en inferencia de visión".into()));
+                    let all_single = decoded.iter().all(|(_, f)| f.len() == 1);
+                    if all_single {
+                        let img_refs: Vec<&RgbImage> = decoded.iter().map(|(_, f)| &f[0]).collect();
+                        let batch_res =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                reader.analyze_images(&img_refs)
+                            }))
+                            .unwrap_or_else(|_| {
+                                Err("error interno en inferencia de visión".into())
+                            });
 
-                    match batch_res {
-                        Ok(outputs) if outputs.len() == decoded.len() => decoded
+                        match batch_res {
+                            Ok(outputs) if outputs.len() == decoded.len() => decoded
+                                .iter()
+                                .zip(outputs)
+                                .map(|((asset, _), out)| (*asset, Ok(out)))
+                                .collect(),
+                            _ => decoded
+                                .iter()
+                                .map(|(asset, frames)| {
+                                    let single =
+                                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                            || reader.analyze_asset_media(frames),
+                                        ))
+                                        .unwrap_or_else(
+                                            |_| Err("error interno en inferencia de visión".into()),
+                                        );
+                                    (*asset, single)
+                                })
+                                .collect(),
+                        }
+                    } else {
+                        decoded
                             .iter()
-                            .zip(outputs)
-                            .map(|((asset, _), out)| (*asset, Ok(out)))
-                            .collect(),
-                        _ if decoded.len() > 1 => decoded
-                            .iter()
-                            .map(|(asset, img)| {
-                                let single =
+                            .map(|(asset, frames)| {
+                                let res =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        reader.analyze_images(&[img])
+                                        reader.analyze_asset_media(frames)
                                     }))
                                     .unwrap_or_else(|_| {
                                         Err("error interno en inferencia de visión".into())
-                                    })
-                                    .and_then(|mut v| {
-                                        v.pop().ok_or_else(|| "resultado vacío".to_string())
                                     });
-                                (*asset, single)
+                                (*asset, res)
                             })
-                            .collect(),
-                        Err(e) => decoded
-                            .iter()
-                            .map(|(asset, _)| (*asset, Err(e.clone())))
-                            .collect(),
-                        Ok(_) => decoded
-                            .iter()
-                            .map(|(asset, _)| {
-                                (*asset, Err("cantidad de resultados inesperada".into()))
-                            })
-                            .collect(),
+                            .collect()
                     }
                 };
 
@@ -771,5 +827,38 @@ impl Drop for VisionRankWorker {
         if let Some(handle) = self.join.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combine_embeddings_normalizes_to_unit_vector() {
+        let v1 = vec![1.0, 0.0, 0.0];
+        let v2 = vec![0.0, 1.0, 0.0];
+        let v3 = vec![0.0, 0.0, 1.0];
+        let combined = combine_embeddings(&[v1, v2, v3]);
+        let norm: f32 = combined.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        let expected = 1.0 / (3.0f32).sqrt();
+        for val in combined {
+            assert!((val - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn combine_embeddings_single_and_empty() {
+        let empty = combine_embeddings(&[]);
+        assert_eq!(empty.len(), catalog::EMBEDDING_DIM);
+        assert!(empty.iter().all(|&x| x == 0.0));
+
+        let single = vec![3.0, 4.0];
+        let combined = combine_embeddings(&[single]);
+        let norm: f32 = combined.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        assert!((combined[0] - 0.6).abs() < 1e-6);
+        assert!((combined[1] - 0.8).abs() < 1e-6);
     }
 }

@@ -485,6 +485,7 @@ fn metadata_sort_filters_and_legacy_migration_preserve_decisions() {
             Some("JPEG"),
             Some(1_700_000_000_000_000_000),
             Some(2023),
+            None,
         )
         .unwrap();
 
@@ -503,11 +504,20 @@ fn metadata_sort_filters_and_legacy_migration_preserve_decisions() {
             Some("WEBP"),
             Some(1_700_000_250_000_000_000),
             Some(2023),
+            None,
         )
         .unwrap();
     // funny.jpg: square 500x500 (250k px), JPEG, no EXIF capture date -> falls back to mtime (200s)
     s.cat
-        .set_asset_metadata(a_funny, Some(500), Some(500), Some("JPEG"), None, None)
+        .set_asset_metadata(
+            a_funny,
+            Some(500),
+            Some(500),
+            Some("JPEG"),
+            None,
+            None,
+            None,
+        )
         .unwrap();
     // chat.png: landscape 1920x1080 (2.07M px), PNG, captured_at = 50s (earliest!)
     s.cat
@@ -518,6 +528,7 @@ fn metadata_sort_filters_and_legacy_migration_preserve_decisions() {
             Some("PNG"),
             Some(1_700_000_050_000_000_000),
             Some(2021),
+            None,
         )
         .unwrap();
 

@@ -961,6 +961,19 @@ pub fn prepare_demo(
         write_demo_file(&library_dest, &spec.rel_path, &bytes)?;
     }
 
+    if count >= DEFAULT_DEMO_COUNT
+        && let Some(video_dest) = library_dest.join_name(OsStr::new("videos"))
+    {
+        let _ = create_dir_dest(&video_dest);
+        if let Some(file_dest) = video_dest.join_name(OsStr::new("clip_demo.mp4")) {
+            let path = file_dest.as_path().to_path_buf();
+            let _ = std::thread::spawn(move || {
+                let _ = thumbs::create_synthetic_video(&path, 320, 240, 30, 5);
+            })
+            .join();
+        }
+    }
+
     let mut cfg = Settings::default();
     if let Some(t) = theme {
         cfg.theme = t;
@@ -1497,6 +1510,7 @@ fn seed_demo_vision(
                     Some(fmt),
                     Some(ns),
                     Some(year),
+                    None,
                 )
                 .map_err(|e| e.to_string())?;
             }

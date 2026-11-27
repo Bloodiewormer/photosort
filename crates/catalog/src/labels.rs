@@ -1,4 +1,4 @@
-use crate::{Catalog, CatalogError};
+use crate::{Catalog, CatalogError, MediaType};
 use rusqlite::types::Type;
 use rusqlite::{OptionalExtension, ToSql, params, params_from_iter};
 use std::path::{Path, PathBuf};
@@ -94,6 +94,8 @@ pub struct Filter {
     /// When `Some((mode, stages))`, filters by whether every stage in `stages` is done.
     /// With `stages` empty, nothing counts as `Reviewed` and everything counts as `Pending`.
     pub reviewed: Option<(ReviewedFilter, Vec<StageSpec>)>,
+    /// When non-empty, only assets matching one of these media types match.
+    pub media_types: Vec<MediaType>,
     /// When non-empty, only assets whose normalized format (e.g. `"JPEG"`, `"PNG"`) is in this list match.
     pub formats: Vec<String>,
     /// When non-empty, only assets matching one of these orientations match.
@@ -335,6 +337,15 @@ pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, fi
                     sql.push(')');
                 }
             }
+        }
+    }
+    if !filter.media_types.is_empty() {
+        let marks = vec!["?"; filter.media_types.len()].join(",");
+        sql.push_str(&format!(
+            " AND COALESCE(a.media_type, 'image') IN ({marks})"
+        ));
+        for mt in &filter.media_types {
+            args.push(Box::new(mt.as_str().to_string()));
         }
     }
     if !filter.formats.is_empty() {

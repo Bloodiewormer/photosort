@@ -20,6 +20,8 @@ pub struct Facts {
     pub has_camera_exif: bool,
     pub captured_at_ns: Option<i64>,
     pub captured_year: Option<i32>,
+    pub media_type: catalog::MediaType,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +49,32 @@ pub struct RunReport {
 /// (no full decode), plus camera Make/Model presence and EXIF capture date (`DateTimeOriginal` with
 /// fallback to `DateTime`) via `exif`. Read-only.
 pub fn read_facts(path: &Path) -> io::Result<Facts> {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if thumbs::is_video_path(path) {
+        let meta = thumbs::read_metadata(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        return Ok(Facts {
+            file_name,
+            extension,
+            format: Some(meta.format),
+            width: meta.width,
+            height: meta.height,
+            has_camera_exif: false,
+            captured_at_ns: None,
+            captured_year: None,
+            media_type: catalog::MediaType::Video,
+            duration_ms: Some(meta.duration_ms),
+        });
+    }
+
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let detected_format = reader.format().map(image_format_name);
     let (width, height) = reader.into_dimensions().map_err(|e| match e {
@@ -64,14 +92,6 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
         .and_then(extract_capture_datetime)
         .map(|(ns, y)| (Some(ns), Some(y)))
         .unwrap_or((None, None));
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let extension = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
     let format = detected_format
         .map(ToOwned::to_owned)
         .or_else(|| format_from_extension(&extension).map(ToOwned::to_owned));
@@ -84,6 +104,8 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
         has_camera_exif,
         captured_at_ns,
         captured_year,
+        media_type: catalog::MediaType::Image,
+        duration_ms: None,
     })
 }
 
@@ -214,6 +236,7 @@ pub fn analyze_pending_item(
                 facts.format.as_deref(),
                 facts.captured_at_ns,
                 facts.captured_year,
+                facts.duration_ms,
             )?;
             let mut suggestions = 0usize;
             for s in suggest(&facts) {

@@ -1,4 +1,6 @@
-use crate::model::{GridLayout, Selection, count_phrase, gallery_cell_tooltip, selected_phrase};
+use crate::model::{
+    GridLayout, Selection, count_phrase, format_duration, gallery_cell_tooltip, selected_phrase,
+};
 use crate::theme::{self, Palette};
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::{AssetId, Entry, Sort};
@@ -413,6 +415,41 @@ pub fn draw(
                                     theme::paint_reviewed_mark(painter, r, palette);
                                     r
                                 });
+
+                                // Bottom-left: video badge with duration
+                                if entry.media_type == catalog::MediaType::Video {
+                                    let dur_text = entry
+                                        .duration_ms
+                                        .map(|ms| format!("▶ {}", format_duration(ms)))
+                                        .unwrap_or_else(|| "▶ Vídeo".to_string());
+                                    let font_id = egui::FontId::proportional(theme::FONT_SMALL);
+                                    let text_layout = painter.layout_no_wrap(
+                                        dur_text.clone(),
+                                        font_id.clone(),
+                                        Color32::WHITE,
+                                    );
+                                    let badge_w = text_layout.size().x + theme::SPACE_SM * 2.0;
+                                    let badge_h = 20.0;
+                                    let video_rect = Rect::from_min_size(
+                                        Pos2::new(
+                                            thumb_rect.min.x + theme::SPACE_XS,
+                                            thumb_rect.max.y - badge_h - theme::SPACE_XS,
+                                        ),
+                                        Vec2::new(badge_w, badge_h),
+                                    );
+                                    painter.rect_filled(
+                                        video_rect,
+                                        CornerRadius::same(theme::RADIUS_SM),
+                                        Color32::from_black_alpha(190),
+                                    );
+                                    painter.text(
+                                        video_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        dur_text,
+                                        font_id,
+                                        Color32::WHITE,
+                                    );
+                                }
 
                                 // Bottom-right: similarity score when in similarity mode
                                 if let Some(sim) = similarity_view
