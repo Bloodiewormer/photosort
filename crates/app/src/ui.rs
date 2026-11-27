@@ -2,7 +2,8 @@ use crate::face_group_worker::{FaceGroupEvent, FaceGroupWorker};
 use crate::model::{ChipMode, FilterState, MoveDir, Selection, count_phrase};
 use crate::near_dupes_worker::{NearDupesEvent, NearDupesWorker};
 use crate::review_engine::{
-    EnginePhase, EngineSnapshot, ReviewEngine, ReviewEngineEvent, StageKind, chunk_reload_due,
+    EnginePhase, EngineSnapshot, FolderRecheck, ReviewEngine, ReviewEngineEvent, StageKind,
+    chunk_reload_due,
 };
 use crate::review_flow::ReviewFlow;
 use crate::screenshot::CaptureView;
@@ -89,6 +90,9 @@ pub struct PhotosortApp {
     /// A chunk finished and the full reload it calls for has not happened yet.
     chunk_reload_pending: bool,
     last_full_reload: Instant,
+    folder_recheck: FolderRecheck,
+    /// Photos that could not be found, with the thumbnail key when a thumbnail reported it.
+    gone_photos: Vec<(PathBuf, Option<String>)>,
 
     works_worker: Option<WorksWorker>,
     tags_apply_worker: Option<TagsApplyWorker>,
@@ -243,6 +247,8 @@ impl PhotosortApp {
             pending_engine_refresh: false,
             chunk_reload_pending: false,
             last_full_reload: Instant::now(),
+            folder_recheck: FolderRecheck::new(Instant::now()),
+            gone_photos: Vec::new(),
             works_worker: None,
             tags_apply_worker: None,
             vision_rank_worker: None,
@@ -412,8 +418,14 @@ impl PhotosortApp {
         if let Ok(n) = cat.count_assets_with_vision_in_roots(&roots) {
             self.vision_analyzed_count = n;
         }
-        match cat.list_persons(true) {
-            Ok(p) => self.persons = p,
+        match cat.list_persons_in_roots(true, &roots) {
+            Ok(p) => {
+                // A person no longer shown has no button to clear its filter.
+                self.filter
+                    .persons
+                    .retain(|id| p.iter().any(|person| person.id == *id));
+                self.persons = p;
+            }
             Err(e) => self.banner_error = Some(format!("Error al cargar personas: {e}")),
         }
         self.reload_person_cards();
@@ -505,8 +517,11 @@ impl PhotosortApp {
 
     fn reload_person_cards(&mut self) {
         if let Some(cat) = &self.catalog {
-            self.person_cards =
-                views::persons::PersonCards::load(cat, &self.persons_view.postponed_persons);
+            self.person_cards = views::persons::PersonCards::load(
+                cat,
+                &self.settings.library_roots,
+                &self.persons_view.postponed_persons,
+            );
         }
     }
 
@@ -583,6 +598,46 @@ impl PhotosortApp {
         }
     }
 
+    /// Lists the registered folders again when it is time to. The engine does it on its own thread.
+    fn recheck_folders(&mut self, ctx: &egui::Context) {
+        let Some(engine) = &self.review_engine else {
+            return;
+        };
+        let now = Instant::now();
+        if self.folder_recheck.due(ctx.input(|i| i.focused), now) {
+            engine.request_index();
+        }
+        ctx.request_repaint_after(self.folder_recheck.remaining(now));
+    }
+
+    /// Flags in the catalog the photos found to be gone, and says whether it flagged any.
+    fn mark_gone_photos(&mut self) -> bool {
+        if let Some(wizard) = &mut self.export_wizard {
+            let gone = wizard.take_gone();
+            self.gone_photos
+                .extend(gone.into_iter().map(|path| (path, None)));
+        }
+        // An index holds the database while it reads new files: wait rather than freeze the window.
+        if matches!(self.engine_snapshot.phase, EnginePhase::Indexing { .. }) {
+            return false;
+        }
+        let Some(cat) = &self.catalog else {
+            return false;
+        };
+        let mut marked = false;
+        for (path, thumb) in self.gone_photos.drain(..) {
+            // A failure here is not reported: the next check of the folders flags the photo.
+            if cat.mark_location_missing(&path).unwrap_or(false) {
+                marked = true;
+                // Another copy of the same photo may still give a thumbnail.
+                if let Some(sha256) = thumb {
+                    self.thumb_failed.remove(&sha256);
+                }
+            }
+        }
+        marked
+    }
+
     fn poll_workers(&mut self, ctx: &egui::Context) {
         let mut finished_works = false;
         let mut finished_tags_apply = false;
@@ -603,16 +658,27 @@ impl PhotosortApp {
                         new,
                         changed,
                         missing,
-                        errors,
+                        restored,
+                        errors: _,
                     } => {
-                        needs_full_reload = true;
-                        if new > 0 || changed > 0 || missing > 0 || errors > 0 {
-                            self.status_notice = Some(format!(
+                        // The folders are checked often: with nothing new, nothing is reloaded.
+                        if new + changed + missing + restored > 0 {
+                            needs_full_reload = true;
+                            let mut notice = format!(
                                 "Cambios detectados: {}, {}, {}",
                                 count_phrase(new, "nueva", "nuevas"),
                                 count_phrase(changed, "actualizada", "actualizadas"),
                                 count_phrase(missing, "ausente", "ausentes"),
-                            ));
+                            );
+                            if restored > 0 {
+                                notice.push_str(", ");
+                                notice.push_str(&count_phrase(
+                                    restored,
+                                    "recuperada",
+                                    "recuperadas",
+                                ));
+                            }
+                            self.status_notice = Some(notice);
                         }
                     }
                     ReviewEngineEvent::AssetProgress {
@@ -853,6 +919,9 @@ impl PhotosortApp {
 
         // 3. Thumbnails & preview
         while let Some(res) = self.thumb_pool.try_recv() {
+            if let Some(path) = res.gone {
+                self.gone_photos.push((path, Some(res.sha256.clone())));
+            }
             match res.image {
                 Ok(img) => {
                     if self.thumb_textures.len() >= MAX_THUMB_TEXTURES
@@ -876,6 +945,9 @@ impl PhotosortApp {
         }
 
         while let Some(res) = self.preview_worker.try_recv() {
+            if res.image.is_err() {
+                self.gone_photos.push((res.path.clone(), None));
+            }
             if self.preview_requested.as_ref() == Some(&res.path) {
                 let loaded = res.image.map(|img| {
                     ctx.load_texture(
@@ -886,6 +958,11 @@ impl PhotosortApp {
                 });
                 self.preview_loaded = Some((res.path, loaded));
             }
+        }
+
+        if self.mark_gone_photos() {
+            self.reload_catalog();
+            ctx.request_repaint();
         }
     }
 
@@ -1474,6 +1551,7 @@ impl eframe::App for PhotosortApp {
 impl PhotosortApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.recheck_folders(&ctx);
         self.poll_workers(&ctx);
         self.handle_shortcuts(&ctx);
 

@@ -7,6 +7,7 @@ use eframe::egui::{
     Stroke, TextureHandle, Vec2,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 #[derive(Default)]
 pub struct PersonsViewState {
@@ -35,10 +36,10 @@ pub struct PersonCards {
 }
 
 impl PersonCards {
-    pub fn load(cat: &Catalog, postponed: &HashSet<PersonId>) -> Self {
+    pub fn load(cat: &Catalog, roots: &[PathBuf], postponed: &HashSet<PersonId>) -> Self {
         let mut cards = Self::default();
         // One query for every cover: a query per person took ~24 ms with 500 persons.
-        for (face, path, sha256) in cat.person_covers().unwrap_or_default() {
+        for (face, path, sha256) in cat.person_covers_in_roots(roots).unwrap_or_default() {
             if let Some(source) = path {
                 cards
                     .thumbs
@@ -49,19 +50,19 @@ impl PersonCards {
             }
         }
         cards.naming = cat
-            .unnamed_persons_with_min_photos(3)
+            .unnamed_persons_with_min_photos_in_roots(3, roots)
             .unwrap_or_default()
             .into_iter()
             .find(|p| !postponed.contains(&p.id))
             .map(|p| {
-                let mut faces = cat.person_faces(p.id).unwrap_or_default();
+                let mut faces = cat.person_faces_in_roots(p.id, roots).unwrap_or_default();
                 faces.truncate(NAMING_SAMPLE_FACES);
                 (p, faces)
             });
         let naming_faces = cards.naming.iter().flat_map(|(_, faces)| faces);
         for face in naming_faces {
             if !cards.thumbs.contains_key(&face.asset_id)
-                && let Ok(Some(entry)) = cat.entry_for(face.asset_id)
+                && let Ok(Some(entry)) = cat.entry_for_in_roots(face.asset_id, roots)
             {
                 let thumb = ThumbRequest {
                     source: entry.path,
