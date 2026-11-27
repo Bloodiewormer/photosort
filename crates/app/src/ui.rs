@@ -1096,6 +1096,7 @@ impl PhotosortApp {
     fn stop_face_grouping(&mut self) {
         self.face_group_worker = None;
         self.settings_state.face_grouping = None;
+        self.settings_state.face_grouping_cancelling = false;
         self.sync_engine_yield();
     }
 
@@ -2229,6 +2230,7 @@ impl PhotosortApp {
                     && let Some(worker) = &self.face_group_worker
                 {
                     worker.cancel();
+                    self.settings_state.face_grouping_cancelling = true;
                 }
                 if outcome.clear_face_grouping {
                     // A running grouping would recreate the data being deleted.
