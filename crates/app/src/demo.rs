@@ -48,6 +48,7 @@ pub enum PatternKind {
     Stripes,
     Checker,
     ColorBlocks,
+    PromoGrid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,11 +163,11 @@ pub fn plan_demo_images(count: usize, seed: u64) -> Vec<ImageSpec> {
         (
             "anime",
             "Crónicas del Relojero - Capítulo 23.00 - 7.png",
-            220,
-            300,
+            240,
+            360,
             DemoFormat::Png,
             false,
-            PatternKind::Gradient,
+            PatternKind::PromoGrid,
         ),
         (
             "capturas",
@@ -677,6 +678,47 @@ pub fn render_demo_image(spec: &ImageSpec, seed: u64) -> Result<Vec<u8>, String>
                         ]
                     }
                 }
+                PatternKind::PromoGrid => {
+                    let cols = [(20, 110), (w.saturating_sub(110), w.saturating_sub(20))];
+                    let rows = [(46, 118), (150, 222), (254, 326)];
+
+                    let mut pixel = None;
+                    let mut idx = 0;
+                    for &(ry0, ry1) in &rows {
+                        for &(cx0, cx1) in &cols {
+                            if y >= ry0 && y < ry1 && x >= cx0 && x < cx1 {
+                                let on_border =
+                                    x == cx0 || x + 1 == cx1 || y == ry0 || y + 1 == ry1;
+                                if on_border {
+                                    pixel = Some([40, 45, 55]);
+                                } else {
+                                    pixel = Some(PALETTE[idx % PALETTE.len()]);
+                                }
+                                break;
+                            }
+                            if y >= ry1 + 4
+                                && y < ry1 + 16
+                                && x >= cx0 + 4
+                                && x < cx1.saturating_sub(4)
+                            {
+                                pixel = Some([50, 55, 65]);
+                                break;
+                            }
+                            idx += 1;
+                        }
+                        if pixel.is_some() {
+                            break;
+                        }
+                    }
+
+                    if let Some(rgb) = pixel {
+                        rgb
+                    } else if (14..32).contains(&y) && (14..w.saturating_sub(14)).contains(&x) {
+                        [220, 226, 238]
+                    } else {
+                        [248, 248, 252]
+                    }
+                }
             };
 
             let alpha = if spec.with_alpha && spec.format == DemoFormat::Png {
@@ -697,7 +739,9 @@ pub fn render_demo_image(spec: &ImageSpec, seed: u64) -> Result<Vec<u8>, String>
         }
     }
 
-    draw_digit_badge(&mut rgba, canonical_idx + 1);
+    if spec.pattern != PatternKind::PromoGrid {
+        draw_digit_badge(&mut rgba, canonical_idx + 1);
+    }
 
     let mut out = Vec::new();
     match spec.format {
@@ -1128,24 +1172,52 @@ fn seed_demo_ocr(
             asset,
             &[
                 OcrLine {
-                    text: "14:32  5G  84%".to_string(),
-                    score: 0.78,
+                    text: "PROYECTOS ACTIVOS DE NUESTRO GRUPO".to_string(),
+                    score: 0.98,
                     recognizer: OcrRecognizer::V6,
-                    rect: [12.0, 4.0, 160.0, 18.0],
-                    top_strip: true,
-                },
-                OcrLine {
-                    text: "Crónicas del Relojero — Capítulo 12".to_string(),
-                    score: 0.96,
-                    recognizer: OcrRecognizer::V6,
-                    rect: [20.0, 60.0, 290.0, 88.0],
+                    rect: [14.0, 14.0, 226.0, 32.0],
                     top_strip: false,
                 },
                 OcrLine {
-                    text: "Estudio Cometa · Edición especial".to_string(),
-                    score: 0.52,
+                    text: "Crónicas del Relojero".to_string(),
+                    score: 0.96,
                     recognizer: OcrRecognizer::V6,
-                    rect: [20.0, 100.0, 260.0, 124.0],
+                    rect: [18.0, 122.0, 112.0, 138.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "Academia Nebulosa".to_string(),
+                    score: 0.94,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [128.0, 122.0, 222.0, 138.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "El Jardín de Papel".to_string(),
+                    score: 0.95,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [18.0, 226.0, 112.0, 242.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "Isla de Cristal".to_string(),
+                    score: 0.93,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [128.0, 226.0, 222.0, 242.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "Estudio Cometa".to_string(),
+                    score: 0.92,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [18.0, 330.0, 112.0, 346.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "Lluvia de Estrellas".to_string(),
+                    score: 0.95,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [128.0, 330.0, 222.0, 346.0],
                     top_strip: false,
                 },
             ],
@@ -1309,6 +1381,7 @@ fn seed_demo_works(cat: &mut Catalog) -> Result<(), String> {
         ("El Jardín de Papel", &["Paper Garden"]),
         ("Estudio Cometa", &["Cometa Scans"]),
         ("Isla de Cristal", &["Crystal Island"]),
+        ("Lluvia de Estrellas", &["Star Rain"]),
     ];
 
     for &(work_name, aliases) in demo_aliases {
@@ -1323,6 +1396,27 @@ fn seed_demo_works(cat: &mut Catalog) -> Result<(), String> {
     for asset in assets {
         cat.apply_work_matches(asset, &matcher)
             .map_err(|e| e.to_string())?;
+        if cat.is_promo_page(asset).unwrap_or(false)
+            && let Ok(Some(entry)) = cat.entry_for(asset)
+            && let Ok(dyn_img) = thumbs::decode(&entry.path, u32::MAX)
+            && let Ok(lines) = cat.ocr_lines(asset)
+        {
+            let is_screenshot = cat
+                .labels_of(asset)
+                .map(|labels| labels.iter().any(|l| l.name == "Capturas"))
+                .unwrap_or(false);
+            let covers = crate::promo_covers::detect_and_associate(
+                asset,
+                &dyn_img,
+                &lines,
+                &matcher,
+                cat,
+                is_screenshot,
+            );
+            if !covers.is_empty() {
+                let _ = cat.save_asset_covers(asset, &covers);
+            }
+        }
     }
     cat.apply_filename_works(None).map_err(|e| e.to_string())?;
     cat.apply_folder_work_groups(None)

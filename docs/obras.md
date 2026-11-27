@@ -46,6 +46,24 @@
 - **Integración y concurrencia:** la etapa `rules` y «Buscar obras» sugieren pertenencia por nombre de archivo; el trabajador de OCR ejecuta el emparejamiento de menciones y tipos de página tras guardar cada imagen.
 - **Eliminar obra:** pide confirmación y borra la obra, sus alias, sus filas de pertenencia (`asset_work`) y todas sus asignaciones, también las aceptadas o rechazadas. Solo cambia el catálogo. No está disponible mientras haya una tarea en curso, y nunca se hace de forma automática.
 
+## Portadas en páginas promocionales
+
+- **Detección sin modelos nuevos:** en imágenes sugeridas o aceptadas como `Página promocional`, se detectan los rectángulos de las portadas mediante procesamiento de imagen ligero en memoria sobre la imagen decodificada (`thumbs::decode`, en modo de solo lectura):
+  - Estimación y verificación de fondo uniforme a partir del perímetro exterior.
+  - Perfiles de proyección horizontal y vertical (densidad de columnas y franjas de tarjetas) con segmentación por componentes conexos (CCL) como respaldo.
+  - Validación geométrica de cuadrícula: consistencia de dimensiones (desviación típica <= 30%), relación de aspecto típica de portadas (entre 0,40 y 1,60), ausencia de solapamientos significativos y distribución ordenada en filas y columnas. En páginas sin cuadrícula (imágenes continuas o escenas irregulares) no produce regiones espurias.
+- **Asociación espacial por cercanía:** cada línea de texto OCR que coincide con una obra se asocia a la región de portada más cercana:
+  - Dentro de la región.
+  - Inmediatamente debajo o inmediatamente encima, con solapamiento horizontal y límite de distancia proporcional a la altura de la tarjeta.
+  - Emparejamiento 1 a 1 voraz por distancia mínima.
+- **Persistencia en el catálogo:**
+  - Las regiones se guardan en la tabla `asset_cover` (`x0, y0, x1, y1`, obra asociada, confianza y estado).
+  - Al recalcular dentro de «Buscar obras», las decisiones tomadas por el usuario (`accepted` o `rejected`) se conservan estrictamente.
+- **Revisión en el inspector:**
+  - En páginas promocionales, el inspector muestra la sección «Portadas» con la lista de regiones, obra asociada, confianza y botones «Confirmar» y «No es esta».
+  - En la vista previa se dibujan los rectángulos delimitadores coloreados según su estado (`status_accepted_fg`, `status_rejected_fg` o `accent`).
+
+
 ## Medido (solo datos sintéticos, 2026-11-26)
 
 - **Páginas promocionales reservadas, con el motor real y DirectML:** 6 páginas con 78 apariciones de título. Como candidatas había 152 obras: las 76 de esas páginas y 76 señuelos del conjunto de ajuste. **Encontradas 77 de 78** y **1 coincidencia errónea**; las 6 páginas se marcaron como promocionales.

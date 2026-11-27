@@ -18,6 +18,7 @@ pub struct InspectorState {
     pub asset: Option<AssetId>,
     pub labels: Vec<Assignment>,
     pub asset_work: Option<AssetWork>,
+    pub covers: Vec<catalog::AssetCover>,
     pub ocr_lines: Vec<OcrLine>,
     pub ocr_done: bool,
     pub faces: Vec<DetectedFace>,
@@ -37,6 +38,7 @@ impl Default for InspectorState {
             asset: None,
             labels: Vec::new(),
             asset_work: None,
+            covers: Vec::new(),
             ocr_lines: Vec::new(),
             ocr_done: false,
             faces: Vec::new(),
@@ -60,6 +62,8 @@ pub struct InspectorOutcome {
     pub reject_action: Option<(AssetId, LabelId)>,
     pub accept_work: Option<AssetId>,
     pub reject_work: Option<AssetId>,
+    pub accept_cover: Option<(AssetId, usize)>,
+    pub reject_cover: Option<(AssetId, usize)>,
     pub add_user_label: Option<(AssetId, LabelKind, String)>,
     pub create_work_from_ocr: Option<(AssetId, String)>,
     pub add_alias_from_ocr: Option<(AssetId, LabelId, String)>,
@@ -147,6 +151,46 @@ pub fn draw(
                             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             Color32::WHITE,
                         );
+
+                        // Draw cover region boxes on preview
+                        let (img_w, img_h) = if let (Some(w), Some(h)) = (entry.width, entry.height) {
+                            (w as f32, h as f32)
+                        } else {
+                            (tex.size_vec2().x, tex.size_vec2().y)
+                        };
+
+                        if img_w > 0.0 && img_h > 0.0 {
+                            for cover in &state.covers {
+                                let x0_norm = (cover.rect[0] / img_w).clamp(0.0, 1.0);
+                                let y0_norm = (cover.rect[1] / img_h).clamp(0.0, 1.0);
+                                let x1_norm = (cover.rect[2] / img_w).clamp(0.0, 1.0);
+                                let y1_norm = (cover.rect[3] / img_h).clamp(0.0, 1.0);
+
+                                let cover_rect = Rect::from_min_max(
+                                    egui::pos2(
+                                        fit.min.x + x0_norm * fit.width(),
+                                        fit.min.y + y0_norm * fit.height(),
+                                    ),
+                                    egui::pos2(
+                                        fit.min.x + x1_norm * fit.width(),
+                                        fit.min.y + y1_norm * fit.height(),
+                                    ),
+                                );
+
+                                let border_color = match cover.status {
+                                    Status::Accepted => palette.status_accepted_fg.color32(),
+                                    Status::Rejected => palette.status_rejected_fg.color32(),
+                                    Status::Suggested => palette.accent.color32(),
+                                };
+
+                                ui.painter().rect_stroke(
+                                    cover_rect,
+                                    CornerRadius::same(2),
+                                    Stroke::new(1.5, border_color),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                        }
                     }
                     Some((p, Err(e))) if p == &entry.path => {
                         ui.painter().text(
@@ -373,6 +417,115 @@ pub fn draw(
                                         });
                                     });
                                 ui.add_space(theme::SPACE_XS);
+                            }
+                        });
+                    ui.add_space(theme::SPACE_SM);
+                }
+
+                // Section 1d: Portadas (for promotional pages)
+                let is_promo = state.labels.iter().any(|a| {
+                    a.kind == LabelKind::Category
+                        && a.name == catalog::PROMO_CATEGORY
+                        && a.status != Status::Rejected
+                }) || !state.covers.is_empty();
+
+                if is_promo {
+                    let covers_title = if state.covers.is_empty() {
+                        "Portadas".to_string()
+                    } else {
+                        format!("Portadas ({})", state.covers.len())
+                    };
+                    egui::CollapsingHeader::new(RichText::new(covers_title).strong())
+                        .id_salt("inspector_sec_covers")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if state.covers.is_empty() {
+                                ui.label(
+                                    RichText::new("Sin portadas detectadas")
+                                        .size(theme::FONT_SMALL)
+                                        .color(palette.text_secondary.color32()),
+                                );
+                            } else {
+                                for cover in &state.covers {
+                                    Frame::new()
+                                        .fill(palette.bg_card.color32())
+                                        .stroke(Stroke::new(1.0, palette.border.color32()))
+                                        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                        .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                let work_title = cover
+                                                    .work_name
+                                                    .as_deref()
+                                                    .unwrap_or("Sin obra asociada");
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Portada {}: {}",
+                                                        cover.cover_idx + 1,
+                                                        work_title
+                                                    ))
+                                                    .strong(),
+                                                );
+                                                ui.with_layout(
+                                                    Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        let (st_text, st_color) = match cover.status
+                                                        {
+                                                            Status::Accepted => (
+                                                                "Confirmada",
+                                                                palette
+                                                                    .status_accepted_fg
+                                                                    .color32(),
+                                                            ),
+                                                            Status::Rejected => (
+                                                                "Descartada",
+                                                                palette
+                                                                    .status_rejected_fg
+                                                                    .color32(),
+                                                            ),
+                                                            Status::Suggested => (
+                                                                "Sugerida",
+                                                                palette
+                                                                    .status_suggested_fg
+                                                                    .color32(),
+                                                            ),
+                                                        };
+                                                        ui.label(
+                                                            RichText::new(st_text)
+                                                                .size(theme::FONT_SMALL)
+                                                                .color(st_color),
+                                                        );
+                                                    },
+                                                );
+                                            });
+                                            let conf_text = format!(
+                                                "{:.0}% de confianza",
+                                                cover.confidence * 100.0
+                                            );
+                                            ui.label(
+                                                RichText::new(conf_text)
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(palette.text_secondary.color32()),
+                                            );
+                                            ui.add_space(theme::SPACE_XS);
+                                            ui.horizontal_wrapped(|ui| {
+                                                if cover.status != Status::Accepted
+                                                    && ui.button("Confirmar").clicked()
+                                                {
+                                                    outcome.accept_cover =
+                                                        Some((entry.asset, cover.cover_idx));
+                                                }
+                                                if cover.status != Status::Rejected
+                                                    && ui.button("No es esta").clicked()
+                                                {
+                                                    outcome.reject_cover =
+                                                        Some((entry.asset, cover.cover_idx));
+                                                }
+                                            });
+                                        });
+                                    ui.add_space(theme::SPACE_XS);
+                                }
                             }
                         });
                     ui.add_space(theme::SPACE_SM);
