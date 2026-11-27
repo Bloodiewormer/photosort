@@ -1365,3 +1365,208 @@ fn scanlation_page_type_priority_and_single_suggestion_invariant() {
         "user rejection must be preserved"
     );
 }
+
+#[test]
+fn rejecting_higher_priority_page_type_allows_lower_priority_suggestion() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("Manga - Cap 12 - 03.png", b"ch-cred"),
+        ("ad_and_credits.png", b"ad-cred"),
+    ]);
+    let ch_cred = ids["Manga - Cap 12 - 03.png"];
+    let ad_cred = ids["ad_and_credits.png"];
+
+    // 1. User rejects Créditos on a chapter page -> Página de capítulo can still be suggested
+    //    and Créditos stays Rejected.
+    let cred_lbl = cat.label(LabelKind::Category, CREDITS_CATEGORY).unwrap();
+    cat.reject(ch_cred, cred_lbl).unwrap();
+    let suggested = cat
+        .suggest_chapter_page_from_path(ch_cred, Path::new("Manga - Cap 12 - 03.png"))
+        .unwrap();
+    assert!(
+        suggested,
+        "rejecting Créditos must not block Página de capítulo"
+    );
+    let labels = cat.labels_of(ch_cred).unwrap();
+    assert!(
+        labels
+            .iter()
+            .any(|a| a.name == CREDITS_CATEGORY && a.status == Status::Rejected),
+        "Créditos must remain Rejected"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|a| a.name == CHAPTER_PAGE_CATEGORY && a.status == Status::Suggested),
+        "Página de capítulo must be Suggested"
+    );
+
+    // 2. OCR detects both Anuncio and Créditos. User rejects Anuncio -> re-running OCR
+    //    must keep Anuncio Rejected and fall through to suggest Créditos.
+    cat.save_ocr_lines(
+        ad_cred,
+        &[
+            line("Translator: Alex", 0.94, [10.0, 20.0, 180.0, 40.0]),
+            line("Cleaner: Sam", 0.93, [10.0, 50.0, 180.0, 70.0]),
+            line("Typesetter: Pat", 0.92, [10.0, 80.0, 180.0, 100.0]),
+            line("¡Apóyanos en Patreon!", 0.95, [10.0, 120.0, 240.0, 140.0]),
+        ],
+    )
+    .unwrap();
+    let m = cat.load_work_matcher().unwrap();
+    cat.apply_work_matches(ad_cred, &m).unwrap();
+    let ad_lbl = cat.label(LabelKind::Category, AD_CATEGORY).unwrap();
+    cat.reject(ad_cred, ad_lbl).unwrap();
+
+    cat.apply_work_matches(ad_cred, &m).unwrap();
+    let after = cat.labels_of(ad_cred).unwrap();
+    assert!(
+        after
+            .iter()
+            .any(|a| a.name == AD_CATEGORY && a.status == Status::Rejected),
+        "Anuncio must remain Rejected"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|a| a.name == CREDITS_CATEGORY && a.status == Status::Suggested),
+        "Créditos must be suggested when Anuncio is rejected"
+    );
+}
+
+#[test]
+fn deciding_unrelated_label_does_not_reconcile_or_touch_page_types() {
+    let (_tmp, cat, ids) = setup_catalog(&[("page.png", b"p")]);
+    let id = ids["page.png"];
+
+    let cred = cat.label(LabelKind::Category, CREDITS_CATEGORY).unwrap();
+    let ch = cat
+        .label(LabelKind::Category, CHAPTER_PAGE_CATEGORY)
+        .unwrap();
+    let tag = cat.label(LabelKind::Tag, "WhatsApp").unwrap();
+    let other_cat = cat
+        .label(LabelKind::Category, "Capturas de pantalla")
+        .unwrap();
+
+    // Seed two suggested page types directly via suggest() (bypassing reconcile)
+    // plus an unrelated accepted category and tag.
+    cat.suggest(id, cred, Source::Ocr, 0.85).unwrap();
+    cat.suggest(id, ch, Source::Rules, 0.85).unwrap();
+    cat.accept(id, tag).unwrap();
+    cat.accept(id, other_cat).unwrap();
+
+    // Deciding on unrelated labels must NOT mutate page-type suggestions.
+    let labels = cat.labels_of(id).unwrap();
+    assert!(
+        labels
+            .iter()
+            .any(|a| a.label == cred && a.status == Status::Suggested),
+        "Créditos suggestion must not be touched by unrelated decide()"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|a| a.label == ch && a.status == Status::Suggested),
+        "Página de capítulo suggestion must not be touched by unrelated decide()"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|a| a.label == tag && a.status == Status::Accepted)
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|a| a.label == other_cat && a.status == Status::Accepted)
+    );
+}
+
+#[test]
+fn ad_detection_avoids_dialogue_false_positives_and_discord_in_credits() {
+    let matcher = WorkMatcher::build(&[]);
+
+    let dialogue_cases: &[(&str, &[&str])] = &[
+        ("Spanish donate", &["Quiero donar sangre mañana."]),
+        (
+            "English donate",
+            &["We should donate these clothes to the shrine."],
+        ),
+        ("Spanish donation", &["Hice una donación al templo."]),
+        ("English our app", &["Our app crashed right before launch!"]),
+        (
+            "Spanish nuestra web",
+            &["Alguien hackeó nuestra web anoche."],
+        ),
+        (
+            "English buy me a coffee",
+            &["Hey, buy me a coffee on your way back!"],
+        ),
+        (
+            "English visit us at",
+            &["Come visit us at the school festival tomorrow!"],
+        ),
+        (
+            "Spanish visitanos en",
+            &["Visítanos en la cafetería cuando salgas."],
+        ),
+        (
+            "Spanish discord server",
+            &["Entra al servidor de Discord esta noche para la raid."],
+        ),
+        (
+            "English discord server",
+            &["Check the Discord server before the boss fight!"],
+        ),
+        (
+            "English follow us VIP",
+            &["Follow us to the VIP room, please."],
+        ),
+        (
+            "Spanish apoya + redes",
+            &["Ella siempre me apoya cuando subo dibujos a las redes."],
+        ),
+    ];
+
+    for (case_name, texts) in dialogue_cases {
+        let lines: Vec<OcrLine> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                line(
+                    t,
+                    0.95,
+                    [10.0, (i as f32) * 30.0, 300.0, (i as f32) * 30.0 + 22.0],
+                )
+            })
+            .collect();
+        let res = matcher.match_asset(&lines, false);
+        assert!(
+            res.ad_confidence.is_none(),
+            "dialogue case {case_name:?} must not trigger Anuncio, got {:?}",
+            res.ad_confidence
+        );
+    }
+
+    // Credits page listing a Discord server/handle must stay Créditos, not become Anuncio.
+    let credits_with_discord = matcher.match_asset(
+        &[
+            line("Créditos", 0.96, [10.0, 10.0, 150.0, 32.0]),
+            line("Traducción: Ana", 0.95, [10.0, 40.0, 200.0, 62.0]),
+            line("Limpieza: Luis", 0.94, [10.0, 70.0, 200.0, 92.0]),
+            line("Typesetter: Eva", 0.93, [10.0, 100.0, 200.0, 122.0]),
+            line(
+                "Servidor de Discord: MiFansub",
+                0.92,
+                [10.0, 130.0, 260.0, 152.0],
+            ),
+        ],
+        false,
+    );
+    assert!(
+        credits_with_discord.credits_confidence.is_some(),
+        "credits page must be detected as Créditos"
+    );
+    assert!(
+        credits_with_discord.ad_confidence.is_none(),
+        "Discord listed in credits must not turn credits page into Anuncio"
+    );
+}
