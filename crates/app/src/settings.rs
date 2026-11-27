@@ -59,6 +59,9 @@ pub struct Settings {
     /// Image recognition stage (SigLIP 2 + YuNet). OFF until enabled.
     #[serde(default)]
     pub stage_vision: bool,
+    /// Face grouping stage (SFace face recognition). OFF by default.
+    #[serde(default)]
+    pub stage_face_grouping: bool,
     /// OCR + works matching stage. OFF until enabled (slowest).
     #[serde(default)]
     pub stage_ocr: bool,
@@ -77,6 +80,7 @@ impl Default for Settings {
             background_review: false,
             stage_rules: default_stage_rules(),
             stage_vision: false,
+            stage_face_grouping: false,
             stage_ocr: false,
         }
     }

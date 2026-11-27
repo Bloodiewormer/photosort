@@ -102,6 +102,8 @@ pub struct Filter {
     pub orientations: Vec<Orientation>,
     /// When non-empty, only assets whose EXIF capture year is in this list match.
     pub capture_years: Vec<i32>,
+    /// When non-empty, only assets that contain a face belonging to one of these persons match.
+    pub persons: Vec<crate::PersonId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +348,15 @@ pub(crate) fn append_filter(sql: &mut String, args: &mut Vec<Box<dyn ToSql>>, fi
         ));
         for mt in &filter.media_types {
             args.push(Box::new(mt.as_str().to_string()));
+        }
+    }
+    if !filter.persons.is_empty() {
+        let marks = vec!["?"; filter.persons.len()].join(",");
+        sql.push_str(&format!(
+            " AND a.id IN (SELECT DISTINCT af.asset_id FROM asset_face af WHERE af.person_id IN ({marks}))"
+        ));
+        for p in &filter.persons {
+            args.push(Box::new(p.0));
         }
     }
     if !filter.formats.is_empty() {

@@ -206,10 +206,7 @@ impl VisionReader for EngineVisionReader {
                 .yunet
                 .detect(img, cfg)?
                 .into_iter()
-                .map(|f| DetectedFace {
-                    bbox: f.bbox,
-                    score: f.score,
-                })
+                .map(|f| DetectedFace::with_landmarks(f.bbox, f.score, f.landmarks))
                 .collect();
             out.push(VisionImageOutput {
                 embedding: emb,

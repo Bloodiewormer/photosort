@@ -1478,10 +1478,7 @@ fn seed_demo_vision(
             "personas" => (
                 2,
                 Some(6),
-                vec![DetectedFace {
-                    bbox: [60.0, 40.0, 160.0, 150.0],
-                    score: 0.91,
-                }],
+                vec![DetectedFace::new([60.0, 40.0, 160.0, 150.0], 0.91)],
             ),
             "capturas" => (3, None, Vec::new()),
             "memes" => (4, None, Vec::new()),
@@ -1573,6 +1570,35 @@ fn seed_demo_vision(
                 } else if idx % 7 == 0 {
                     cat.reject(asset, assign.label).map_err(|e| e.to_string())?;
                 }
+            }
+        }
+    }
+
+    // Seed synthetic persons in demo mode:
+    // 1. One named person "Alex" (2 photos)
+    // 2. One unnamed person with >= 3 photos (4 photos) so the naming card is proposed
+    // 3. One hidden person
+    let p_named = cat.create_person(Some("Alex")).map_err(|e| e.to_string())?;
+    let p_unnamed = cat.create_person(None).map_err(|e| e.to_string())?;
+    let p_hidden = cat
+        .create_person(Some("Persona Oculta"))
+        .map_err(|e| e.to_string())?;
+    cat.set_person_hidden(p_hidden, true)
+        .map_err(|e| e.to_string())?;
+
+    let mut person_photos = 0;
+    for &asset in &analyzed_assets {
+        let faces = cat.asset_face_details(asset).unwrap_or_default();
+        for face in faces {
+            if person_photos < 2 {
+                let _ = cat.assign_face_to_person(face.id, p_named, true);
+                person_photos += 1;
+            } else if person_photos < 6 {
+                let _ = cat.assign_face_to_person(face.id, p_unnamed, false);
+                person_photos += 1;
+            } else if person_photos < 7 {
+                let _ = cat.assign_face_to_person(face.id, p_hidden, false);
+                person_photos += 1;
             }
         }
     }

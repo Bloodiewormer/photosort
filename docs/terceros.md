@@ -22,6 +22,7 @@ No están en el repositorio ni dentro del `.exe`: el usuario los guarda en una c
 |---|---|---|
 | SigLIP 2 (`google/siglip2-base-patch16-256`, conversión ONNX de `onnx-community`) | Apache-2.0 | Texto de la licencia y avisos `NOTICE` si existen |
 | YuNet (`opencv/face_detection_yunet`) | MIT | Aviso de copyright y texto MIT |
+| SFace (`opencv/face_recognition_sface`) | Apache-2.0 | Texto de la licencia y avisos `NOTICE` si existen |
 | PP-OCRv6 y reconocedor coreano PP-OCRv5 (PaddleOCR) | Apache-2.0 | Texto de la licencia y avisos `NOTICE` si existen |
 
 Los detalles de versión y SHA-256 de cada archivo están en [ocr-evaluacion.md](ocr-evaluacion.md) y [vision-evaluacion.md](vision-evaluacion.md).

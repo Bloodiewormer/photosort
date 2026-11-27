@@ -5,8 +5,8 @@ use catalog::{
     AssetId, CAT_ANIMALS, CAT_ANIME, CAT_COMPUTERS_HARDWARE, CAT_MANHWA, CAT_NATURE_LANDSCAPES,
     CAT_TECH_ELECTRONICS, CAT_VIDEOGAMES, CAT_WEBTOON, Catalog, DetectedFace, EMBEDDING_DIM,
     LabelKind, MANGA_COVER_CATEGORY, RuleMode, SCREENSHOT_CATEGORY, SIGLIP2_MODEL_ID, Source,
-    Status, TAG_PERSON, TYPE_DOCUMENT, TYPE_ILLUSTRATION, TYPE_MANGA, TYPE_MEME, TYPE_PHOTO,
-    VISION_STAGE, VISION_VERSION,
+    Status, TAG_GROUP, TAG_PERSON, TAG_PORTRAIT, TYPE_DOCUMENT, TYPE_ILLUSTRATION, TYPE_MANGA,
+    TYPE_MEME, TYPE_PHOTO, VISION_STAGE, VISION_VERSION,
 };
 use fsguard::{DestPath, LibraryRoot, ensure_writable};
 use std::fs;
@@ -112,7 +112,7 @@ fn seed_orthogonal_rule_embeddings(cat: &mut Catalog) {
 fn builtin_rules_created_once_and_never_recreated_after_edit_or_delete() {
     let s = setup(&[("a.jpg", b"aaa")]);
     let rules = s.cat.list_vision_rules().unwrap();
-    assert_eq!(rules.len(), 16);
+    assert_eq!(rules.len(), 18);
 
     let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(
@@ -134,6 +134,8 @@ fn builtin_rules_created_once_and_never_recreated_after_edit_or_delete() {
             CAT_NATURE_LANDSCAPES,
             CAT_VIDEOGAMES,
             MANGA_COVER_CATEGORY,
+            TAG_PORTRAIT,
+            TAG_GROUP,
         ]
     );
 
@@ -152,7 +154,7 @@ fn builtin_rules_created_once_and_never_recreated_after_edit_or_delete() {
     // Reopen database: Meme and Videojuegos must NOT be recreated, Manga edit must NOT be overwritten
     let reopened = Catalog::open(&s.db).unwrap();
     let after = reopened.list_vision_rules().unwrap();
-    assert_eq!(after.len(), 14);
+    assert_eq!(after.len(), 16);
     assert!(!after.iter().any(|r| r.name == TYPE_MEME));
     assert!(!after.iter().any(|r| r.name == CAT_VIDEOGAMES));
     let manga_after = after.iter().find(|r| r.name == TYPE_MANGA).unwrap();
@@ -174,10 +176,7 @@ fn save_vision_result_stores_embedding_faces_and_marks_stage_done_in_one_tx() {
     );
 
     let emb = unit_basis(2);
-    let faces = vec![DetectedFace {
-        bbox: [10.0, 20.0, 100.0, 120.0],
-        score: 0.93,
-    }];
+    let faces = vec![DetectedFace::new([10.0, 20.0, 100.0, 120.0], 0.93)];
     s.cat
         .save_vision_result(a, SIGLIP2_MODEL_ID, &emb, &faces)
         .unwrap();
@@ -246,14 +245,8 @@ fn persona_rule_respects_face_override_on_photo_and_blocks_drawn_face_on_manga()
     seed_orthogonal_rule_embeddings(&mut s.cat);
     let (compiled, _) = s.cat.compile_vision_rules(SIGLIP2_MODEL_ID).unwrap();
 
-    let strong_face = vec![DetectedFace {
-        bbox: [20.0, 20.0, 80.0, 90.0],
-        score: 0.92,
-    }];
-    let weak_face = vec![DetectedFace {
-        bbox: [20.0, 20.0, 80.0, 90.0],
-        score: 0.75,
-    }];
+    let strong_face = vec![DetectedFace::new([20.0, 20.0, 80.0, 90.0], 0.92)];
+    let weak_face = vec![DetectedFace::new([20.0, 20.0, 80.0, 90.0], 0.75)];
 
     // 1. Photo with strong face (even with 0 text similarity on dim 6) -> Foto + persona
     let photo = s.asset("photo_face.jpg");
@@ -351,10 +344,7 @@ fn apply_is_idempotent_respects_user_decisions_and_other_sources_and_cleans_disa
             b,
             SIGLIP2_MODEL_ID,
             &unit_basis(2),
-            &[DetectedFace {
-                bbox: [0.0, 0.0, 50.0, 50.0],
-                score: 0.95,
-            }],
+            &[DetectedFace::new([0.0, 0.0, 50.0, 50.0], 0.95)],
         )
         .unwrap();
 
@@ -721,4 +711,89 @@ fn calibrated_values_reach_untouched_rules_of_older_catalogs_only() {
     assert!((rule(TYPE_MANGA).threshold - 0.06).abs() < 1e-6);
     assert!((rule(TYPE_PHOTO).threshold - 0.2).abs() < 1e-6);
     assert!(!rule(CAT_WEBTOON).enabled);
+}
+
+#[test]
+fn portrait_and_group_rules_trigger_from_face_geometry_on_photos() {
+    let mut s = setup(&[
+        ("portrait.jpg", b"port"),
+        ("group.jpg", b"grp"),
+        ("small_face.jpg", b"sml"),
+    ]);
+    seed_orthogonal_rule_embeddings(&mut s.cat);
+    let (compiled, _) = s.cat.compile_vision_rules(SIGLIP2_MODEL_ID).unwrap();
+
+    let p = s.asset("portrait.jpg");
+    let g = s.asset("group.jpg");
+    let sm = s.asset("small_face.jpg");
+
+    // 1. Single large face (w=100, h=100 >= 80x80) -> retrato + persona
+    let large_face = vec![DetectedFace::new([10.0, 10.0, 110.0, 110.0], 0.95)];
+    s.cat
+        .save_vision_result(p, SIGLIP2_MODEL_ID, &unit_basis(2), &large_face)
+        .unwrap();
+    s.cat.apply_vision_rules(p, &compiled).unwrap();
+    let names_p: Vec<String> = s
+        .cat
+        .labels_of(p)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(
+        names_p.contains(&TAG_PORTRAIT.to_string()),
+        "names: {names_p:?}"
+    );
+    assert!(
+        names_p.contains(&TAG_PERSON.to_string()),
+        "names: {names_p:?}"
+    );
+
+    // 2. Three strong faces -> grupo de personas + persona
+    let three_faces = vec![
+        DetectedFace::new([10.0, 10.0, 50.0, 50.0], 0.92),
+        DetectedFace::new([60.0, 10.0, 100.0, 50.0], 0.88),
+        DetectedFace::new([110.0, 10.0, 150.0, 50.0], 0.85),
+    ];
+    s.cat
+        .save_vision_result(g, SIGLIP2_MODEL_ID, &unit_basis(2), &three_faces)
+        .unwrap();
+    s.cat.apply_vision_rules(g, &compiled).unwrap();
+    let names_g: Vec<String> = s
+        .cat
+        .labels_of(g)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(
+        names_g.contains(&TAG_GROUP.to_string()),
+        "names: {names_g:?}"
+    );
+    assert!(
+        !names_g.contains(&TAG_PORTRAIT.to_string()),
+        "names: {names_g:?}"
+    );
+
+    // 3. Single small face (w=50, h=50 < 80x80) -> persona, but NOT retrato
+    let small_face = vec![DetectedFace::new([10.0, 10.0, 60.0, 60.0], 0.92)];
+    s.cat
+        .save_vision_result(sm, SIGLIP2_MODEL_ID, &unit_basis(2), &small_face)
+        .unwrap();
+    s.cat.apply_vision_rules(sm, &compiled).unwrap();
+    let names_sm: Vec<String> = s
+        .cat
+        .labels_of(sm)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(
+        names_sm.contains(&TAG_PERSON.to_string()),
+        "names: {names_sm:?}"
+    );
+    assert!(
+        !names_sm.contains(&TAG_PORTRAIT.to_string()),
+        "names: {names_sm:?}"
+    );
 }
