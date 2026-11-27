@@ -14,6 +14,23 @@ pub mod works;
 
 use eframe::egui;
 
+/// A click area for a whole row, laid under the row's own buttons. Registered after them it would
+/// take their clicks, so it reuses the row's box from the previous frame, which `draw_row`
+/// remembers. Pointer only: it is not a Tab stop.
+pub fn row_with_click_area<R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    draw_row: impl FnOnce(&mut egui::Ui) -> egui::InnerResponse<R>,
+) -> (R, Option<egui::Response>) {
+    let area = ui
+        .ctx()
+        .data(|d| d.get_temp::<egui::Rect>(id))
+        .map(|rect| ui.interact(rect, id, egui::Sense::CLICK));
+    let row = draw_row(ui);
+    ui.ctx().data_mut(|d| d.insert_temp(id, row.response.rect));
+    (row.inner, area)
+}
+
 /// Width of `text` on a single line.
 fn text_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>, style: egui::TextStyle) -> f32 {
     text.into()

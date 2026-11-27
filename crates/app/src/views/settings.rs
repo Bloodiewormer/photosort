@@ -98,7 +98,12 @@ pub fn draw(
                                         let count = root_counts.get(root).copied().unwrap_or(0);
                                         let full_path = root.display().to_string();
 
-                                        let row_resp = Frame::new()
+                                        let row_id = ui.scope_id().with(("library_row", root));
+                                        let ((), row_area) = crate::views::row_with_click_area(
+                                            ui,
+                                            row_id,
+                                            |ui| {
+                                        Frame::new()
                                             .fill(palette.bg_card.color32())
                                             .stroke(Stroke::new(1.0, palette.border.color32()))
                                             .corner_radius(CornerRadius::same(theme::RADIUS_SM))
@@ -143,10 +148,10 @@ pub fn draw(
                                                 )
                                                 .on_hover_text(&full_path);
                                             })
-                                            .response
-                                            // Right click only; «Quitar» is the keyboard path.
-                                            .interact(egui::Sense::CLICK);
+                                            },
+                                        );
 
+                                        if let Some(row_resp) = row_area {
                                         row_resp.context_menu(|ui| {
                                             if ui.button("Mostrar en el Explorador").clicked() {
                                                 if let Err(e) = reveal_in_explorer(root) {
@@ -161,6 +166,7 @@ pub fn draw(
                                                 ui.close();
                                             }
                                         });
+                                        }
 
                                         if state.confirm_remove_root.as_ref() == Some(root) {
                                             ui.add_space(theme::SPACE_XS);
