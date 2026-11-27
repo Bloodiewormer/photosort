@@ -912,3 +912,95 @@ fn benchmark_near_duplicates_45k_embeddings() {
     );
     assert_eq!(groups.len(), 10);
 }
+
+#[test]
+#[ignore = "500 persons x 35k assets in two roots; run with --release -- --ignored --nocapture"]
+fn benchmark_persons_in_roots_500_persons_35k_assets() {
+    use catalog::PersonId;
+    use rusqlite::{Connection, params};
+    use std::time::Instant;
+
+    const ASSETS: i64 = 35_000;
+    const PERSONS: i64 = 500;
+    const ITERS: u32 = 10;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db = ensure_writable(&data.join("persons_bench.sqlite"), &[]).unwrap();
+    drop(Catalog::open(&db).unwrap());
+    {
+        let mut conn = Connection::open(db.as_path()).unwrap();
+        let tx = conn.transaction().unwrap();
+        for p in 1..=PERSONS {
+            let name = (p % 3 != 0).then(|| format!("Persona {p}"));
+            tx.execute(
+                "INSERT INTO person (id, name) VALUES (?1, ?2)",
+                params![p, name],
+            )
+            .unwrap();
+        }
+        for i in 1..=ASSETS {
+            let root = if i % 2 == 0 {
+                "C:/synthetic/a"
+            } else {
+                "C:/synthetic/b"
+            };
+            tx.execute(
+                "INSERT INTO asset (id, sha256, size, width, height) VALUES (?1, ?2, 1, 800, 600)",
+                params![i, format!("{i:064x}")],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
+                 VALUES (?1, ?2, ?3, 1, 1, 1, 0)",
+                params![i, root, format!("{root}/img_{i:06}.jpg")],
+            )
+            .unwrap();
+            // Two of every three photos have faces; a few persons hold most of them.
+            for idx in 0..(i % 3) {
+                let person = 1 + (i * (idx + 1)) % if i % 5 == 0 { 10 } else { PERSONS };
+                tx.execute(
+                    "INSERT INTO asset_face (asset_id, face_idx, x1, y1, x2, y2, score, person_id)
+                     VALUES (?1, ?2, 0, 0, 10, 10, ?3, ?4)",
+                    params![i, idx, 0.5 + (i % 50) as f64 / 100.0, person],
+                )
+                .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+    let cat = Catalog::open(&db).unwrap();
+    let roots = [
+        PathBuf::from("C:/synthetic/a"),
+        PathBuf::from("C:/synthetic/b"),
+    ];
+    let one = &roots[..1];
+
+    let time = |label: &str, f: &dyn Fn() -> usize| {
+        let n = f();
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            f();
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(ITERS);
+        println!("{label}: {ms:.2} ms ({n} filas)");
+    };
+    for (label, r) in [("dos carpetas", &roots[..]), ("una carpeta", one)] {
+        println!("-- {label}");
+        time("list_persons_in_roots", &|| {
+            cat.list_persons_in_roots(true, r).unwrap().len()
+        });
+        time("person_covers_in_roots", &|| {
+            cat.person_covers_in_roots(r).unwrap().len()
+        });
+        time("unnamed_persons_with_min_photos_in_roots", &|| {
+            cat.unnamed_persons_with_min_photos_in_roots(3, r)
+                .unwrap()
+                .len()
+        });
+        time("person_faces_in_roots (la mayor)", &|| {
+            cat.person_faces_in_roots(PersonId(1), r).unwrap().len()
+        });
+    }
+}

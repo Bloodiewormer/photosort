@@ -785,3 +785,27 @@ fn persons_only_show_what_the_registered_folders_hold() {
     assert!(s.cat.person_covers_in_roots(&[]).unwrap().is_empty());
     assert!(s.cat.person_faces_in_roots(ana, &[]).unwrap().is_empty());
 }
+
+#[test]
+fn cover_ties_go_to_the_lowest_face_id() {
+    let mut s = setup(&[("a.jpg", b"1"), ("b.jpg", b"2")]);
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    let p = s.cat.create_person(Some("Ana")).unwrap();
+    let mut faces = Vec::new();
+    for rel in ["a.jpg", "b.jpg"] {
+        let asset = s.asset(rel);
+        let face = [DetectedFace::new([10.0, 10.0, 100.0, 100.0], 0.9)];
+        s.cat
+            .save_vision_result(asset, SIGLIP2_MODEL_ID, &emb, &face)
+            .unwrap();
+        let face = s.cat.asset_face_details(asset).unwrap()[0].id;
+        s.cat.assign_face_to_person(face, p, true).unwrap();
+        faces.push(face);
+    }
+    let first = *faces.iter().min().unwrap();
+
+    let persons = s.cat.list_persons_in_roots(true, &s.roots()).unwrap();
+    assert_eq!(persons[0].cover_face_id, Some(first));
+    let covers = s.cat.person_covers_in_roots(&s.roots()).unwrap();
+    assert_eq!(covers[0].0.id, first);
+}

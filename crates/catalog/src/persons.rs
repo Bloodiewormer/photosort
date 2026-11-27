@@ -161,23 +161,16 @@ impl Catalog {
         if roots.is_empty() {
             return Ok(Vec::new());
         }
-        let marks = root_marks(roots);
-        let seen = face_in_roots("af", &marks);
-        let cover_seen = face_in_roots("af2", &marks);
+        let seen = seen_faces(&root_marks(roots));
         let sql = format!(
-            "SELECT p.id, p.name, p.hidden, p.ignored,
-                    COUNT(DISTINCT af.asset_id) as photo_count,
-                    (SELECT af2.id FROM asset_face af2
-                     WHERE af2.person_id = p.id AND {cover_seen}
-                     ORDER BY af2.score DESC, af2.id ASC LIMIT 1) as cover_face_id,
-                    (SELECT af2.asset_id FROM asset_face af2
-                     WHERE af2.person_id = p.id AND {cover_seen}
-                     ORDER BY af2.score DESC, af2.id ASC LIMIT 1) as cover_asset_id
-             FROM person p
-             JOIN asset_face af ON af.person_id = p.id
-             WHERE {filter} AND {seen}
-             GROUP BY p.id
-             HAVING photo_count >= {min_photos}
+            "{seen},
+             counts AS (SELECT person_id, COUNT(DISTINCT asset_id) AS n,
+                               max(CASE WHEN rank = 1 THEN id END) AS cover_id,
+                               max(CASE WHEN rank = 1 THEN asset_id END) AS cover_asset
+                        FROM seen GROUP BY person_id)
+             SELECT p.id, p.name, p.hidden, p.ignored, c.n AS photo_count, c.cover_id, c.cover_asset
+             FROM counts c CROSS JOIN person p ON p.id = c.person_id
+             WHERE {filter} AND c.n >= {min_photos}
              ORDER BY {order}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -485,20 +478,21 @@ impl Catalog {
             return Ok(Vec::new());
         }
         let marks = root_marks(roots);
-        let cover_seen = face_in_roots("af2", &marks);
+        let seen = seen_faces(&marks);
         let sql = format!(
-            "SELECT af.id, af.asset_id, af.face_idx, af.x1, af.y1, af.x2, af.y2, af.score,
+            "{seen}
+             SELECT af.id, af.asset_id, af.face_idx, af.x1, af.y1, af.x2, af.y2, af.score,
                     af.landmarks, af.person_id, p.name, af.user_assigned, af.similarity,
                     af.embedding IS NOT NULL, max(a.width, a.height),
                     (SELECT l.path FROM location l
                      WHERE l.asset_id = af.asset_id AND l.missing = 0 AND l.root IN ({marks})
                      ORDER BY l.path ASC LIMIT 1),
                     a.sha256
-             FROM person p
-             JOIN asset_face af ON af.id = (SELECT af2.id FROM asset_face af2
-                                            WHERE af2.person_id = p.id AND {cover_seen}
-                                            ORDER BY af2.score DESC, af2.id ASC LIMIT 1)
-             JOIN asset a ON a.id = af.asset_id"
+             FROM seen s
+             CROSS JOIN asset_face af ON af.id = s.id
+             JOIN person p ON p.id = af.person_id
+             JOIN asset a ON a.id = af.asset_id
+             WHERE s.rank = 1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(root_keys(roots)), |r| {
@@ -668,6 +662,22 @@ fn face_in_roots(face: &str, marks: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM location l WHERE l.asset_id = {face}.asset_id \
                  AND l.missing = 0 AND l.root IN ({marks}))"
+    )
+}
+
+/// `WITH seen AS (...)`: every grouped face whose photo is present under the roots bound to
+/// `marks`, ranked per person by score (then id), so the cover is `rank = 1`. Evaluated once:
+/// a correlated subquery per person made the persons list three times slower.
+fn seen_faces(marks: &str) -> String {
+    format!(
+        "WITH seen AS MATERIALIZED (
+             SELECT af.id, af.asset_id, af.person_id,
+                    ROW_NUMBER() OVER (PARTITION BY af.person_id
+                                       ORDER BY af.score DESC, af.id ASC) AS rank
+             FROM asset_face af
+             WHERE af.person_id IS NOT NULL
+               AND af.asset_id IN (SELECT asset_id FROM location
+                                   WHERE missing = 0 AND root IN ({marks})))"
     )
 }
 
