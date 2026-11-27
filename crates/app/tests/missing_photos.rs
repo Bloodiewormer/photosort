@@ -3,13 +3,14 @@
 
 use app::export_flow::{ExportPhase, ExportWizard, PreviewState};
 use app::review_engine::{
-    FOLDER_RECHECK_INTERVAL, FolderRecheck, ReviewConfig, ReviewEngine, ReviewEngineEvent,
+    FOCUS_RECHECK_MIN_GAP, FOLDER_RECHECK_INTERVAL, FolderRecheck, ReviewConfig, ReviewEngine,
+    ReviewEngineEvent,
 };
 use app::settings::{self, Settings};
 use app::thumb_provider::open_thumbnails;
 use app::ui::PhotosortApp;
 use app::worker::{ThumbPool, ThumbRequest};
-use catalog::{Catalog, Entry, Filter, Sort};
+use catalog::{Catalog, DetectedFace, Entry, Filter, Sort};
 use eframe::App as _;
 use eframe::egui::{self, Pos2, RawInput, Rect, Vec2};
 use export::ExportItem;
@@ -281,11 +282,84 @@ fn folders_are_checked_on_regaining_focus_and_every_interval() {
     let mut recheck = FolderRecheck::new(start);
     let second = Duration::from_secs(1);
     assert!(!recheck.due(true, start), "startup is not a focus change");
-    assert!(!recheck.due(false, start + second));
-    assert!(recheck.due(true, start + 2 * second));
-    assert!(!recheck.due(true, start + 3 * second));
-    let later = start + 2 * second + FOLDER_RECHECK_INTERVAL;
-    assert!(!recheck.due(true, later - second));
+    let t = start + FOCUS_RECHECK_MIN_GAP;
+    assert!(!recheck.due(false, t));
+    assert!(recheck.due(true, t + second));
+    assert!(!recheck.due(true, t + 2 * second));
+
+    // Switching windows often: at most one check per gap, and the last return is not lost.
+    assert!(!recheck.due(false, t + 3 * second));
+    assert!(
+        !recheck.due(true, t + 4 * second),
+        "too soon after the last check"
+    );
+    assert_eq!(
+        recheck.remaining(t + 4 * second),
+        FOCUS_RECHECK_MIN_GAP - 3 * second
+    );
+    let deferred = t + second + FOCUS_RECHECK_MIN_GAP;
+    assert!(
+        recheck.due(false, deferred),
+        "the deferred check still runs"
+    );
+
+    let later = deferred + FOLDER_RECHECK_INTERVAL;
+    assert!(!recheck.due(false, later - second));
     assert!(recheck.due(false, later), "unfocused windows check too");
     assert_eq!(recheck.remaining(later), FOLDER_RECHECK_INTERVAL);
+}
+
+#[test]
+fn faces_and_works_of_a_missing_photo_come_back_with_it() {
+    let library = Library::new();
+    let mut cat = library.catalog();
+    let entry = library.entries().remove(0);
+    let asset = entry.asset;
+    cat.save_vision_result(
+        asset,
+        "test",
+        &vec![0.5; catalog::EMBEDDING_DIM],
+        &[DetectedFace::new([0.0, 0.0, 12.0, 12.0], 0.99)],
+    )
+    .unwrap();
+    let person = cat.create_person(Some("Alex")).unwrap();
+    let face = cat.asset_face_details(asset).unwrap()[0].id;
+    cat.assign_face_to_person(face, person, true).unwrap();
+    let work = cat.create_work("Relojero").unwrap();
+    assert!(
+        cat.suggest_work_from_path(asset, Path::new("Relojero - Cap 1 - 01.png"))
+            .unwrap()
+    );
+    assert!(cat.accept_asset_work(asset).unwrap());
+    let snapshot = |cat: &Catalog| {
+        let faces = cat.asset_face_details(asset).unwrap();
+        let owned = cat.asset_work(asset).unwrap().expect("work");
+        (
+            faces
+                .iter()
+                .map(|f| (f.id, f.person_id, f.user_assigned))
+                .collect::<Vec<_>>(),
+            owned,
+        )
+    };
+    let before = snapshot(&cat);
+    assert_eq!(before.1.work, work);
+
+    let away = library.tmp.path().join("a.png");
+    fs::rename(&entry.path, &away).unwrap();
+    assert!(cat.mark_location_missing(&entry.path).unwrap());
+    assert_eq!(cat.index(&library.root).unwrap().missing, 0);
+    assert_eq!(snapshot(&cat), before, "flagged, nothing is forgotten");
+
+    // Back with the same bytes under another name.
+    fs::rename(&away, library.root.as_path().join("vuelta.png")).unwrap();
+    let report = cat.index(&library.root).unwrap();
+    assert_eq!((report.new, report.missing), (1, 0));
+    let back = library
+        .entries()
+        .into_iter()
+        .find(|e| e.path.ends_with("vuelta.png"))
+        .expect("listed again");
+    assert_eq!(back.asset, asset);
+    assert_eq!(snapshot(&cat), before);
 }

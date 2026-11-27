@@ -901,6 +901,36 @@ fn saving_unchanged_settings_neither_interrupts_nor_reloads_the_models() {
 }
 
 #[test]
+fn an_automatic_folder_check_during_a_review_does_not_reload_the_model() {
+    let (_tmp, roots, cat, db) = indexed(&["lib"], &six_files());
+    let (loads, read): (Arc<AtomicUsize>, _) = (Arc::default(), Arc::default());
+    let cfg = ReviewConfig {
+        enabled: true,
+        rules: false,
+        vision: false,
+        ocr: true,
+        chunk_size: 2,
+        roots,
+        ..Default::default()
+    };
+    let engine = ReviewEngine::start_with_loaders(
+        db,
+        cfg,
+        Box::new(|_, _| Err("unused".into())),
+        recording_ocr(60, Arc::clone(&loads), read),
+        None,
+    );
+    assert!(wait_until(&engine, Duration::from_secs(5), is_progress));
+    engine.request_index();
+    assert!(wait_until(&engine, Duration::from_secs(5), |ev| matches!(
+        ev,
+        ReviewEngineEvent::IndexFinished { .. }
+    )));
+    assert!(eventually(|| all_ocr_done(&cat)));
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn photos_are_never_read_from_a_folder_that_was_removed() {
     // The same bytes in both folders: one asset, and the removed copy sorts first.
     let (_tmp, roots, cat, db) = indexed(

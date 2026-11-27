@@ -36,10 +36,16 @@ pub fn chunk_reload_due(pending: bool, since_last: Duration, phase: &EnginePhase
 /// How often the registered folders are listed again while the application stays open.
 pub const FOLDER_RECHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-/// Decides when to look for changes in the folders: when the window gets the focus back, and every
+/// Least time between two checks started by the window getting the focus back: switching windows
+/// often must not list 35.000 photos each time.
+pub const FOCUS_RECHECK_MIN_GAP: Duration = Duration::from_secs(60);
+
+/// Decides when to look for changes in the folders: when the window gets the focus back (at most
+/// once per [`FOCUS_RECHECK_MIN_GAP`], later rather than never), and every
 /// [`FOLDER_RECHECK_INTERVAL`].
 pub struct FolderRecheck {
     was_focused: bool,
+    focus_pending: bool,
     last: Instant,
 }
 
@@ -47,22 +53,32 @@ impl FolderRecheck {
     pub fn new(now: Instant) -> Self {
         Self {
             was_focused: true,
+            focus_pending: false,
             last: now,
         }
     }
 
     pub fn due(&mut self, focused: bool, now: Instant) -> bool {
         let was_focused = std::mem::replace(&mut self.was_focused, focused);
-        let due = (focused && !was_focused) || now - self.last >= FOLDER_RECHECK_INTERVAL;
+        self.focus_pending |= focused && !was_focused;
+        let since = now - self.last;
+        let due = since >= FOLDER_RECHECK_INTERVAL
+            || (self.focus_pending && since >= FOCUS_RECHECK_MIN_GAP);
         if due {
             self.last = now;
+            self.focus_pending = false;
         }
         due
     }
 
-    /// Time left until the periodic check, so that an idle window wakes up for it.
+    /// Time left until the next check, so that an idle window wakes up for it.
     pub fn remaining(&self, now: Instant) -> Duration {
-        FOLDER_RECHECK_INTERVAL.saturating_sub(now - self.last)
+        let wait = if self.focus_pending {
+            FOCUS_RECHECK_MIN_GAP
+        } else {
+            FOLDER_RECHECK_INTERVAL
+        };
+        wait.saturating_sub(now - self.last)
     }
 }
 
@@ -739,7 +755,8 @@ fn run_engine_loop(
 
         // 2. Index registered roots first when needed.
         if do_index {
-            session.release_models();
+            // Models stay loaded: listing the folders does not use them, and the periodic checks
+            // would otherwise reload them every few minutes during a long review.
             let valid_roots: Vec<LibraryRoot> = cfg
                 .roots
                 .iter()
