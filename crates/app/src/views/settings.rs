@@ -354,6 +354,12 @@ pub fn draw(
                                             outcome.cancel_face_grouping = true;
                                         }
                                     });
+                                } else if settings.stage_face_grouping {
+                                    // Retries after another heavy task blocked the start, or a cancel.
+                                    ui.add_space(theme::SPACE_SM);
+                                    if ui.button("Agrupar ahora").clicked() {
+                                        outcome.start_face_grouping = true;
+                                    }
                                 }
                                 ui.add_space(theme::SPACE_MD);
 
