@@ -1,11 +1,16 @@
+use crate::labels::unexpected;
 use crate::ocr::{OCR_STAGE, OCR_VERSION, OcrLine, SCREENSHOT_CATEGORY, ocr_search_key};
-use crate::{AssetId, Catalog, CatalogError, LabelId, LabelKind};
-use rusqlite::{OptionalExtension, params};
+use crate::{AssetId, Catalog, CatalogError, Entry, LabelId, LabelKind, Source, Status};
+use rusqlite::{OptionalExtension, ToSql, params, params_from_iter};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
 pub const PROMO_CATEGORY: &str = "Página promocional";
+pub const CREDITS_CATEGORY: &str = "Créditos";
+pub const RECRUITMENT_CATEGORY: &str = "Reclutamiento";
+
+const FILENAME_WORK_CONFIDENCE: f64 = 0.85;
 
 const PROMO_HEADER_KEYS: &[&str] = &[
     "proyectosactivos",
@@ -28,7 +33,12 @@ pub struct WorkSummary {
     pub label: LabelId,
     pub name: String,
     pub aliases: usize,
+    /// Non-rejected present images that MENTION this work (entity labels).
     pub images: usize,
+    /// Non-rejected present images that BELONG to this work (`asset_work`).
+    pub belongs_to: usize,
+    /// Pending (`suggested`) present images that belong to this work.
+    pub belongs_to_suggested: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,12 +58,38 @@ pub struct WorkMatch {
 pub struct AssetWorkMatches {
     pub works: Vec<WorkMatch>,
     pub promo_confidence: Option<f64>,
+    pub credits_confidence: Option<f64>,
+    pub recruitment_confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkProposal {
     pub title: String,
     pub files: usize,
+}
+
+/// Work title, chapter (kept verbatim as text, e.g. `"23.00"`), and optional page number parsed
+/// from a file stem containing an explicit chapter/episode marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedWorkFilename {
+    pub title: String,
+    pub chapter: String,
+    pub page: Option<u32>,
+}
+
+/// Ownership relation (`belongs_to`) stored in `asset_work`: at most one work per asset that is
+/// not rejected (rejected ones are kept so they are not suggested again),
+/// separate from OCR/entity mentions in `asset_label`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetWork {
+    pub asset: AssetId,
+    pub work: LabelId,
+    pub work_name: String,
+    pub chapter: String,
+    pub page: Option<u32>,
+    pub source: Source,
+    pub confidence: f64,
+    pub status: Status,
 }
 
 /// Normalizes text for work matching: runs `ocr_search_key` (NFKD, drop combining diacritics
@@ -166,13 +202,16 @@ impl WorkMatcher {
         self.aliases.is_empty()
     }
 
-    /// Matches all works and promo-page signals against an asset's OCR lines.
+    /// Matches all works and manga page-type signals (promo, credits, recruitment) against an
+    /// asset's OCR lines.
     pub fn match_asset(&self, lines: &[OcrLine], is_screenshot: bool) -> AssetWorkMatches {
         let candidates = build_candidates(lines, is_screenshot);
         if candidates.is_empty() {
             return AssetWorkMatches {
                 works: Vec::new(),
                 promo_confidence: None,
+                credits_confidence: None,
+                recruitment_confidence: None,
             };
         }
 
@@ -340,10 +379,336 @@ impl WorkMatcher {
             (false, false) => None,
         };
 
+        let visible_lines: Vec<&str> = lines
+            .iter()
+            .filter(|l| !(is_screenshot && l.top_strip))
+            .map(|l| l.text.as_str())
+            .collect();
+        let credits_confidence = detect_credits_confidence(&visible_lines);
+        let recruitment_confidence = detect_recruitment_confidence(&visible_lines);
+
         AssetWorkMatches {
             works,
             promo_confidence,
+            credits_confidence,
+            recruitment_confidence,
         }
+    }
+}
+
+/// Normalizes a line into lowercase accent-folded space-separated tokens, keeping colons attached
+/// to detect role labels such as `"traduccion:"` or `"tl:"`.
+fn normalize_phrase_line(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_space = true;
+    for ch in raw.nfkd() {
+        if ('\u{0300}'..='\u{036F}').contains(&ch) {
+            continue;
+        }
+        if ch.is_alphanumeric() {
+            for lc in ch.to_lowercase() {
+                out.push(lc);
+            }
+            prev_space = false;
+        } else if ch == ':' {
+            if !prev_space {
+                out.push(':');
+            }
+        } else if !prev_space {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Checks if `phrase` (space-separated tokens) occurs at word boundaries inside `padded`
+/// (which has a leading and trailing space, and colons stripped).
+fn contains_phrase(padded: &str, phrase: &str) -> bool {
+    let needle = format!(" {phrase} ");
+    padded.contains(&needle)
+}
+
+/// Detects scanlation credits pages from curated Spanish and English role lists.
+/// Requires strong enough evidence that ordinary dialogue bubbles are not flagged.
+fn detect_credits_confidence(lines: &[&str]) -> Option<f64> {
+    if lines.is_empty() {
+        return None;
+    }
+
+    const ROLE_GROUPS: &[(&[&str], &[&str])] = &[
+        // (general role tokens/phrases, scanlation-specific tokens/phrases)
+        (
+            &[
+                "traduccion",
+                "traductor",
+                "traductora",
+                "traductores",
+                "translation",
+                "translator",
+                "translators",
+                "translated by",
+            ],
+            &["tl:"],
+        ),
+        (
+            &["limpieza", "limpiador", "limpiadora", "cleaning"],
+            &["cleaner", "cleaners", "cl:"],
+        ),
+        (
+            &["tipografia", "maquetacion", "maquetador", "maquetadora"],
+            &["typesetter", "typesetters", "typesetting", "typer", "ts:"],
+        ),
+        (
+            &[],
+            &[
+                "redibujo",
+                "redibujado",
+                "redibujador",
+                "redibujadora",
+                "redraw",
+                "redrawer",
+                "redrawers",
+                "redrawing",
+                "rd:",
+            ],
+        ),
+        (
+            &["edicion", "editor", "editora", "editores", "edition"],
+            &["ed:"],
+        ),
+        (
+            &["correccion", "corrector", "correctora", "correctores"],
+            &[
+                "proofreader",
+                "proofreaders",
+                "proofreading",
+                "quality check",
+                "control de calidad",
+                "pr:",
+                "qc:",
+            ],
+        ),
+        (&["escaneo", "scanner"], &["raw provider", "raws:"]),
+    ];
+
+    const CREDITS_HEADERS: &[&str] = &[
+        "creditos",
+        "credits",
+        "staff del capitulo",
+        "chapter staff",
+        "scanlation staff",
+        "equipo de traduccion",
+        "gracias por leer",
+        "thanks for reading",
+        "thank you for reading",
+        "fansub",
+        "scanlation",
+    ];
+
+    let mut matched_groups: HashSet<usize> = HashSet::new();
+    let mut has_scanlation_specific = false;
+    let mut has_colon_role = false;
+    let mut has_header = false;
+
+    for &raw_line in lines {
+        let norm_colon = normalize_phrase_line(raw_line);
+        if norm_colon.is_empty() {
+            continue;
+        }
+        let plain = norm_colon.replace(':', " ");
+        let plain_collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        let padded = format!(" {plain_collapsed} ");
+        let padded_colon = format!(" {norm_colon} ");
+
+        if CREDITS_HEADERS.iter().any(|h| contains_phrase(&padded, h)) {
+            has_header = true;
+        }
+
+        for (group_idx, &(general, specific)) in ROLE_GROUPS.iter().enumerate() {
+            let mut hit = false;
+            for &term in specific {
+                if term.ends_with(':') {
+                    if padded_colon.contains(&format!(" {term}")) {
+                        hit = true;
+                        has_scanlation_specific = true;
+                        has_colon_role = true;
+                    }
+                } else if contains_phrase(&padded, term) {
+                    hit = true;
+                    has_scanlation_specific = true;
+                    if padded_colon.contains(&format!(" {term}:")) {
+                        has_colon_role = true;
+                    }
+                }
+            }
+            for &term in general {
+                if contains_phrase(&padded, term) {
+                    hit = true;
+                    if padded_colon.contains(&format!(" {term}:")) {
+                        has_colon_role = true;
+                    }
+                }
+            }
+            if hit {
+                matched_groups.insert(group_idx);
+            }
+        }
+    }
+
+    let roles = matched_groups.len();
+    if roles >= 3 {
+        Some(0.90)
+    } else if roles >= 2 && (has_header || has_colon_role || has_scanlation_specific) {
+        Some(if has_header { 0.85 } else { 0.80 })
+    } else {
+        None
+    }
+}
+
+/// Detects scanlation recruitment / staff-hiring pages from curated Spanish and English phrases.
+/// Generic phrases like `"join us"` or `"únete a nosotros"` require supporting scanlation/role
+/// context so ordinary manga dialogue is not flagged.
+fn detect_recruitment_confidence(lines: &[&str]) -> Option<f64> {
+    if lines.is_empty() {
+        return None;
+    }
+
+    const STRONG_PHRASES: &[&str] = &[
+        "reclutamiento",
+        "estamos reclutando",
+        "reclutamos",
+        "buscamos staff",
+        "se busca staff",
+        "necesitamos staff",
+        "unete al staff",
+        "buscamos traductores",
+        "buscamos traductor",
+        "buscamos cleaners",
+        "buscamos cleaner",
+        "buscamos typesetters",
+        "buscamos typesetter",
+        "buscamos typers",
+        "buscamos redibujadores",
+        "buscamos redibujador",
+        "buscamos correctores",
+        "se necesitan traductores",
+        "se necesitan cleaners",
+        "se necesitan typesetters",
+        "se necesitan editores",
+        "hiring staff",
+        "looking for staff",
+        "looking for translators",
+        "looking for cleaners",
+        "looking for typesetters",
+        "looking for redrawers",
+        "looking for proofreaders",
+        "need translators",
+        "need cleaners",
+        "need typesetters",
+        "need redrawers",
+        "apply on discord",
+        "apply via discord",
+    ];
+
+    const GENERAL_PHRASES: &[&str] = &[
+        "we are hiring",
+        "we re hiring",
+        "were hiring",
+        "now hiring",
+        "recruitment",
+        "recruiting",
+        "join our team",
+        "join our staff",
+        "join the team",
+        "join us",
+        "unete al equipo",
+        "unete a nuestro equipo",
+        "unete a nosotros",
+        "buscamos personal",
+        "buscamos editores",
+        "vacantes abiertas",
+        "sin experiencia necesaria",
+        "no necesitas experiencia",
+    ];
+
+    const SUPPORTING_SIGNALS: &[&str] = &[
+        "traductor",
+        "traductora",
+        "traductores",
+        "traduccion",
+        "translator",
+        "translators",
+        "cleaner",
+        "cleaners",
+        "limpieza",
+        "typesetter",
+        "typesetters",
+        "typesetting",
+        "typer",
+        "typers",
+        "redrawer",
+        "redrawers",
+        "redraw",
+        "redibujo",
+        "redibujador",
+        "redibujadores",
+        "proofreader",
+        "proofreaders",
+        "corrector",
+        "correctores",
+        "quality check",
+        "editor",
+        "editores",
+        "staff",
+        "discord",
+        "fansub",
+        "scanlation",
+        "scans",
+        "raws",
+        "requisitos",
+        "requirements",
+        "experiencia",
+        "experience",
+    ];
+
+    let mut has_strong = false;
+    let mut has_general = false;
+    let mut support_hits = 0usize;
+
+    for &raw_line in lines {
+        let norm_colon = normalize_phrase_line(raw_line);
+        if norm_colon.is_empty() {
+            continue;
+        }
+        let plain = norm_colon.replace(':', " ");
+        let plain_collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        let padded = format!(" {plain_collapsed} ");
+
+        if STRONG_PHRASES.iter().any(|p| contains_phrase(&padded, p)) {
+            has_strong = true;
+        }
+        if GENERAL_PHRASES.iter().any(|p| contains_phrase(&padded, p)) {
+            has_general = true;
+        }
+        for &sig in SUPPORTING_SIGNALS {
+            if contains_phrase(&padded, sig) {
+                support_hits += 1;
+            }
+        }
+    }
+
+    if has_strong && support_hits >= 1 {
+        Some(0.90)
+    } else if has_strong {
+        Some(0.85)
+    } else if has_general && support_hits >= 1 {
+        Some(0.80)
+    } else {
+        None
     }
 }
 
@@ -640,10 +1005,11 @@ fn min_substring_edit_distance(
     (best <= max_err).then_some(best)
 }
 
-/// Extracts a candidate work title from a file stem containing an explicit chapter/episode marker
+/// Parses a work title, chapter text (preserving formatting like `"23.00"`), and optional page
+/// number from a file stem containing an explicit chapter/episode marker
 /// (`Capítulo`, `Chapter`, `Cap.`, `Ch.`, `Episodio`, `Episode`, `Ep.` followed by a number,
 /// accent- and case-insensitive). Returns `None` when no marker is present.
-pub fn extract_work_title_from_stem(stem: &str) -> Option<String> {
+pub fn parse_work_from_stem(stem: &str) -> Option<ParsedWorkFilename> {
     let chars: Vec<(usize, char)> = stem.char_indices().collect();
     let n = chars.len();
     let mut i = 0;
@@ -665,13 +1031,19 @@ pub fn extract_work_title_from_stem(stem: &str) -> Option<String> {
                 "capitulo" | "chapter" | "cap" | "ch" | "episodio" | "episode" | "ep"
             );
 
-            if is_marker_word && is_followed_by_number(&chars, j) {
+            if is_marker_word && let Some(num_start) = find_chapter_number_start(&chars, j) {
                 let raw_title = &stem[..start_byte];
                 let cleaned = clean_extracted_title(raw_title);
-                if work_match_key(&cleaned).chars().count() >= 2 {
-                    return Some(cleaned);
+                if work_match_key(&cleaned).chars().count() < 2 {
+                    return None;
                 }
-                return None;
+                let (chapter, after_chapter) = extract_chapter_token(stem, &chars, num_start);
+                let page = extract_page_number(stem, &chars, after_chapter);
+                return Some(ParsedWorkFilename {
+                    title: cleaned,
+                    chapter,
+                    page,
+                });
             }
 
             i = j;
@@ -682,6 +1054,49 @@ pub fn extract_work_title_from_stem(stem: &str) -> Option<String> {
     None
 }
 
+/// Suggests that `asset` belongs to `work`. Rows the user decided on are never changed: nothing is
+/// added over a confirmed work, and a rejected one stays rejected.
+fn suggest_ownership(
+    conn: &rusqlite::Connection,
+    asset: AssetId,
+    work: LabelId,
+    parsed: &ParsedWorkFilename,
+) -> Result<bool, CatalogError> {
+    conn.prepare_cached(
+        "DELETE FROM asset_work
+         WHERE asset_id = ?1 AND work_id <> ?2 AND status = 'suggested'",
+    )?
+    .execute([asset.0, work.0])?;
+    let changed = conn
+        .prepare_cached(
+            "INSERT INTO asset_work (asset_id, work_id, chapter, page, source, confidence, status)
+             SELECT ?1, ?2, ?3, ?4, 'rules', ?5, 'suggested'
+             WHERE NOT EXISTS (SELECT 1 FROM asset_work
+                               WHERE asset_id = ?1 AND work_id <> ?2 AND status = 'accepted')
+             ON CONFLICT(asset_id, work_id) DO UPDATE SET
+                 chapter = excluded.chapter,
+                 page = excluded.page,
+                 source = excluded.source,
+                 confidence = excluded.confidence
+             WHERE asset_work.status = 'suggested'",
+        )?
+        .execute(params![
+            asset.0,
+            work.0,
+            parsed.chapter,
+            parsed.page.map(i64::from),
+            FILENAME_WORK_CONFIDENCE
+        ])?;
+    Ok(changed > 0)
+}
+
+/// Extracts a candidate work title from a file stem containing an explicit chapter/episode marker
+/// (`Capítulo`, `Chapter`, `Cap.`, `Ch.`, `Episodio`, `Episode`, `Ep.` followed by a number,
+/// accent- and case-insensitive). Returns `None` when no marker is present.
+pub fn extract_work_title_from_stem(stem: &str) -> Option<String> {
+    parse_work_from_stem(stem).map(|p| p.title)
+}
+
 fn fold_ascii_word(word: &str) -> String {
     word.nfkd()
         .filter(|&c| !('\u{0300}'..='\u{036F}').contains(&c))
@@ -689,10 +1104,10 @@ fn fold_ascii_word(word: &str) -> String {
         .collect()
 }
 
-fn is_followed_by_number(chars: &[(usize, char)], mut idx: usize) -> bool {
+fn find_chapter_number_start(chars: &[(usize, char)], mut idx: usize) -> Option<usize> {
     let n = chars.len();
     if idx >= n {
-        return false;
+        return None;
     }
     // Optional dot after abbreviated or full marker (`Cap. 12`, `Ch.12`).
     let had_dot = if chars[idx].1 == '.' {
@@ -714,7 +1129,7 @@ fn is_followed_by_number(chars: &[(usize, char)], mut idx: usize) -> bool {
                     had_sep = true;
                     continue;
                 }
-                return false;
+                return None;
             }
             idx += 1;
             had_sep = true;
@@ -722,7 +1137,93 @@ fn is_followed_by_number(chars: &[(usize, char)], mut idx: usize) -> bool {
             break;
         }
     }
-    had_sep && idx < n && chars[idx].1.is_ascii_digit()
+    (had_sep && idx < n && chars[idx].1.is_ascii_digit()).then_some(idx)
+}
+
+/// Extracts the chapter number text starting at `num_start` (e.g. `"23.00"`, `"4"`, `"04.5"`),
+/// returning `(chapter_text, next_char_index)`.
+fn extract_chapter_token(stem: &str, chars: &[(usize, char)], num_start: usize) -> (String, usize) {
+    let n = chars.len();
+    let mut k = num_start;
+    while k < n && chars[k].1.is_ascii_digit() {
+        k += 1;
+    }
+    if k + 1 < n && chars[k].1 == '.' && chars[k + 1].1.is_ascii_digit() {
+        k += 1;
+        while k < n && chars[k].1.is_ascii_digit() {
+            k += 1;
+        }
+    }
+    let start_byte = chars[num_start].0;
+    let end_byte = if k < n { chars[k].0 } else { stem.len() };
+    (stem[start_byte..end_byte].to_string(), k)
+}
+
+/// Extracts an optional page number following the chapter token, such as:
+/// ` - 7`, ` - 01`, `_p05`, ` pag. 12`, ` Page 3`.
+fn extract_page_number(stem: &str, chars: &[(usize, char)], mut idx: usize) -> Option<u32> {
+    let n = chars.len();
+    let mut had_sep = false;
+    while idx < n {
+        let c = chars[idx].1;
+        if c.is_whitespace()
+            || matches!(c, '-' | '–' | '—' | '_' | ':' | ',' | '|' | '/' | '(' | '[')
+        {
+            idx += 1;
+            had_sep = true;
+        } else {
+            break;
+        }
+    }
+    if !had_sep || idx >= n {
+        return None;
+    }
+
+    // Optional explicit page marker word (`p`, `pg`, `pag`, `pagina`, `page`).
+    if chars[idx].1.is_alphabetic() {
+        let word_start = chars[idx].0;
+        let mut w_end = idx;
+        while w_end < n && chars[w_end].1.is_alphabetic() {
+            w_end += 1;
+        }
+        let word_end_byte = if w_end < n {
+            chars[w_end].0
+        } else {
+            stem.len()
+        };
+        let word = fold_ascii_word(&stem[word_start..word_end_byte]);
+        if !matches!(word.as_str(), "p" | "pg" | "pag" | "pagina" | "page") {
+            return None;
+        }
+        idx = w_end;
+        while idx < n
+            && (chars[idx].1.is_whitespace() || matches!(chars[idx].1, '.' | '-' | '_' | ':' | '#'))
+        {
+            idx += 1;
+        }
+        if idx >= n || !chars[idx].1.is_ascii_digit() {
+            return None;
+        }
+    }
+
+    if !chars[idx].1.is_ascii_digit() {
+        return None;
+    }
+    let d_start = chars[idx].0;
+    let mut d_end = idx;
+    while d_end < n && chars[d_end].1.is_ascii_digit() {
+        d_end += 1;
+    }
+    // Make sure digits are not glued to letters or decimal point (e.g. `1080p` or `2.5`).
+    if d_end < n && (chars[d_end].1.is_alphabetic() || chars[d_end].1 == '.') {
+        return None;
+    }
+    let d_end_byte = if d_end < n {
+        chars[d_end].0
+    } else {
+        stem.len()
+    };
+    stem[d_start..d_end_byte].parse::<u32>().ok()
 }
 
 fn clean_extracted_title(raw: &str) -> String {
@@ -742,12 +1243,16 @@ impl Catalog {
         self.label(LabelKind::Entity, trimmed)
     }
 
-    /// Removes a work the user no longer wants: its aliases and every image assignment, including
-    /// accepted and rejected ones. Only catalog rows change. Returns `false` if `work` is not a
-    /// work. Never called automatically.
+    /// Removes a work the user no longer wants: its aliases, its ownership (`asset_work`) rows,
+    /// and every image assignment, including accepted and rejected ones. Only catalog rows change.
+    /// Returns `false` if `work` is not a work. Never called automatically.
     pub fn delete_work(&mut self, work: LabelId) -> Result<bool, CatalogError> {
         const IS_WORK: &str = "SELECT id FROM label WHERE id = ?1 AND kind = 'entity'";
         let tx = self.conn.transaction()?;
+        tx.execute(
+            &format!("DELETE FROM asset_work WHERE work_id IN ({IS_WORK})"),
+            [work.0],
+        )?;
         for table in ["asset_label", "work_alias"] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE label_id IN ({IS_WORK})"),
@@ -804,8 +1309,8 @@ impl Catalog {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Lists all works (`kind = 'entity'`) with their alias count and non-rejected present image count
-    /// restricted to `roots`.
+    /// Lists all works (`kind = 'entity'`) with their alias count, non-rejected mention count
+    /// (`images`), and ownership counts (`belongs_to`, `belongs_to_suggested`) restricted to `roots`.
     pub fn list_works_in_roots(
         &self,
         roots: &[std::path::PathBuf],
@@ -814,7 +1319,9 @@ impl Catalog {
             self.conn.prepare(
                 "SELECT lb.id, lb.name,
                         (SELECT COUNT(*) FROM work_alias wa WHERE wa.label_id = lb.id) AS aliases,
-                        0 AS images
+                        0 AS images,
+                        0 AS belongs_to,
+                        0 AS belongs_to_suggested
                  FROM label lb
                  WHERE lb.kind = 'entity'
                  ORDER BY lb.name COLLATE NOCASE",
@@ -830,31 +1337,53 @@ impl Catalog {
                            AND EXISTS (SELECT 1 FROM location l
                                        WHERE l.asset_id = al.asset_id
                                          AND l.missing = 0
-                                         AND l.root IN ({marks}))) AS images
+                                         AND l.root IN ({marks}))) AS images,
+                        (SELECT COUNT(*) FROM asset_work aw
+                         WHERE aw.work_id = lb.id
+                           AND aw.status <> 'rejected'
+                           AND EXISTS (SELECT 1 FROM location l
+                                       WHERE l.asset_id = aw.asset_id
+                                         AND l.missing = 0
+                                         AND l.root IN ({marks}))) AS belongs_to,
+                        (SELECT COUNT(*) FROM asset_work aw
+                         WHERE aw.work_id = lb.id
+                           AND aw.status = 'suggested'
+                           AND EXISTS (SELECT 1 FROM location l
+                                       WHERE l.asset_id = aw.asset_id
+                                         AND l.missing = 0
+                                         AND l.root IN ({marks}))) AS belongs_to_suggested
                  FROM label lb
                  WHERE lb.kind = 'entity'
                  ORDER BY lb.name COLLATE NOCASE"
             );
             self.conn.prepare(&sql)?
         };
-        let args: Vec<Box<dyn rusqlite::ToSql>> = roots
-            .iter()
-            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn rusqlite::ToSql>)
-            .collect();
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(roots.len() * 3);
+        if !roots.is_empty() {
+            for _ in 0..3 {
+                for r in roots {
+                    args.push(Box::new(r.to_string_lossy().into_owned()));
+                }
+            }
+        }
         let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
             let aliases: i64 = r.get(2)?;
             let images: i64 = r.get(3)?;
+            let belongs_to: i64 = r.get(4)?;
+            let belongs_to_suggested: i64 = r.get(5)?;
             Ok(WorkSummary {
                 label: LabelId(r.get(0)?),
                 name: r.get(1)?,
                 aliases: aliases.max(0) as usize,
                 images: images.max(0) as usize,
+                belongs_to: belongs_to.max(0) as usize,
+                belongs_to_suggested: belongs_to_suggested.max(0) as usize,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Lists all works (`kind = 'entity'`) with their alias count and non-rejected present image count.
+    /// Lists all works (`kind = 'entity'`) with their alias count, mention count, and ownership counts.
     pub fn list_works(&self) -> Result<Vec<WorkSummary>, CatalogError> {
         let mut stmt = self.conn.prepare(
             "SELECT lb.id, lb.name,
@@ -863,7 +1392,17 @@ impl Catalog {
                      WHERE al.label_id = lb.id
                        AND al.status <> 'rejected'
                        AND EXISTS (SELECT 1 FROM location l
-                                   WHERE l.asset_id = al.asset_id AND l.missing = 0)) AS images
+                                   WHERE l.asset_id = al.asset_id AND l.missing = 0)) AS images,
+                    (SELECT COUNT(*) FROM asset_work aw
+                     WHERE aw.work_id = lb.id
+                       AND aw.status <> 'rejected'
+                       AND EXISTS (SELECT 1 FROM location l
+                                   WHERE l.asset_id = aw.asset_id AND l.missing = 0)) AS belongs_to,
+                    (SELECT COUNT(*) FROM asset_work aw
+                     WHERE aw.work_id = lb.id
+                       AND aw.status = 'suggested'
+                       AND EXISTS (SELECT 1 FROM location l
+                                   WHERE l.asset_id = aw.asset_id AND l.missing = 0)) AS belongs_to_suggested
              FROM label lb
              WHERE lb.kind = 'entity'
              ORDER BY lb.name COLLATE NOCASE",
@@ -871,11 +1410,15 @@ impl Catalog {
         let rows = stmt.query_map([], |r| {
             let aliases: i64 = r.get(2)?;
             let images: i64 = r.get(3)?;
+            let belongs_to: i64 = r.get(4)?;
+            let belongs_to_suggested: i64 = r.get(5)?;
             Ok(WorkSummary {
                 label: LabelId(r.get(0)?),
                 name: r.get(1)?,
                 aliases: aliases.max(0) as usize,
                 images: images.max(0) as usize,
+                belongs_to: belongs_to.max(0) as usize,
+                belongs_to_suggested: belongs_to_suggested.max(0) as usize,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -983,52 +1526,349 @@ impl Catalog {
             }
         }
 
-        // 3. Remove previous OCR-suggested promo category row for this asset.
-        let promo_label_id: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
-                [PROMO_CATEGORY],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(promo_id) = promo_label_id {
-            tx.execute(
-                "DELETE FROM asset_label
-                 WHERE asset_id = ?1
-                   AND label_id = ?2
-                   AND source = 'ocr'
-                   AND status = 'suggested'",
-                params![asset.0, promo_id],
-            )?;
-        }
-
-        // 4. Suggest promo category if applicable.
-        if let Some(conf) = result.promo_confidence {
-            let promo_id = match promo_label_id {
-                Some(id) => id,
-                None => {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO label (kind, name) VALUES ('category', ?1)",
-                        [PROMO_CATEGORY],
-                    )?;
-                    tx.query_row(
-                        "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
-                        [PROMO_CATEGORY],
-                        |r| r.get(0),
-                    )?
-                }
-            };
-            tx.execute(
-                "INSERT INTO asset_label (asset_id, label_id, source, confidence, status)
-                 VALUES (?1, ?2, 'ocr', ?3, 'suggested')
-                 ON CONFLICT(asset_id, label_id) DO UPDATE SET source = 'ocr', confidence = ?3
-                 WHERE status = 'suggested'",
-                params![asset.0, promo_id, conf.clamp(0.0, 1.0)],
-            )?;
+        // 3. Synchronize OCR-suggested manga page-type categories (promo, credits, recruitment).
+        for (cat_name, confidence) in [
+            (PROMO_CATEGORY, result.promo_confidence),
+            (CREDITS_CATEGORY, result.credits_confidence),
+            (RECRUITMENT_CATEGORY, result.recruitment_confidence),
+        ] {
+            let label_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                    [cat_name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = label_id {
+                tx.execute(
+                    "DELETE FROM asset_label
+                     WHERE asset_id = ?1
+                       AND label_id = ?2
+                       AND source = 'ocr'
+                       AND status = 'suggested'",
+                    params![asset.0, id],
+                )?;
+            }
+            if let Some(conf) = confidence {
+                let id = match label_id {
+                    Some(id) => id,
+                    None => {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO label (kind, name) VALUES ('category', ?1)",
+                            [cat_name],
+                        )?;
+                        tx.query_row(
+                            "SELECT id FROM label WHERE kind = 'category' AND name = ?1",
+                            [cat_name],
+                            |r| r.get(0),
+                        )?
+                    }
+                };
+                tx.execute(
+                    "INSERT INTO asset_label (asset_id, label_id, source, confidence, status)
+                     VALUES (?1, ?2, 'ocr', ?3, 'suggested')
+                     ON CONFLICT(asset_id, label_id) DO UPDATE SET source = 'ocr', confidence = ?3
+                     WHERE status = 'suggested'",
+                    params![asset.0, id, conf.clamp(0.0, 1.0)],
+                )?;
+            }
         }
 
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Builds a lookup map of normalized work keys (canonical names and aliases) to `LabelId`.
+    /// Canonical work names take precedence on key collisions.
+    pub fn load_work_key_map(&self) -> Result<HashMap<String, LabelId>, CatalogError> {
+        let mut map: HashMap<String, LabelId> = HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, name FROM label WHERE kind = 'entity' ORDER BY id")?;
+            let rows = stmt.query_map([], |r| Ok((LabelId(r.get(0)?), r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (id, name) = row?;
+                let key = work_match_key(&name);
+                if key.chars().count() >= 2 {
+                    map.entry(key).or_insert(id);
+                }
+            }
+        }
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT label_id, key FROM work_alias ORDER BY label_id, key")?;
+            let rows = stmt.query_map([], |r| Ok((LabelId(r.get(0)?), r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (id, key) = row?;
+                if key.chars().count() >= 2 {
+                    map.entry(key).or_insert(id);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    /// Suggests work ownership (`belongs_to`) for `asset` solely from its file name when the
+    /// parsed title matches an existing work or alias. Never creates works automatically and
+    /// never overwrites `accepted` or `rejected` rows.
+    pub fn suggest_work_from_path(
+        &self,
+        asset: AssetId,
+        path: &Path,
+    ) -> Result<bool, CatalogError> {
+        // The rules stage calls this for every photo; most names have no chapter marker.
+        if path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(parse_work_from_stem)
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let keys = self.load_work_key_map()?;
+        self.suggest_work_from_path_with_map(asset, path, &keys)
+    }
+
+    /// Like [`suggest_work_from_path`](Self::suggest_work_from_path), reusing a preloaded key map.
+    pub fn suggest_work_from_path_with_map(
+        &self,
+        asset: AssetId,
+        path: &Path,
+        keys: &HashMap<String, LabelId>,
+    ) -> Result<bool, CatalogError> {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            return Ok(false);
+        };
+        let Some(parsed) = parse_work_from_stem(stem) else {
+            return Ok(false);
+        };
+        let key = work_match_key(&parsed.title);
+        let Some(&work_id) = keys.get(&key) else {
+            return Ok(false);
+        };
+        suggest_ownership(&self.conn, asset, work_id, &parsed)
+    }
+
+    /// Scans present locations (optionally restricted to `roots`) and idempotently suggests
+    /// filename-based work ownership for every asset whose file name matches an existing work or
+    /// alias. Never creates works and never touches `accepted`/`rejected` rows.
+    /// Returns `(scanned_assets, matched_assets)`.
+    pub fn apply_filename_works(
+        &mut self,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<(usize, usize), CatalogError> {
+        if let Some(r) = roots
+            && r.is_empty()
+        {
+            return Ok((0, 0));
+        }
+        let keys = self.load_work_key_map()?;
+        let mut sql = String::from(
+            "SELECT l.asset_id, l.path
+             FROM location l
+             WHERE l.missing = 0",
+        );
+        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(r) = roots {
+            let marks = vec!["?"; r.len()].join(",");
+            sql.push_str(&format!(" AND l.root IN ({marks})"));
+            for root in r {
+                args.push(Box::new(root.to_string_lossy().into_owned()));
+            }
+        }
+        sql.push_str(" ORDER BY l.asset_id, l.path");
+
+        let rows: Vec<(AssetId, PathBuf)> = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(params_from_iter(args.iter()), |r| {
+                Ok((AssetId(r.get(0)?), PathBuf::from(r.get::<_, String>(1)?)))
+            })?;
+            mapped.collect::<Result<_, _>>()?
+        };
+
+        let mut scanned = 0usize;
+        let mut matched = 0usize;
+        let tx = self.conn.transaction()?;
+        {
+            let mut del_stale = tx.prepare_cached(
+                "DELETE FROM asset_work
+                 WHERE asset_id = ?1 AND source = 'rules' AND status = 'suggested'",
+            )?;
+            // One asset can have several copies; any of their names may carry the work.
+            for copies in rows.chunk_by(|a, b| a.0 == b.0) {
+                let asset = copies[0].0;
+                scanned += 1;
+                let found = copies.iter().find_map(|(_, path)| {
+                    let parsed = parse_work_from_stem(path.file_stem()?.to_str()?)?;
+                    let work_id = *keys.get(&work_match_key(&parsed.title))?;
+                    Some((work_id, parsed))
+                });
+                if let Some((work_id, parsed)) = found {
+                    suggest_ownership(&tx, asset, work_id, &parsed)?;
+                    matched += 1;
+                } else {
+                    del_stale.execute([asset.0])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok((scanned, matched))
+    }
+
+    /// Returns the work ownership row (`belongs_to`) for `asset`, if any.
+    pub fn asset_work(&self, asset: AssetId) -> Result<Option<AssetWork>, CatalogError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT aw.asset_id, aw.work_id, lb.name, aw.chapter, aw.page,
+                        aw.source, aw.confidence, aw.status
+                 FROM asset_work aw
+                 JOIN label lb ON lb.id = aw.work_id
+                 WHERE aw.asset_id = ?1
+                 ORDER BY CASE aw.status WHEN 'accepted' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,
+                          aw.work_id DESC
+                 LIMIT 1",
+                [asset.0],
+                |r| {
+                    let source_s: String = r.get(5)?;
+                    let status_s: String = r.get(7)?;
+                    let page: Option<i64> = r.get(4)?;
+                    Ok(AssetWork {
+                        asset: AssetId(r.get(0)?),
+                        work: LabelId(r.get(1)?),
+                        work_name: r.get(2)?,
+                        chapter: r.get(3)?,
+                        page: page.and_then(|p| u32::try_from(p).ok()),
+                        source: Source::parse(&source_s).ok_or_else(|| unexpected(5, &source_s))?,
+                        confidence: r.get(6)?,
+                        status: Status::parse(&status_s).ok_or_else(|| unexpected(7, &status_s))?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Confirms the ownership that [`asset_work`](Self::asset_work) reports for `asset`.
+    pub fn accept_asset_work(&self, asset: AssetId) -> Result<bool, CatalogError> {
+        self.decide_asset_work(asset, "accepted")
+    }
+
+    /// Rejects the ownership that [`asset_work`](Self::asset_work) reports for `asset`. The
+    /// rejection is kept per work, so another work can still be suggested later.
+    pub fn reject_asset_work(&self, asset: AssetId) -> Result<bool, CatalogError> {
+        self.decide_asset_work(asset, "rejected")
+    }
+
+    fn decide_asset_work(&self, asset: AssetId, status: &str) -> Result<bool, CatalogError> {
+        let Some(shown) = self.asset_work(asset)? else {
+            return Ok(false);
+        };
+        let changed = self.conn.execute(
+            "UPDATE asset_work SET status = ?3 WHERE asset_id = ?1 AND work_id = ?2",
+            params![asset.0, shown.work.0, status],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Confirms (`accepted`) all pending (`suggested`) ownership rows belonging to `work`,
+    /// optionally restricted to present assets under `roots`.
+    pub fn accept_all_suggested_work_ownership(
+        &self,
+        work: LabelId,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<usize, CatalogError> {
+        if let Some(r) = roots
+            && r.is_empty()
+        {
+            return Ok(0);
+        }
+        let mut sql = String::from(
+            "UPDATE asset_work
+             SET status = 'accepted'
+             WHERE work_id = ?
+               AND status = 'suggested'
+               AND EXISTS (SELECT 1 FROM location l
+                           WHERE l.asset_id = asset_work.asset_id
+                             AND l.missing = 0",
+        );
+        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+        args.push(Box::new(work.0));
+        if let Some(r) = roots {
+            let marks = vec!["?"; r.len()].join(",");
+            sql.push_str(&format!(" AND l.root IN ({marks})"));
+            for root in r {
+                args.push(Box::new(root.to_string_lossy().into_owned()));
+            }
+        }
+        sql.push(')');
+        let changed = self.conn.execute(&sql, params_from_iter(args.iter()))?;
+        Ok(changed)
+    }
+
+    /// Lists present entries that belong to `work` (excluding `rejected`), ordered naturally by
+    /// chapter, then page number, then path.
+    pub fn entries_belonging_to_work(
+        &self,
+        work: LabelId,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<Vec<Entry>, CatalogError> {
+        if let Some(r) = roots
+            && r.is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        let mut sql = String::from(
+            "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns, aw.chapter, aw.page
+             FROM asset_work aw
+             JOIN asset a ON a.id = aw.asset_id
+             JOIN location l ON l.asset_id = aw.asset_id
+             WHERE aw.work_id = ?
+               AND aw.status <> 'rejected'
+               AND l.missing = 0",
+        );
+        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+        args.push(Box::new(work.0));
+        if let Some(r) = roots {
+            let marks = vec!["?"; r.len()].join(",");
+            sql.push_str(&format!(" AND l.root IN ({marks})"));
+            for root in r {
+                args.push(Box::new(root.to_string_lossy().into_owned()));
+            }
+        }
+        sql.push_str(" ORDER BY l.path ASC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+            let size: i64 = r.get(3)?;
+            let chapter: String = r.get(5)?;
+            let page: Option<i64> = r.get(6)?;
+            Ok((
+                Entry {
+                    asset: AssetId(r.get(0)?),
+                    path: PathBuf::from(r.get::<_, String>(1)?),
+                    sha256: r.get(2)?,
+                    size: size.max(0) as u64,
+                    modified_ns: r.get(4)?,
+                },
+                chapter,
+                page.and_then(|p| u32::try_from(p).ok()),
+            ))
+        })?;
+
+        let mut items: Vec<(Entry, String, Option<u32>)> = rows.collect::<Result<_, _>>()?;
+        items.sort_by(|(ea, ca, pa), (eb, cb, pb)| {
+            compare_chapters(ca, cb)
+                .then_with(|| match (pa, pb) {
+                    (Some(a), Some(b)) => a.cmp(b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| ea.path.cmp(&eb.path))
+        });
+        Ok(items.into_iter().map(|(e, _, _)| e).collect())
     }
 
     /// Scans present file names for explicit chapter markers and proposes distinct work titles
@@ -1091,5 +1931,16 @@ impl Catalog {
                 .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
         });
         Ok(proposals)
+    }
+}
+
+/// Natural numeric ordering for chapter strings (`"2"` < `"10"`, `"23.00"` < `"23.5"`),
+/// falling back to lexicographical order for non-numeric or tied values.
+fn compare_chapters(a: &str, b: &str) -> std::cmp::Ordering {
+    match (a.trim().parse::<f64>().ok(), b.trim().parse::<f64>().ok()) {
+        (Some(na), Some(nb)) => na.total_cmp(&nb).then_with(|| a.cmp(b)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(b),
     }
 }

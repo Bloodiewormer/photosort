@@ -275,7 +275,7 @@ fn labels_in_use_counts_distinct_non_missing_assets_ordered_by_kind_and_name() {
             LabelCount {
                 label: cat_anime,
                 kind: LabelKind::Category,
-                name: "anime".into(),
+                name: "Anime".into(),
                 images: 1,
             },
             LabelCount {

@@ -7,6 +7,7 @@ use eframe::egui::{
     Stroke, Vec2,
 };
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 const ROW_HEIGHT: f32 = 42.0;
 const PROPOSALS_WINDOW_WIDTH: f32 = 540.0;
@@ -42,6 +43,8 @@ pub struct WorksViewState {
     pub run_state: WorksRunState,
     /// Work whose deletion is waiting for a second click.
     pub confirm_delete: Option<LabelId>,
+    /// Work whose bulk ownership confirmation is waiting for a second click.
+    pub confirm_accept_all: Option<LabelId>,
 }
 
 impl Default for WorksViewState {
@@ -57,6 +60,7 @@ impl Default for WorksViewState {
             checked_proposals: BTreeSet::new(),
             run_state: WorksRunState::Idle,
             confirm_delete: None,
+            confirm_accept_all: None,
         }
     }
 }
@@ -115,6 +119,7 @@ impl WorksViewState {
 #[derive(Default)]
 pub struct WorksViewOutcome {
     pub open_in_gallery: Option<LabelId>,
+    pub open_belongs_in_gallery: Option<(LabelId, String)>,
     pub start_match: bool,
     pub cancel_match: bool,
     pub catalog_mutated: bool,
@@ -130,6 +135,7 @@ pub fn draw(
     palette: &Palette,
     state: &mut WorksViewState,
     works: &[WorkSummary],
+    roots: &[PathBuf],
     cat: Option<&mut Catalog>,
     worker_running: bool,
     other_heavy_task: Option<&str>,
@@ -143,6 +149,7 @@ pub fn draw(
     let mut create_proposals: Vec<String> = Vec::new();
     let mut select_changed = false;
     let mut delete_work: Option<LabelId> = None;
+    let mut accept_all_work: Option<LabelId> = None;
     // A running worker would write against the deleted work.
     let busy = worker_running || other_heavy_task.is_some();
 
@@ -178,8 +185,9 @@ pub fn draw(
                 ui.add_space(theme::SPACE_XS);
                 ui.label(
                     RichText::new(format!(
-                        "{} · {}",
-                        count_phrase(work.images, "imagen", "imágenes"),
+                        "Pertenecen: {} · Menciones: {} · {}",
+                        work.belongs_to,
+                        work.images,
                         count_phrase(work.aliases, "alias adicional", "alias adicionales"),
                     ))
                     .size(theme::FONT_SMALL)
@@ -187,8 +195,72 @@ pub fn draw(
                 );
                 ui.add_space(theme::SPACE_SM);
 
-                if ui.button("Ver imágenes en la galería").clicked() {
-                    outcome.open_in_gallery = Some(work.label);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            work.belongs_to > 0,
+                            egui::Button::new("Ver páginas por capítulo"),
+                        )
+                        .on_hover_text(
+                            "Mostrar en la galería las imágenes que pertenecen a esta obra ordenadas por capítulo y página",
+                        )
+                        .clicked()
+                    {
+                        outcome.open_belongs_in_gallery = Some((work.label, work.name.clone()));
+                    }
+                    if ui
+                        .button("Ver menciones")
+                        .on_hover_text("Mostrar en la galería las imágenes que mencionan esta obra")
+                        .clicked()
+                    {
+                        outcome.open_in_gallery = Some(work.label);
+                    }
+                });
+
+                if work.belongs_to_suggested > 0 {
+                    ui.add_space(theme::SPACE_SM);
+                    if state.confirm_accept_all == Some(work.label) {
+                        ui.label(
+                            RichText::new(format!(
+                                "¿Confirmar las {} pendientes de pertenencia a «{}»?",
+                                count_phrase(
+                                    work.belongs_to_suggested,
+                                    "sugerencia",
+                                    "sugerencias",
+                                ),
+                                work.name
+                            ))
+                            .size(theme::FONT_SMALL),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    theme::primary_button(palette, "Sí, confirmar todas"),
+                                )
+                                .clicked()
+                            {
+                                accept_all_work = Some(work.label);
+                            }
+                            if ui.button("Cancelar").clicked() {
+                                state.confirm_accept_all = None;
+                            }
+                        });
+                    } else if ui
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(format!(
+                                "Confirmar sugerencias ({})",
+                                work.belongs_to_suggested
+                            )),
+                        )
+                        .on_hover_text(
+                            "Confirma todas las sugerencias pendientes de pertenencia de esta obra",
+                        )
+                        .clicked()
+                    {
+                        state.confirm_accept_all = Some(work.label);
+                    }
                 }
 
                 ui.add_space(theme::SPACE_MD);
@@ -516,14 +588,31 @@ pub fn draw(
                                     Vec2::new(ui.available_width(), inner_h),
                                     Layout::right_to_left(Align::Center),
                                     |ui| {
-                                        let img_btn_label =
-                                            count_phrase(work.images, "imagen", "imágenes");
+                                        let mentions_btn =
+                                            count_phrase(work.images, "mención", "menciones");
                                         if ui
-                                            .button(img_btn_label)
-                                            .on_hover_text("Mostrar estas imágenes en la galería")
+                                            .button(mentions_btn)
+                                            .on_hover_text(
+                                                "Mostrar en la galería las imágenes que mencionan esta obra",
+                                            )
                                             .clicked()
                                         {
                                             outcome.open_in_gallery = Some(work.label);
+                                        }
+                                        let belongs_btn =
+                                            count_phrase(work.belongs_to, "página", "páginas");
+                                        if ui
+                                            .add_enabled(
+                                                work.belongs_to > 0,
+                                                egui::Button::new(belongs_btn),
+                                            )
+                                            .on_hover_text(
+                                                "Mostrar las imágenes que pertenecen a esta obra ordenadas por capítulo y página",
+                                            )
+                                            .clicked()
+                                        {
+                                            outcome.open_belongs_in_gallery =
+                                                Some((work.label, work.name.clone()));
                                         }
                                         if work.aliases > 0 {
                                             ui.label(
@@ -737,6 +826,21 @@ pub fn draw(
                     "Se añadieron {} a la lista.",
                     count_phrase(created, "obra", "obras")
                 ));
+            }
+        }
+        if let Some(work_id) = accept_all_work {
+            state.confirm_accept_all = None;
+            match c.accept_all_suggested_work_ownership(work_id, Some(roots)) {
+                Ok(n) => {
+                    outcome.catalog_mutated = true;
+                    outcome.status_notice = Some(format!(
+                        "Se confirmaron {} de pertenencia.",
+                        count_phrase(n, "sugerencia", "sugerencias")
+                    ));
+                }
+                Err(e) => {
+                    outcome.error = Some(format!("No se pudieron confirmar las sugerencias: {e}"));
+                }
             }
         }
         if let Some(work_id) = delete_work {

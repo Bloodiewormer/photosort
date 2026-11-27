@@ -70,6 +70,15 @@ impl StageKind {
         }
     }
 
+    pub fn from_stage_str(stage: &str) -> Option<Self> {
+        match stage {
+            rules::STAGE => Some(Self::Rules),
+            VISION_STAGE => Some(Self::Vision),
+            OCR_STAGE => Some(Self::Ocr),
+            _ => None,
+        }
+    }
+
     pub fn spec(self) -> StageSpec {
         StageSpec::new(self.as_str(), self.version())
     }
@@ -234,6 +243,7 @@ struct EngineControl {
     needs_index: bool,
     priority: VecDeque<AssetId>,
     clear_failed: bool,
+    retry_assets: Vec<AssetId>,
     clear_paused_stages: Vec<StageKind>,
     config_gen: u64,
 }
@@ -274,6 +284,7 @@ impl ReviewEngine {
                 needs_index,
                 priority: VecDeque::new(),
                 clear_failed: false,
+                retry_assets: Vec::new(),
                 clear_paused_stages: Vec::new(),
                 config_gen: 1,
             }),
@@ -379,6 +390,20 @@ impl ReviewEngine {
         cvar.notify_all();
     }
 
+    /// Clears persisted errors for a single photo and queues it to be retried immediately.
+    pub fn retry_asset(&self, asset: AssetId) {
+        let (lock, cvar) = &*self.shared;
+        let mut ctrl = lock.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl.retry_assets.push(asset);
+        if !ctrl.priority.contains(&asset) {
+            ctrl.priority.push_front(asset);
+        }
+        ctrl.clear_paused_stages
+            .extend([StageKind::Rules, StageKind::Vision, StageKind::Ocr]);
+        ctrl.paused = false;
+        cvar.notify_all();
+    }
+
     pub fn try_recv(&self) -> Option<ReviewEngineEvent> {
         self.rx.try_recv().ok()
     }
@@ -443,6 +468,33 @@ impl SessionState {
     fn release_models(&mut self) {
         self.vision_reader = None;
         self.ocr_reader = None;
+    }
+
+    fn load_persisted_failures(&mut self, cat: &Catalog, roots: &[PathBuf]) {
+        if let Ok(pairs) = cat.failed_pairs_in_roots(roots) {
+            self.failed.clear();
+            for (asset, stage) in pairs {
+                if let Some(kind) = StageKind::from_stage_str(&stage) {
+                    self.failed.insert((asset, kind));
+                }
+            }
+        }
+    }
+
+    /// A photo that failed to be analysed. It is remembered across sessions only while the file can
+    /// be opened: a missing or locked file says nothing about the photo itself.
+    fn record_failure(
+        &mut self,
+        cat: &Catalog,
+        asset: AssetId,
+        stage: StageKind,
+        source: &Path,
+        reason: &str,
+    ) {
+        self.failed.insert((asset, stage));
+        if std::fs::File::open(source).is_ok() {
+            let _ = cat.record_stage_error(asset, stage.as_str(), reason);
+        }
     }
 
     fn failed_assets_count(&self) -> usize {
@@ -543,9 +595,18 @@ fn run_engine_loop(
                     return;
                 }
                 if ctrl.clear_failed {
+                    let _ = cat.clear_all_stage_errors_in_roots(&ctrl.config.roots);
                     session.failed.clear();
                     session.last_error = None;
                     ctrl.clear_failed = false;
+                }
+                if !ctrl.retry_assets.is_empty() {
+                    for id in ctrl.retry_assets.drain(..) {
+                        let _ = cat.clear_stage_errors_for_asset(id);
+                        for st in [StageKind::Rules, StageKind::Vision, StageKind::Ocr] {
+                            session.failed.remove(&(id, st));
+                        }
+                    }
                 }
                 if !ctrl.clear_paused_stages.is_empty() {
                     for stage in ctrl.clear_paused_stages.drain(..) {
@@ -555,6 +616,7 @@ fn run_engine_loop(
                 }
                 if ctrl.config_gen != last_loaded_gen {
                     session.release_models();
+                    session.load_persisted_failures(&cat, &ctrl.config.roots);
                     last_loaded_gen = ctrl.config_gen;
                 }
 
@@ -600,7 +662,8 @@ fn run_engine_loop(
                         && let Some(id) = ctrl.priority.pop_front()
                     {
                         if seen.insert(id) {
-                            // Explicit re-review clears prior session failures for this asset.
+                            // Explicit re-review clears prior failures for this asset.
+                            let _ = cat.clear_stage_errors_for_asset(id);
                             for st in [StageKind::Rules, StageKind::Vision, StageKind::Ocr] {
                                 session.failed.remove(&(id, st));
                             }
@@ -827,8 +890,14 @@ fn run_engine_loop(
                             now_reviewed: reviewed,
                         });
                     }
-                    Ok(Err(_)) => {
-                        session.failed.insert((item.asset, StageKind::Rules));
+                    Ok(Err(reason)) => {
+                        session.record_failure(
+                            &cat,
+                            item.asset,
+                            StageKind::Rules,
+                            &item.path,
+                            &reason,
+                        );
                     }
                     Err(e) => {
                         session.failed.insert((item.asset, StageKind::Rules));
@@ -920,8 +989,14 @@ fn run_engine_loop(
                                     });
                                     match dec {
                                         Ok(img) => decoded.push((item.asset, img)),
-                                        Err(_) => {
-                                            session.failed.insert((item.asset, StageKind::Vision));
+                                        Err(reason) => {
+                                            session.record_failure(
+                                                &cat,
+                                                item.asset,
+                                                StageKind::Vision,
+                                                &item.path,
+                                                &reason,
+                                            );
                                         }
                                     }
                                 }
@@ -967,8 +1042,17 @@ fn run_engine_loop(
                                                 }
                                             }
                                         }
-                                        Err(_) => {
-                                            session.failed.insert((asset, StageKind::Vision));
+                                        Err(reason) => {
+                                            let source = sub.iter().find(|i| i.asset == asset);
+                                            let source =
+                                                source.map_or(Path::new(""), |i| i.path.as_path());
+                                            session.record_failure(
+                                                &cat,
+                                                asset,
+                                                StageKind::Vision,
+                                                source,
+                                                &reason,
+                                            );
                                         }
                                     }
                                 }
@@ -1087,8 +1171,14 @@ fn run_engine_loop(
                                     }
                                 }
                             }
-                            Err(_) => {
-                                session.failed.insert((item.asset, StageKind::Ocr));
+                            Err(reason) => {
+                                session.record_failure(
+                                    &cat,
+                                    item.asset,
+                                    StageKind::Ocr,
+                                    &item.path,
+                                    &reason,
+                                );
                             }
                         }
                     }
@@ -1111,6 +1201,7 @@ fn wait_for_change(shared: &(Mutex<EngineControl>, Condvar), observed_gen: u64) 
         && !ctrl.needs_index
         && ctrl.priority.is_empty()
         && !ctrl.clear_failed
+        && ctrl.retry_assets.is_empty()
         && ctrl.clear_paused_stages.is_empty()
         && !ctrl.paused
         && !ctrl.yielded

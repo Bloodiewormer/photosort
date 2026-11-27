@@ -256,6 +256,7 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
         vec![ExportItem {
             source: a,
             labels: vec![],
+            belongs_to: None,
         }],
         true,
         Some(lib.join("inside")),
@@ -303,6 +304,7 @@ fn wizard_cancel_stops_background_export_and_writes_manifest() {
         items.push(ExportItem {
             source: p,
             labels: vec![],
+            belongs_to: None,
         });
     }
     let root = LibraryRoot::new(&lib).unwrap();

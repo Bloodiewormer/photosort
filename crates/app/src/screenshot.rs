@@ -32,6 +32,7 @@ pub enum CaptureView {
     Duplicates,
     Works,
     Tags,
+    Errors,
     Export,
     Menu,
 }
@@ -71,7 +72,7 @@ pub fn usage_text() -> &'static str {
     "Uso: photosort [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
      [--screenshot <salida.png>] [--screenshot-delay-frames <N>] \
      [--window-size <Ancho>x<Alto>] [--theme dark|light] \
-     [--view gallery|settings|welcome|suggestions|duplicates|works|tags|export|menu]"
+     [--view gallery|settings|welcome|suggestions|duplicates|works|tags|errors|export|menu]"
 }
 
 pub fn parse_window_size(raw: &str) -> Result<[u32; 2], String> {
@@ -127,13 +128,15 @@ pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
         Ok(CaptureView::Works)
     } else if raw.eq_ignore_ascii_case("tags") {
         Ok(CaptureView::Tags)
+    } else if raw.eq_ignore_ascii_case("errors") {
+        Ok(CaptureView::Errors)
     } else if raw.eq_ignore_ascii_case("export") {
         Ok(CaptureView::Export)
     } else if raw.eq_ignore_ascii_case("menu") {
         Ok(CaptureView::Menu)
     } else {
         Err(format!(
-            "Vista inválida para --view: '{raw}' (usa 'gallery', 'settings', 'welcome', 'suggestions', 'duplicates', 'works', 'tags', 'export' o 'menu')"
+            "Vista inválida para --view: '{raw}' (usa 'gallery', 'settings', 'welcome', 'suggestions', 'duplicates', 'works', 'tags', 'errors', 'export' o 'menu')"
         ))
     }
 }
@@ -345,7 +348,9 @@ impl CaptureState {
                         !signals.has_entries
                             || (signals.thumbs_ready && signals.preview_ready && signals.menu_open)
                     }
-                    CaptureView::Suggestions | CaptureView::Duplicates => signals.thumbs_ready,
+                    CaptureView::Suggestions | CaptureView::Duplicates | CaptureView::Errors => {
+                        signals.thumbs_ready
+                    }
                     CaptureView::Settings
                     | CaptureView::Welcome
                     | CaptureView::Works
@@ -396,6 +401,10 @@ impl CaptureState {
                             }
                             CaptureView::Tags => {
                                 "Tiempo de espera agotado esperando Etiquetas.".into()
+                            }
+                            CaptureView::Errors => {
+                                "Tiempo de espera agotado esperando las miniaturas de Errores."
+                                    .into()
                             }
                             CaptureView::Export => {
                                 "Tiempo de espera agotado esperando la vista previa del asistente de exportación."

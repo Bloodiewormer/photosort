@@ -2,8 +2,8 @@ use crate::model::{format_bytes, format_timestamp_utc};
 use crate::theme::{self, Palette};
 use crate::views::gallery::fit_rect;
 use catalog::{
-    AssetId, Assignment, DetectedFace, Entry, LabelId, LabelKind, OcrLine, SCREENSHOT_CATEGORY,
-    Source, Status, WorkSummary,
+    AssetId, AssetWork, Assignment, DetectedFace, Entry, LabelId, LabelKind, OcrLine,
+    SCREENSHOT_CATEGORY, Source, Status, WorkSummary,
 };
 use eframe::egui::{
     self, Align, Color32, CornerRadius, Frame, Id, Key, Layout, Margin, Rect, RichText, ScrollArea,
@@ -17,6 +17,7 @@ pub const NEW_LABEL_INPUT_ID: &str = "photosort_inspector_new_label";
 pub struct InspectorState {
     pub asset: Option<AssetId>,
     pub labels: Vec<Assignment>,
+    pub asset_work: Option<AssetWork>,
     pub ocr_lines: Vec<OcrLine>,
     pub ocr_done: bool,
     pub faces: Vec<DetectedFace>,
@@ -34,6 +35,7 @@ impl Default for InspectorState {
         Self {
             asset: None,
             labels: Vec::new(),
+            asset_work: None,
             ocr_lines: Vec::new(),
             ocr_done: false,
             faces: Vec::new(),
@@ -54,6 +56,8 @@ pub struct InspectorOutcome {
     pub review_asset: Option<AssetId>,
     pub accept_action: Option<(AssetId, LabelId)>,
     pub reject_action: Option<(AssetId, LabelId)>,
+    pub accept_work: Option<AssetId>,
+    pub reject_work: Option<AssetId>,
     pub add_user_label: Option<(AssetId, LabelKind, String)>,
     pub create_work_from_ocr: Option<(AssetId, String)>,
     pub add_alias_from_ocr: Option<(AssetId, LabelId, String)>,
@@ -237,6 +241,88 @@ pub fn draw(
                     });
 
                 ui.add_space(theme::SPACE_SM);
+
+                // Section 1b: Pertenece a (work ownership from filename, separate from OCR mentions)
+                if let Some(aw) = &state.asset_work {
+                    egui::CollapsingHeader::new(RichText::new("Pertenece a").strong())
+                        .id_salt("inspector_sec_belongs_to")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            Frame::new()
+                                .fill(palette.bg_card.color32())
+                                .stroke(Stroke::new(1.0, palette.border.color32()))
+                                .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(&aw.work_name).strong());
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                let (st_text, st_color) = match aw.status {
+                                                    Status::Accepted => (
+                                                        "Confirmada",
+                                                        palette.status_accepted_fg.color32(),
+                                                    ),
+                                                    Status::Rejected => (
+                                                        "Descartada",
+                                                        palette.status_rejected_fg.color32(),
+                                                    ),
+                                                    Status::Suggested => (
+                                                        "Sugerida",
+                                                        palette.status_suggested_fg.color32(),
+                                                    ),
+                                                };
+                                                ui.label(
+                                                    RichText::new(st_text)
+                                                        .size(theme::FONT_SMALL)
+                                                        .color(st_color),
+                                                );
+                                            },
+                                        );
+                                    });
+                                    let mut parts = Vec::new();
+                                    if !aw.chapter.is_empty() {
+                                        parts.push(format!("Capítulo {}", aw.chapter));
+                                    }
+                                    if let Some(p) = aw.page {
+                                        parts.push(format!("Página {p}"));
+                                    }
+                                    if !parts.is_empty() {
+                                        ui.label(
+                                            RichText::new(parts.join(" · "))
+                                                .size(theme::FONT_SMALL)
+                                                .color(palette.text_primary.color32()),
+                                        );
+                                    }
+                                    let src = if aw.source == Source::Rules {
+                                        "Nombre de archivo"
+                                    } else {
+                                        source_label(aw.source)
+                                    };
+                                    ui.label(
+                                        RichText::new(src)
+                                            .size(theme::FONT_SMALL)
+                                            .color(palette.text_secondary.color32()),
+                                    );
+                                    ui.add_space(theme::SPACE_XS);
+                                    ui.horizontal_wrapped(|ui| {
+                                        if aw.status != Status::Accepted
+                                            && ui.button("Confirmar").clicked()
+                                        {
+                                            outcome.accept_work = Some(entry.asset);
+                                        }
+                                        if aw.status != Status::Rejected
+                                            && ui.button("No es esta").clicked()
+                                        {
+                                            outcome.reject_work = Some(entry.asset);
+                                        }
+                                    });
+                                });
+                        });
+                    ui.add_space(theme::SPACE_SM);
+                }
 
                 // Section 2: Texto (OCR)
                 let is_screenshot = state.labels.iter().any(|a| {

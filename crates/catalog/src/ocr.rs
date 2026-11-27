@@ -108,6 +108,10 @@ impl Catalog {
              WHERE analysis.version < excluded.version",
             params![asset.0, OCR_STAGE, i64::from(OCR_VERSION)],
         )?;
+        tx.execute(
+            "DELETE FROM stage_error WHERE asset_id = ?1 AND stage = ?2",
+            params![asset.0, OCR_STAGE],
+        )?;
         tx.commit()?;
         Ok(())
     }

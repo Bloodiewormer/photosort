@@ -23,6 +23,10 @@ pub const DEFAULT_TYPE_THRESHOLD: f32 = 0.08;
 /// UNCALIBRATED placeholder threshold for the built-in `"persona"` independent tag rule.
 pub const DEFAULT_PERSON_THRESHOLD: f32 = 0.10;
 
+/// UNCALIBRATED placeholder threshold for built-in independent content category and page-type
+/// vision rules. Users should calibrate each rule using «Probar» on their own images.
+pub const DEFAULT_CATEGORY_THRESHOLD: f32 = 0.10;
+
 /// UNCALIBRATED placeholder threshold for newly created custom independent tag rules.
 pub const DEFAULT_CUSTOM_THRESHOLD: f32 = 0.10;
 
@@ -33,6 +37,16 @@ pub const TYPE_MEME: &str = "Meme";
 pub const TYPE_DOCUMENT: &str = "Documento";
 pub const TAG_PERSON: &str = "persona";
 
+pub const CAT_ANIME: &str = "Anime";
+pub const CAT_MANHWA: &str = "Manhwa";
+pub const CAT_WEBTOON: &str = "Webtoon";
+pub const CAT_ANIMALS: &str = "Animales";
+pub const CAT_COMPUTERS_HARDWARE: &str = "Computadoras y hardware";
+pub const CAT_TECH_ELECTRONICS: &str = "Tecnología y electrónica";
+pub const CAT_NATURE_LANDSCAPES: &str = "Naturaleza y paisajes";
+pub const CAT_VIDEOGAMES: &str = "Videojuegos";
+pub const MANGA_COVER_CATEGORY: &str = "Portada de manga";
+
 const BUILTIN_KEY_MANGA: &str = "type_manga";
 const BUILTIN_KEY_ILLUSTRATION: &str = "type_illustration";
 const BUILTIN_KEY_PHOTO: &str = "type_photo";
@@ -41,7 +55,29 @@ const BUILTIN_KEY_MEME: &str = "type_meme";
 const BUILTIN_KEY_DOCUMENT: &str = "type_document";
 const BUILTIN_KEY_PERSON: &str = "tag_person";
 
+const BUILTIN_KEY_ANIME: &str = "cat_anime";
+const BUILTIN_KEY_MANHWA: &str = "cat_manhwa";
+const BUILTIN_KEY_WEBTOON: &str = "cat_webtoon";
+const BUILTIN_KEY_ANIMALS: &str = "cat_animals";
+const BUILTIN_KEY_COMPUTERS_HARDWARE: &str = "cat_computers_hardware";
+const BUILTIN_KEY_TECH_ELECTRONICS: &str = "cat_tech_electronics";
+const BUILTIN_KEY_NATURE_LANDSCAPES: &str = "cat_nature_landscapes";
+const BUILTIN_KEY_VIDEOGAMES: &str = "cat_videogames";
+const BUILTIN_KEY_MANGA_COVER: &str = "page_manga_cover";
+
+/// Keys seeded in the initial schema version under the legacy `vision_builtins_seeded = '1'` flag.
+const LEGACY_V1_BUILTIN_KEYS: &[&str] = &[
+    BUILTIN_KEY_MANGA,
+    BUILTIN_KEY_ILLUSTRATION,
+    BUILTIN_KEY_PHOTO,
+    BUILTIN_KEY_SCREENSHOT,
+    BUILTIN_KEY_MEME,
+    BUILTIN_KEY_DOCUMENT,
+    BUILTIN_KEY_PERSON,
+];
+
 const META_BUILTINS_SEEDED: &str = "vision_builtins_seeded";
+const META_BUILTIN_SEEDED_PREFIX: &str = "vision_builtin_seeded:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RuleId(pub i64);
@@ -164,6 +200,7 @@ impl CompiledVisionRules {
         }
 
         let mut winning_type_allows_face_person = false;
+        let mut winning_type_allows_manga_cover = false;
         if !type_scores.is_empty() {
             let (win_idx, &(winner, win_score)) = type_scores
                 .iter()
@@ -176,6 +213,7 @@ impl CompiledVisionRules {
             winning_type_allows_face_person = allows_face_person(winner);
 
             if win_score >= winner.threshold {
+                winning_type_allows_manga_cover = allows_manga_cover(winner);
                 let conf = type_ordering_confidence(&type_scores, win_idx);
                 out.push(VisionSuggestion {
                     label: winner.label,
@@ -191,9 +229,12 @@ impl CompiledVisionRules {
             .filter(|&s| s >= YUNET_FACE_SCORE_THRESHOLD)
             .fold(None, |acc, s| Some(acc.map_or(s, |a| a.max(s))));
 
-        // 2. Independent tag rules.
+        // 2. Independent rules (content categories, manga cover, persona, custom tags).
         for rule in &self.rules {
             if rule.mode != RuleMode::Independent {
+                continue;
+            }
+            if is_manga_cover_rule(rule) && !winning_type_allows_manga_cover {
                 continue;
             }
             let pos_score =
@@ -258,6 +299,18 @@ fn allows_face_person(rule: &CompiledRule) -> bool {
 fn is_person_rule(rule: &CompiledRule) -> bool {
     rule.builtin_key.as_deref() == Some(BUILTIN_KEY_PERSON)
         || rule.name.eq_ignore_ascii_case(TAG_PERSON)
+}
+
+fn allows_manga_cover(rule: &CompiledRule) -> bool {
+    if let Some(key) = rule.builtin_key.as_deref() {
+        return matches!(key, BUILTIN_KEY_MANGA | BUILTIN_KEY_ILLUSTRATION);
+    }
+    rule.name.eq_ignore_ascii_case(TYPE_MANGA) || rule.name.eq_ignore_ascii_case(TYPE_ILLUSTRATION)
+}
+
+fn is_manga_cover_rule(rule: &CompiledRule) -> bool {
+    rule.builtin_key.as_deref() == Some(BUILTIN_KEY_MANGA_COVER)
+        || rule.name.eq_ignore_ascii_case(MANGA_COVER_CATEGORY)
 }
 
 /// Softmax over `100.0 * cosine` for the enabled TYPE rules, returning the winner's entry.
@@ -497,6 +550,139 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
             "a text document, screenshot, or empty landscape without people",
         ],
     },
+    BuiltinSpec {
+        key: BUILTIN_KEY_ANIME,
+        kind: LabelKind::Category,
+        name: CAT_ANIME,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "an anime screenshot or anime style artwork with Japanese animation characters",
+            "a Japanese anime television series frame or anime movie still",
+            "colorful anime character illustration with cel shading",
+        ],
+        negatives: &[
+            "a real life camera photograph of real people or scenery",
+            "a plain text document or chat screenshot without anime art",
+        ],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_MANHWA,
+        kind: LabelKind::Category,
+        name: CAT_MANHWA,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a Korean manhwa comic page with full color digital art and speech bubbles",
+            "manhwa style comic panels with Korean webcomic art and dialogue",
+            "colorful Korean comic book chapter page or manhwa illustration",
+        ],
+        negatives: &[
+            "a black and white Japanese manga page",
+            "a real life camera photograph",
+        ],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_WEBTOON,
+        kind: LabelKind::Category,
+        name: CAT_WEBTOON,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a vertical scrolling webtoon comic strip in full color",
+            "long vertical webtoon panel layout with speech bubbles and digital coloring",
+            "mobile vertical comic strip webtoon episode page",
+        ],
+        negatives: &[
+            "a real life camera photograph",
+            "a printed paper text document or receipt",
+        ],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_ANIMALS,
+        kind: LabelKind::Category,
+        name: CAT_ANIMALS,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a photograph or image of a real animal, pet, dog, cat, or bird",
+            "wildlife, domestic pets, or animals outdoors or indoors",
+            "a close up picture of a cat, dog, bird, or other animal",
+        ],
+        negatives: &["a text document, chat screenshot, or webpage without animals"],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_COMPUTERS_HARDWARE,
+        kind: LabelKind::Category,
+        name: CAT_COMPUTERS_HARDWARE,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a desktop computer, PC case, graphics card, motherboard, or computer hardware",
+            "a PC desk setup with monitor, mechanical keyboard, mouse, and computer tower",
+            "computer components, CPU, RAM, SSD, laptop, or PC build",
+        ],
+        negatives: &["a natural outdoor landscape or portrait without computers"],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_TECH_ELECTRONICS,
+        kind: LabelKind::Category,
+        name: CAT_TECH_ELECTRONICS,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "modern electronics, smartphone, tablet, headphones, gadgets, or circuit board",
+            "electronic devices, cables, game consoles, microcontrollers, or tech hardware",
+            "consumer technology products, screens, audio gear, or electronic equipment",
+        ],
+        negatives: &["natural outdoor scenery or hand-drawn comic without electronics"],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_NATURE_LANDSCAPES,
+        kind: LabelKind::Category,
+        name: CAT_NATURE_LANDSCAPES,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a natural landscape photograph of mountains, forest, beach, ocean, or sky",
+            "outdoor nature scenery with trees, sunset, lake, rivers, or flowers",
+            "scenic view of countryside, hills, clouds, or natural environment",
+        ],
+        negatives: &[
+            "a smartphone chat screenshot or printed text document",
+            "an indoor computer desk or comic page with speech bubbles",
+        ],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_VIDEOGAMES,
+        kind: LabelKind::Category,
+        name: CAT_VIDEOGAMES,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a video game screenshot showing 3D or 2D gameplay, HUD, health bar, or game menu",
+            "PC or console gaming screenshot with in-game characters, map, or interface",
+            "video game cover art, gameplay scene, or retro pixel art game screen",
+        ],
+        negatives: &["a plain text document, receipt, or chat messaging app screenshot"],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_MANGA_COVER,
+        kind: LabelKind::Category,
+        name: MANGA_COVER_CATEGORY,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a colorful manga volume cover or chapter cover page with title logo and character art",
+            "a Japanese manga book cover illustration with series title text",
+            "a full-page manga color spread or front cover artwork without dialogue bubbles",
+        ],
+        negatives: &[
+            "a black and white manga chapter page with multiple panels and speech bubbles",
+            "a credits page or list of multiple small comic covers",
+            "a real life camera photograph or smartphone screenshot",
+        ],
+    },
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -530,23 +716,62 @@ impl PartialOrd for HeapItem {
 }
 
 impl Catalog {
-    /// Seeds the built-in vision rules once per catalog database. Never re-creates or overwrites
-    /// built-in rules after the user edits or deletes them.
+    /// Seeds each built-in vision rule at most once per catalog database, tracked individually by
+    /// `builtin_key`. Existing catalogs that already have the legacy `vision_builtins_seeded = '1'`
+    /// flag receive only the newer built-ins once, never recreating or overwriting edited/deleted
+    /// rules, and reusing any existing label of the same kind and name (any case) without replacing
+    /// an existing rule.
     pub(crate) fn seed_builtin_vision_rules(&mut self) -> Result<(), CatalogError> {
-        let already: Option<String> = self
+        // An up-to-date catalog must open without writing: other connections may hold the lock.
+        let mut flag = self
             .conn
-            .query_row(
-                "SELECT value FROM catalog_meta WHERE key = ?1",
-                [META_BUILTINS_SEEDED],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if already.as_deref() == Some("1") {
+            .prepare("SELECT 1 FROM catalog_meta WHERE key = ?1 AND value = '1'")?;
+        let mut missing = false;
+        for spec in BUILTIN_RULES {
+            missing |= !flag.exists([format!("{META_BUILTIN_SEEDED_PREFIX}{}", spec.key)])?;
+        }
+        drop(flag);
+        if !missing {
             return Ok(());
         }
 
-        let tx = self.conn.transaction()?;
+        // Immediate, so two connections upgrading at once wait for each other instead of failing.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let legacy_seeded = tx
+            .query_row(
+                "SELECT value FROM catalog_meta WHERE key = ?1",
+                [META_BUILTINS_SEEDED],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .as_deref()
+            == Some("1");
+
         for spec in BUILTIN_RULES {
+            let meta_key = format!("{META_BUILTIN_SEEDED_PREFIX}{}", spec.key);
+            let already = tx
+                .query_row(
+                    "SELECT value FROM catalog_meta WHERE key = ?1",
+                    [&meta_key],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .as_deref()
+                == Some("1");
+            if already {
+                continue;
+            }
+
+            if legacy_seeded && LEGACY_V1_BUILTIN_KEYS.contains(&spec.key) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES (?1, '1')",
+                    [&meta_key],
+                )?;
+                continue;
+            }
+
             let kind_str = match spec.kind {
                 LabelKind::Category => "category",
                 LabelKind::Tag => "tag",
@@ -579,6 +804,10 @@ impl Catalog {
             tx.execute(
                 "INSERT OR IGNORE INTO vision_managed_label (label_id) VALUES (?1)",
                 [label_id],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES (?1, '1')",
+                [&meta_key],
             )?;
         }
         tx.execute(
@@ -630,6 +859,10 @@ impl Catalog {
              ON CONFLICT(asset_id, stage) DO UPDATE SET version = excluded.version
              WHERE analysis.version < excluded.version",
             params![asset.0, VISION_STAGE, i64::from(VISION_VERSION)],
+        )?;
+        tx.execute(
+            "DELETE FROM stage_error WHERE asset_id = ?1 AND stage = ?2",
+            params![asset.0, VISION_STAGE],
         )?;
         tx.commit()?;
         Ok(())

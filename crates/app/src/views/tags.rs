@@ -217,9 +217,12 @@ pub fn draw(
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&rule.name).size(theme::FONT_HEADING).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let mode_text = match rule.mode {
-                            RuleMode::Type => "Tipo exclusivo",
-                            RuleMode::Independent => "Etiqueta independiente",
+                        let mode_text = match (rule.mode, rule.kind) {
+                            (RuleMode::Type, _) => "Tipo exclusivo",
+                            (RuleMode::Independent, LabelKind::Category) => {
+                                "Categoría independiente"
+                            }
+                            (RuleMode::Independent, _) => "Etiqueta independiente",
                         };
                         ui.label(
                             RichText::new(mode_text)
@@ -666,9 +669,13 @@ pub fn draw(
                         .iter()
                         .filter(|r| r.mode == RuleMode::Type)
                         .collect();
-                    let ind_rules: Vec<&VisionRule> = rules
+                    let ind_cat_rules: Vec<&VisionRule> = rules
                         .iter()
-                        .filter(|r| r.mode == RuleMode::Independent)
+                        .filter(|r| r.mode == RuleMode::Independent && r.kind == LabelKind::Category)
+                        .collect();
+                    let ind_tag_rules: Vec<&VisionRule> = rules
+                        .iter()
+                        .filter(|r| r.mode == RuleMode::Independent && r.kind != LabelKind::Category)
                         .collect();
 
                     for (heading, subtitle, group) in [
@@ -678,9 +685,14 @@ pub fn draw(
                             type_rules,
                         ),
                         (
+                            "Categorías independientes",
+                            "Se combinan libremente con el tipo de imagen. «Portada de manga» solo se sugiere cuando el tipo ganador es Manga o Ilustración",
+                            ind_cat_rules,
+                        ),
+                        (
                             "Etiquetas independientes",
                             "Se evalúan por separado. «persona» también se activa con rostros YuNet ≥ 0,80 en Foto, Meme o Capturas de pantalla",
-                            ind_rules,
+                            ind_tag_rules,
                         ),
                     ] {
                         ui.label(RichText::new(heading).strong());

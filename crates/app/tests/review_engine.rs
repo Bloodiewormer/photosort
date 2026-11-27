@@ -955,7 +955,8 @@ fn a_result_the_catalog_rejects_is_not_analysed_over_and_over() {
             }])
         }
     }
-    let (_tmp, roots, _cat, db) = indexed(&["lib"], &six_files());
+    let (_tmp, roots, cat, db) = indexed(&["lib"], &six_files());
+    let stage_roots = roots.clone();
     let analysed: Arc<AtomicUsize> = Arc::default();
     let counter = Arc::clone(&analysed);
     let cfg = ReviewConfig {
@@ -977,4 +978,160 @@ fn a_result_the_catalog_rejects_is_not_analysed_over_and_over() {
     std::thread::sleep(Duration::from_millis(1500));
     let count = analysed.load(Ordering::SeqCst);
     assert!((1..=6).contains(&count), "analysed {count} times");
+    // The catalog failed, not the photo: nothing may be held back in later sessions.
+    assert!(
+        cat.list_stage_errors_in_roots(&stage_roots)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_photo_that_cannot_be_opened_is_not_marked_as_broken_for_later_sessions() {
+    let (_tmp, roots, cat, db) = indexed(&["lib"], &[("lib/gone.png", [1, 2, 3, 255])]);
+    // Same effect as a drive unplugged while a chunk is running: the engine has already picked
+    // the photo when the model loads.
+    let gone = roots[0].join("gone.png");
+    let calls: Arc<AtomicUsize> = Arc::default();
+    let counter = Arc::clone(&calls);
+    let cfg = ReviewConfig {
+        enabled: true,
+        rules: false,
+        vision: false,
+        ocr: true,
+        roots: roots.clone(),
+        ..Default::default()
+    };
+    let engine = ReviewEngine::start_with_loaders(
+        db,
+        cfg,
+        Box::new(|_, _| Err("unused".into())),
+        Box::new(move |_, _| {
+            let _ = fs::remove_file(&gone);
+            Ok(Box::new(FakeOcr {
+                active_gpu: Arc::new(AtomicUsize::new(1)),
+                concurrent_violation: Arc::default(),
+                fail_name: Some("gone".into()),
+                calls: Arc::clone(&counter),
+                text_prefix: String::new(),
+                delay_ms: 0,
+            }))
+        }),
+        None,
+    );
+    assert!(wait_until(&engine, Duration::from_secs(5), |ev| matches!(
+        ev,
+        ReviewEngineEvent::Status(s) if matches!(s.phase, EnginePhase::Idle) && s.failed_count == 1
+    )));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(cat.list_stage_errors_in_roots(&roots).unwrap().is_empty());
+}
+
+#[test]
+fn persisted_stage_errors_are_skipped_across_sessions_until_retried() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    write_png(&lib.join("good.png"), [10, 200, 10, 255]);
+    write_png(&lib.join("bad.png"), [200, 10, 10, 255]);
+    let root = LibraryRoot::new(&lib).unwrap();
+    let roots = vec![root.as_path().to_path_buf()];
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db_path = data.join("catalog.sqlite");
+    let db0 = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+    let db1 = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+    let db2 = ensure_writable(&db_path, std::slice::from_ref(&root)).unwrap();
+
+    let mut cat = Catalog::open(&db0).unwrap();
+    cat.index(&root).unwrap();
+    let bad_asset = cat
+        .asset_of(&dunce::canonicalize(lib.join("bad.png")).unwrap())
+        .unwrap()
+        .unwrap();
+
+    // Session 1: OCR fails on "bad.png".
+    let calls_1 = Arc::new(AtomicUsize::new(0));
+    let calls_1_bg = Arc::clone(&calls_1);
+    let active_1 = Arc::new(AtomicUsize::new(0));
+    let viol_1 = Arc::new(AtomicBool::new(false));
+    let cfg = ReviewConfig {
+        enabled: true,
+        rules: false,
+        vision: false,
+        ocr: true,
+        roots: roots.clone(),
+        ..Default::default()
+    };
+    let engine1 = ReviewEngine::start_with_loaders(
+        db1,
+        cfg.clone(),
+        Box::new(|_, _| Err("unused".into())),
+        Box::new(move |_, _| {
+            active_1.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeOcr {
+                active_gpu: Arc::clone(&active_1),
+                concurrent_violation: Arc::clone(&viol_1),
+                fail_name: Some("bad".into()),
+                calls: Arc::clone(&calls_1_bg),
+                text_prefix: "ok".into(),
+                delay_ms: 0,
+            }))
+        }),
+        None,
+    );
+    assert!(eventually(|| cat
+        .count_stage_error_assets_in_roots(&roots)
+        .unwrap()
+        == 1));
+    drop(engine1);
+
+    let persisted = cat.list_stage_errors_in_roots(&roots).unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].asset, bad_asset);
+    assert_eq!(persisted[0].stage, OCR_STAGE);
+    assert!(!persisted[0].reason.contains("bad.png"));
+
+    // Session 2: a fresh engine starts with a working OCR reader, but MUST skip the persisted failure!
+    let calls_2 = Arc::new(AtomicUsize::new(0));
+    let calls_2_bg = Arc::clone(&calls_2);
+    let active_2 = Arc::new(AtomicUsize::new(0));
+    let viol_2 = Arc::new(AtomicBool::new(false));
+    let engine2 = ReviewEngine::start_with_loaders(
+        db2,
+        cfg,
+        Box::new(|_, _| Err("unused".into())),
+        Box::new(move |_, _| {
+            active_2.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeOcr {
+                active_gpu: Arc::clone(&active_2),
+                concurrent_violation: Arc::clone(&viol_2),
+                fail_name: None,
+                calls: Arc::clone(&calls_2_bg),
+                text_prefix: "ok".into(),
+                delay_ms: 0,
+            }))
+        }),
+        None,
+    );
+    // Wait until engine2 goes Idle without retrying bad.png.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw_idle = false;
+    while Instant::now() < deadline {
+        if let Ok(ReviewEngineEvent::Status(s)) = engine2.recv_timeout(Duration::from_millis(50))
+            && matches!(s.phase, EnginePhase::Idle)
+        {
+            assert_eq!(s.failed_count, 1);
+            saw_idle = true;
+            break;
+        }
+    }
+    assert!(saw_idle);
+    assert_eq!(calls_2.load(Ordering::SeqCst), 0);
+
+    // Explicit retry_asset clears the persisted error and processes bad.png!
+    engine2.retry_asset(bad_asset);
+    assert!(eventually(|| cat.has_ocr_done(bad_asset).unwrap()));
+    assert_eq!(cat.count_stage_error_assets_in_roots(&roots).unwrap(), 0);
+    assert_eq!(calls_2.load(Ordering::SeqCst), 1);
+    drop(engine2);
 }

@@ -44,6 +44,7 @@ impl Setup {
         ExportItem {
             source: self.library.join(rel),
             labels: vec![],
+            belongs_to: None,
         }
     }
 
@@ -276,6 +277,7 @@ fn the_csv_manifest_quotes_fields_that_contain_commas() {
             ExportItem {
                 source: weird,
                 labels: vec![],
+                belongs_to: None,
             },
         ],
         &s.dest,
@@ -292,16 +294,19 @@ fn the_csv_manifest_quotes_fields_that_contain_commas() {
             "sha256",
             "size",
             "status",
-            "labels"
+            "labels",
+            "belongs_to_work",
+            "belongs_to_chapter",
+            "belongs_to_page"
         ]
     );
     let a = csv_fields(lines[1]);
     assert_eq!(
         (a.len(), a[4].as_str(), a[5].as_str()),
-        (6, "copied", "tag:meme")
+        (9, "copied", "tag:meme")
     );
     let b = csv_fields(lines[2]);
-    assert_eq!(b.len(), 6, "{}", lines[2]);
+    assert_eq!(b.len(), 9, "{}", lines[2]);
     assert!(b[0].ends_with("one, two.jpg"));
 }
 
@@ -785,4 +790,58 @@ fn export_with_completed_run_reports_stopped_false_and_all_progress_steps() {
     assert_eq!(seen, vec![(1, 3), (2, 3), (3, 3)]);
     assert!(!report.stopped);
     assert_eq!(report.outcomes.len(), 3);
+}
+
+#[test]
+fn export_manifest_includes_belongs_to_in_json_and_csv_and_omits_rejected() {
+    use catalog::{AssetId, AssetWork};
+
+    let s = setup();
+    let mut a = s.item("a.jpg");
+    a.belongs_to = Some(AssetWork {
+        asset: AssetId(1),
+        work: LabelId(10),
+        work_name: "¡Quiero ser alabado por una Gal Gamer!".into(),
+        chapter: "23.00".into(),
+        page: Some(7),
+        source: Source::Rules,
+        confidence: 0.85,
+        status: Status::Accepted,
+    });
+    let mut b = s.item("sub/b.png");
+    b.belongs_to = Some(AssetWork {
+        asset: AssetId(2),
+        work: LabelId(11),
+        work_name: "Obra Rechazada".into(),
+        chapter: "1".into(),
+        page: Some(1),
+        source: Source::Rules,
+        confidence: 0.85,
+        status: Status::Rejected,
+    });
+
+    let report = export(&[a, b], &s.dest).unwrap();
+
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report.manifest_json).unwrap()).unwrap();
+    assert_eq!(
+        json["files"][0]["belongs_to"]["work"],
+        "¡Quiero ser alabado por una Gal Gamer!"
+    );
+    assert_eq!(json["files"][0]["belongs_to"]["chapter"], "23.00");
+    assert_eq!(json["files"][0]["belongs_to"]["page"], 7);
+    assert_eq!(json["files"][0]["belongs_to"]["status"], "accepted");
+    assert!(json["files"][1]["belongs_to"].is_null());
+
+    let csv = fs::read_to_string(&report.manifest_csv).unwrap();
+    let lines: Vec<&str> = csv.lines().collect();
+    let row0 = csv_fields(lines[1]);
+    assert_eq!(row0[6], "¡Quiero ser alabado por una Gal Gamer!");
+    assert_eq!(row0[7], "23.00");
+    assert_eq!(row0[8], "7");
+    let row1 = csv_fields(lines[2]);
+    assert_eq!(
+        (row1[6].as_str(), row1[7].as_str(), row1[8].as_str()),
+        ("", "", "")
+    );
 }

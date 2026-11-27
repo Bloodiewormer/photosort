@@ -2,6 +2,7 @@ use crate::{AssetId, Catalog, CatalogError, StageSpec};
 use rusqlite::{ToSql, params, params_from_iter};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const ASSET_CHUNK_SIZE: usize = 500;
 
@@ -16,6 +17,83 @@ pub struct ReviewedCounts {
     pub all: usize,
     pub pending: usize,
     pub reviewed: usize,
+}
+
+/// Persistent record of a failed analysis stage for one asset.
+/// `reason` is always a short curated Spanish category and never contains OCR text, file paths or file names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageErrorRecord {
+    pub asset: AssetId,
+    pub path: PathBuf,
+    pub sha256: String,
+    pub stage: String,
+    pub reason: String,
+    pub last_at_secs: i64,
+    pub attempts: u32,
+}
+
+/// Maps any raw error message to a short, fixed Spanish reason string so persisted stage errors
+/// can NEVER contain OCR text, file paths, or file names.
+pub fn sanitize_stage_error_reason(stage: &str, raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let msg = if lower.contains("not found")
+        || lower.contains("no such file")
+        || lower.contains("os error 2")
+        || lower.contains("os error 3")
+        || lower.contains("cannot find")
+        || lower.contains("no existe")
+    {
+        "Archivo no encontrado"
+    } else if lower.contains("permission")
+        || lower.contains("access is denied")
+        || lower.contains("os error 5")
+        || lower.contains("os error 13")
+        || lower.contains("permiso")
+    {
+        "Sin permiso para leer el archivo"
+    } else if lower.contains("database")
+        || lower.contains("sqlite")
+        || lower.contains("locked")
+        || lower.contains("busy")
+        || lower.contains("disk")
+        || lower.contains("full")
+        || lower.contains("catálogo")
+        || lower.contains("catalogo")
+    {
+        "Error al guardar en el catálogo"
+    } else if lower.contains("corrupt")
+        || lower.contains("invalid")
+        || lower.contains("decode")
+        || lower.contains("decodificar")
+        || lower.contains("unsupported")
+        || lower.contains("format")
+        || lower.contains("header")
+        || lower.contains("eof")
+        || lower.contains("truncated")
+        || lower.contains("image error")
+        || lower.contains("no se pudo leer la imagen")
+    {
+        "No se pudo leer la imagen"
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "Tiempo de espera agotado"
+    } else if lower.contains("interno") || lower.contains("panic") {
+        "Error interno al analizar"
+    } else {
+        match stage {
+            "rules" => "No se pudieron leer los metadatos",
+            "vision" => "Error en el reconocimiento visual",
+            "ocr" => "Error al leer el texto",
+            _ => "Error al analizar la foto",
+        }
+    };
+    msg.to_string()
+}
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 impl Catalog {
@@ -238,6 +316,7 @@ impl Catalog {
     }
 
     /// Records that `asset` completed `stage` at `version`. Never lowers a recorded version.
+    /// Also clears any persisted error record for `(asset, stage)`.
     pub fn mark_done(&self, asset: AssetId, stage: &str, version: u32) -> Result<(), CatalogError> {
         self.conn.execute(
             "INSERT INTO analysis (asset_id, stage, version)
@@ -246,11 +325,15 @@ impl Catalog {
              WHERE analysis.version < excluded.version",
             params![asset.0, stage, i64::from(version)],
         )?;
+        self.conn.execute(
+            "DELETE FROM stage_error WHERE asset_id = ?1 AND stage = ?2",
+            params![asset.0, stage],
+        )?;
         Ok(())
     }
 
-    /// Removes `analysis` rows for the given `assets` and `stages` so they are re-processed.
-    /// Never touches `asset_label`, `ocr_line`, `asset_embedding`, or `asset_face`.
+    /// Removes `analysis` and `stage_error` rows for the given `assets` and `stages` so they are
+    /// re-processed. Never touches `asset_label`, `ocr_line`, `asset_embedding`, or `asset_face`.
     pub fn reset_stages(
         &mut self,
         assets: &[AssetId],
@@ -270,11 +353,6 @@ impl Catalog {
         let mut deleted = 0usize;
         for chunk in unique.chunks(ASSET_CHUNK_SIZE) {
             let asset_marks = vec!["?"; chunk.len()].join(",");
-            let sql = format!(
-                "DELETE FROM analysis
-                 WHERE asset_id IN ({asset_marks})
-                   AND stage IN ({stage_marks})"
-            );
             let mut args: Vec<Box<dyn ToSql>> = Vec::with_capacity(chunk.len() + stages.len());
             for id in chunk {
                 args.push(Box::new(id.0));
@@ -282,10 +360,182 @@ impl Catalog {
             for &stage in stages {
                 args.push(Box::new(stage.to_string()));
             }
+            let sql = format!(
+                "DELETE FROM analysis
+                 WHERE asset_id IN ({asset_marks})
+                   AND stage IN ({stage_marks})"
+            );
             deleted += tx.execute(&sql, params_from_iter(args.iter()))?;
+            let err_sql = format!(
+                "DELETE FROM stage_error
+                 WHERE asset_id IN ({asset_marks})
+                   AND stage IN ({stage_marks})"
+            );
+            tx.execute(&err_sql, params_from_iter(args.iter()))?;
         }
         tx.commit()?;
         Ok(deleted)
+    }
+
+    /// Persists a stage failure for `(asset, stage)` with a sanitized short reason, current
+    /// timestamp, and incremented attempt count.
+    pub fn record_stage_error(
+        &self,
+        asset: AssetId,
+        stage: &str,
+        raw_reason: &str,
+    ) -> Result<(), CatalogError> {
+        let reason = sanitize_stage_error_reason(stage, raw_reason);
+        let now = now_unix_secs();
+        self.conn.execute(
+            "INSERT INTO stage_error (asset_id, stage, reason, last_at_secs, attempts)
+             VALUES (?1, ?2, ?3, ?4, 1)
+             ON CONFLICT(asset_id, stage) DO UPDATE SET
+                 reason = excluded.reason,
+                 last_at_secs = excluded.last_at_secs,
+                 attempts = stage_error.attempts + 1",
+            params![asset.0, stage, reason, now],
+        )?;
+        Ok(())
+    }
+
+    /// Clears any persisted error record for `(asset, stage)`.
+    pub fn clear_stage_error(&self, asset: AssetId, stage: &str) -> Result<bool, CatalogError> {
+        let changed = self.conn.execute(
+            "DELETE FROM stage_error WHERE asset_id = ?1 AND stage = ?2",
+            params![asset.0, stage],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Clears all persisted error records for `asset` across every stage.
+    pub fn clear_stage_errors_for_asset(&self, asset: AssetId) -> Result<usize, CatalogError> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM stage_error WHERE asset_id = ?1", [asset.0])?;
+        Ok(changed)
+    }
+
+    /// Clears persisted error records for all present assets under `roots`.
+    pub fn clear_all_stage_errors_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<usize, CatalogError> {
+        if roots.is_empty() {
+            return Ok(0);
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "DELETE FROM stage_error
+             WHERE EXISTS (SELECT 1 FROM location l
+                           WHERE l.asset_id = stage_error.asset_id
+                             AND l.missing = 0
+                             AND l.root IN ({marks}))"
+        );
+        let args: Vec<Box<dyn ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn ToSql>)
+            .collect();
+        let changed = self.conn.execute(&sql, params_from_iter(args.iter()))?;
+        Ok(changed)
+    }
+
+    /// Lists persisted stage errors for present assets under `roots`, newest first.
+    /// Photos in removed folders are automatically excluded.
+    pub fn list_stage_errors_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<StageErrorRecord>, CatalogError> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT e.asset_id, MIN(l.path), a.sha256, e.stage, e.reason, e.last_at_secs, e.attempts
+             FROM stage_error e
+             JOIN asset a ON a.id = e.asset_id
+             JOIN location l ON l.asset_id = e.asset_id
+             WHERE l.missing = 0 AND l.root IN ({marks})
+             GROUP BY e.asset_id, e.stage
+             ORDER BY e.last_at_secs DESC, e.asset_id ASC, e.stage ASC"
+        );
+        let args: Vec<Box<dyn ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn ToSql>)
+            .collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+            let attempts: i64 = r.get(6)?;
+            Ok(StageErrorRecord {
+                asset: AssetId(r.get(0)?),
+                path: PathBuf::from(r.get::<_, String>(1)?),
+                sha256: r.get(2)?,
+                stage: r.get(3)?,
+                reason: r.get(4)?,
+                last_at_secs: r.get(5)?,
+                attempts: attempts.max(1) as u32,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Count of distinct present assets under `roots` that have at least one persisted stage error.
+    pub fn count_stage_error_assets_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<usize, CatalogError> {
+        if roots.is_empty() {
+            return Ok(0);
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(DISTINCT e.asset_id)
+             FROM stage_error e
+             WHERE EXISTS (SELECT 1 FROM location l
+                           WHERE l.asset_id = e.asset_id
+                             AND l.missing = 0
+                             AND l.root IN ({marks}))"
+        );
+        let args: Vec<Box<dyn ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn ToSql>)
+            .collect();
+        let count: i64 = self
+            .conn
+            .query_row(&sql, params_from_iter(args.iter()), |r| r.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Returns all persisted `(asset_id, stage)` error pairs for present assets under `roots`.
+    pub fn failed_pairs_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<HashSet<(AssetId, String)>, CatalogError> {
+        if roots.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let marks = vec!["?"; roots.len()].join(",");
+        let sql = format!(
+            "SELECT e.asset_id, e.stage
+             FROM stage_error e
+             WHERE EXISTS (SELECT 1 FROM location l
+                           WHERE l.asset_id = e.asset_id
+                             AND l.missing = 0
+                             AND l.root IN ({marks}))"
+        );
+        let args: Vec<Box<dyn ToSql>> = roots
+            .iter()
+            .map(|r| Box::new(r.to_string_lossy().into_owned()) as Box<dyn ToSql>)
+            .collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+            Ok((AssetId(r.get(0)?), r.get::<_, String>(1)?))
+        })?;
+        let mut out = HashSet::new();
+        for row in rows {
+            out.insert(row?);
+        }
+        Ok(out)
     }
 
     /// Counts present locations (matching `entries()`) that are total, pending, or reviewed
