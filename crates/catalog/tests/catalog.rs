@@ -148,7 +148,7 @@ fn indexing_recognizes_video_media_type_and_facets() {
     let mut cat = Catalog::open(&db_path(&s)).unwrap();
     cat.index(&s.root).unwrap();
 
-    let roots = [s.library.clone()];
+    let roots = [s.root.as_path().to_path_buf()];
     let facets = cat.metadata_facets_in_roots(&roots).unwrap();
     assert_eq!(facets.videos_count(), 1);
     assert_eq!(facets.photos_count(), 2);
