@@ -216,6 +216,8 @@ pub struct ThumbRequest {
 pub struct ThumbResult {
     pub sha256: String,
     pub image: Result<ColorImage, String>,
+    /// The source, when it is no longer there. A cached thumbnail may still have been loaded.
+    pub gone: Option<PathBuf>,
 }
 
 struct ThumbQueue {
@@ -297,6 +299,9 @@ impl ThumbPool {
                         Err(e) => Err(e.to_string()),
                     };
 
+                    // The cache answers without opening the original, so it is looked for here.
+                    let gone = catalog::file_is_gone(&req.source).then_some(req.source);
+
                     let should_emit = {
                         let (lock, _) = &*shared;
                         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,6 +313,7 @@ impl ThumbPool {
                         let _ = tx.send(ThumbResult {
                             sha256: req.sha256,
                             image,
+                            gone,
                         });
                         if let Some(cb) = &notify {
                             cb();

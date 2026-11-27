@@ -50,7 +50,7 @@ use fsguard::{DestPath, LibraryRoot};
 use rusqlite::{Connection, OptionalExtension, params};
 pub use scanner::MediaType;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const SCHEMA: &str = "
@@ -303,6 +303,8 @@ pub struct IndexReport {
     pub unchanged: usize,
     /// Files that were in the catalog and are no longer on disk. They are flagged, never forgotten.
     pub missing: usize,
+    /// Files that were flagged missing and are back at the same path, unchanged.
+    pub restored: usize,
     /// Files whose bytes were actually read to compute a hash.
     pub hashed: usize,
     pub errors: Vec<(PathBuf, String)>,
@@ -327,6 +329,12 @@ pub struct Counts {
     pub assets: i64,
     pub locations: i64,
     pub missing: i64,
+}
+
+/// True only when the system says there is nothing at `path`. A locked or forbidden file is not
+/// gone.
+pub fn file_is_gone(path: &Path) -> bool {
+    matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// The catalog never touches the library: it reads files and writes only to its own database.
@@ -738,6 +746,7 @@ impl Catalog {
         let root_key = root.as_path().to_string_lossy().into_owned();
         let scanned = scanner::scan(root.as_path())?;
         let total = scanned.files.len();
+        let unlisted: Vec<PathBuf> = scanned.errors.iter().map(|(p, _)| p.clone()).collect();
         let run: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(seen_run), 0) + 1 FROM location",
             [],
@@ -770,14 +779,15 @@ impl Catalog {
                     .modified
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_nanos() as i64);
-                let known: Option<(i64, Option<i64>)> = {
-                    let mut stmt =
-                        tx.prepare_cached("SELECT size, mtime_ns FROM location WHERE path = ?1")?;
-                    stmt.query_row([&path], |r| Ok((r.get(0)?, r.get(1)?)))
+                let known: Option<(i64, Option<i64>, bool)> = {
+                    let mut stmt = tx.prepare_cached(
+                        "SELECT size, mtime_ns, missing FROM location WHERE path = ?1",
+                    )?;
+                    stmt.query_row([&path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                         .optional()?
                 };
 
-                if let Some((size, remembered)) = known
+                if let Some((size, remembered, was_missing)) = known
                     && size == file.size as i64
                     && remembered.is_some()
                     && remembered == mtime
@@ -787,6 +797,7 @@ impl Catalog {
                     )?;
                     stmt.execute(params![run, path])?;
                     report.unchanged += 1;
+                    report.restored += usize::from(was_missing);
                 } else {
                     match scanner::sha256_file(&file.path) {
                         Ok(sha) => {
@@ -856,6 +867,17 @@ impl Catalog {
                 report.stopped = true;
                 return Ok(report);
             }
+        }
+
+        // What the walk could not list (no permission, locked) is not known to be gone.
+        for path in unlisted {
+            let exact = path.to_string_lossy().into_owned();
+            let below = path.join("").to_string_lossy().into_owned();
+            self.conn.execute(
+                "UPDATE location SET seen_run = ?1
+                 WHERE root = ?2 AND (path = ?3 OR substr(path, 1, length(?4)) = ?4)",
+                params![run, root_key, exact, below],
+            )?;
         }
 
         // only after the whole walk: an interrupted run must not flag the files it never reached
@@ -940,6 +962,20 @@ impl Catalog {
             })
             .optional()?;
         Ok(res)
+    }
+
+    /// Flags the location at `path` as missing, for a photo that could not be opened. Does nothing
+    /// unless the file is really gone while its library folder is still there, so an unplugged drive
+    /// does not empty the gallery. Labels and decisions are kept. Returns whether it flagged it.
+    pub fn mark_location_missing(&self, path: &Path) -> Result<bool, CatalogError> {
+        if !file_is_gone(path) || !self.root_of_path(path)?.is_some_and(|root| root.is_dir()) {
+            return Ok(false);
+        }
+        let flagged = self.conn.execute(
+            "UPDATE location SET missing = 1 WHERE path = ?1 AND missing = 0",
+            [path.to_string_lossy()],
+        )?;
+        Ok(flagged > 0)
     }
 
     /// Count of present image locations indexed under `root`.

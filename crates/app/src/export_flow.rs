@@ -229,9 +229,19 @@ pub enum ExportPhase {
     Error(String),
 }
 
+/// Of `paths`, those that are no longer there. Runs on the background threads.
+fn gone_among<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<PathBuf> {
+    paths
+        .filter(|p| catalog::file_is_gone(p))
+        .cloned()
+        .collect()
+}
+
+type PreviewMessage = (u64, Result<Preview, String>, Vec<PathBuf>);
+
 enum ExportWorkerEvent {
     Progress(ExportProgress),
-    Finished(ExportReport),
+    Finished(ExportReport, Vec<PathBuf>),
     Failed(String),
 }
 
@@ -265,7 +275,12 @@ impl ExportWorker {
             });
             match res {
                 Ok(report) => {
-                    let _ = tx.send(ExportWorkerEvent::Finished(report));
+                    let failed = report
+                        .outcomes
+                        .iter()
+                        .filter(|(_, outcome)| matches!(outcome, Outcome::Failed(_)));
+                    let gone = gone_among(failed.map(|(source, _)| source));
+                    let _ = tx.send(ExportWorkerEvent::Finished(report, gone));
                 }
                 Err(e) => {
                     let _ = tx.send(ExportWorkerEvent::Failed(io_reason(&e)));
@@ -315,7 +330,9 @@ pub struct ExportWizard {
     validation_error: Option<String>,
     cancel_requested: bool,
     preview_gen: u64,
-    preview_rx: Option<mpsc::Receiver<(u64, Result<Preview, String>)>>,
+    preview_rx: Option<mpsc::Receiver<PreviewMessage>>,
+    /// Sources found to be gone, until the application takes them.
+    gone: Vec<PathBuf>,
     export_worker: Option<ExportWorker>,
     focus_dest: bool,
 }
@@ -364,9 +381,15 @@ impl ExportWizard {
             cancel_requested: false,
             preview_gen: 0,
             preview_rx: None,
+            gone: Vec::new(),
             export_worker: None,
             focus_dest: true,
         }
+    }
+
+    /// Sources that the preview or the export did not find, so the catalog can flag them.
+    pub fn take_gone(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.gone)
     }
 
     pub fn phase(&self) -> &ExportPhase {
@@ -506,7 +529,12 @@ impl ExportWizard {
 
         thread::spawn(move || {
             let res = preview_with_options(&items, &dest_bg, options).map_err(|e| io_reason(&e));
-            let _ = tx.send((gen_id, res));
+            let gone = if res.as_ref().is_ok_and(|p| p.unreadable > 0) {
+                gone_among(items.iter().map(|item| &item.source))
+            } else {
+                Vec::new()
+            };
+            let _ = tx.send((gen_id, res, gone));
             if let Some(cb) = &notify {
                 cb();
             }
@@ -558,8 +586,9 @@ impl ExportWizard {
 
         if let Some(rx) = &self.preview_rx {
             match rx.try_recv() {
-                Ok((gen_id, res)) => {
+                Ok((gen_id, res, gone)) => {
                     self.preview_rx = None;
+                    self.gone.extend(gone);
                     if gen_id == self.preview_gen {
                         self.phase = match res {
                             Ok(preview) => ExportPhase::Preview(PreviewState::Ready(preview)),
@@ -594,7 +623,8 @@ impl ExportWizard {
                             total: p.total,
                         };
                     }
-                    ExportWorkerEvent::Finished(report) => {
+                    ExportWorkerEvent::Finished(report, gone) => {
+                        self.gone.extend(gone);
                         let dest = self
                             .validated_dest
                             .as_ref()

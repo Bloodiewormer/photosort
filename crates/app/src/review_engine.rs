@@ -5,8 +5,8 @@ use crate::vision_worker::{
 };
 use crate::worker::Notify;
 use catalog::{
-    AssetId, Catalog, Control, OCR_STAGE, OCR_VERSION, Pending, SIGLIP2_MODEL_ID, StageSpec,
-    VISION_STAGE, VISION_VERSION,
+    AssetId, Catalog, Control, IndexReport, OCR_STAGE, OCR_VERSION, Pending, SIGLIP2_MODEL_ID,
+    StageSpec, VISION_STAGE, VISION_VERSION,
 };
 use fsguard::{DestPath, LibraryRoot};
 use image::RgbImage;
@@ -31,6 +31,39 @@ pub fn chunk_reload_due(pending: bool, since_last: Duration, phase: &EnginePhase
         EnginePhase::Running { .. } | EnginePhase::LoadingModel(_) | EnginePhase::Indexing { .. }
     );
     pending && (!working || since_last >= CHUNK_RELOAD_INTERVAL)
+}
+
+/// How often the registered folders are listed again while the application stays open.
+pub const FOLDER_RECHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Decides when to look for changes in the folders: when the window gets the focus back, and every
+/// [`FOLDER_RECHECK_INTERVAL`].
+pub struct FolderRecheck {
+    was_focused: bool,
+    last: Instant,
+}
+
+impl FolderRecheck {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            was_focused: true,
+            last: now,
+        }
+    }
+
+    pub fn due(&mut self, focused: bool, now: Instant) -> bool {
+        let was_focused = std::mem::replace(&mut self.was_focused, focused);
+        let due = (focused && !was_focused) || now - self.last >= FOLDER_RECHECK_INTERVAL;
+        if due {
+            self.last = now;
+        }
+        due
+    }
+
+    /// Time left until the periodic check, so that an idle window wakes up for it.
+    pub fn remaining(&self, now: Instant) -> Duration {
+        FOLDER_RECHECK_INTERVAL.saturating_sub(now - self.last)
+    }
 }
 
 /// Number of pending assets processed together through all enabled stages before moving on.
@@ -194,6 +227,7 @@ pub enum ReviewEngineEvent {
         new: usize,
         changed: usize,
         missing: usize,
+        restored: usize,
         errors: usize,
     },
     AssetProgress {
@@ -241,6 +275,8 @@ struct EngineControl {
     yielded: bool,
     shutdown: bool,
     needs_index: bool,
+    /// The folders are being listed right now.
+    indexing: bool,
     priority: VecDeque<AssetId>,
     clear_failed: bool,
     retry_assets: Vec<AssetId>,
@@ -282,6 +318,7 @@ impl ReviewEngine {
                 yielded: false,
                 shutdown: false,
                 needs_index,
+                indexing: false,
                 priority: VecDeque::new(),
                 clear_failed: false,
                 retry_assets: Vec::new(),
@@ -360,6 +397,18 @@ impl ReviewEngine {
         let mut ctrl = lock.lock().unwrap_or_else(|e| e.into_inner());
         ctrl.needs_index = true;
         cvar.notify_all();
+    }
+
+    /// Like [`trigger_index`](Self::trigger_index), for automatic checks: does nothing when an index
+    /// is already waiting or running, so they never pile up. While the engine is paused or yielded
+    /// to a heavy task, the request waits.
+    pub fn request_index(&self) {
+        let (lock, cvar) = &*self.shared;
+        let mut ctrl = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !ctrl.needs_index && !ctrl.indexing {
+            ctrl.needs_index = true;
+            cvar.notify_all();
+        }
     }
 
     /// Queues `assets` to be processed first (even if `config.enabled` is false).
@@ -491,6 +540,11 @@ impl SessionState {
         source: &Path,
         reason: &str,
     ) {
+        // A photo that is no longer there is not a failure: once flagged, another copy of it can be
+        // analysed.
+        if cat.mark_location_missing(source).unwrap_or(false) {
+            return;
+        }
         self.failed.insert((asset, stage));
         if std::fs::File::open(source).is_ok() {
             let _ = cat.record_stage_error(asset, stage.as_str(), reason);
@@ -571,6 +625,8 @@ fn run_engine_loop(
     let mut last_loaded_gen = 0u64;
     // Requested photos taken from the queue for the current turn.
     let mut in_flight: Vec<AssetId> = Vec::new();
+    // What indexing changed and the interface has not been told yet: an interrupted run keeps it.
+    let mut unreported = IndexReport::default();
 
     loop {
         if std::mem::take(&mut session.catalog_failed) {
@@ -653,6 +709,7 @@ fn run_engine_loop(
                 let do_index = ctrl.needs_index;
                 if do_index {
                     ctrl.needs_index = false;
+                    ctrl.indexing = true;
                 }
                 let chunk_cap = ctrl.config.chunk_size.max(1);
                 let mut priority_batch = Vec::new();
@@ -690,9 +747,6 @@ fn run_engine_loop(
                 .collect();
             let root_count = valid_roots.len();
             let mut stopped = false;
-            let mut total_new = 0usize;
-            let mut total_changed = 0usize;
-            let mut total_missing = 0usize;
             let mut total_errors = 0usize;
 
             for (root_index, root) in valid_roots.into_iter().enumerate() {
@@ -718,9 +772,10 @@ fn run_engine_loop(
                 });
                 match res {
                     Ok(report) => {
-                        total_new += report.new;
-                        total_changed += report.changed;
-                        total_missing += report.missing;
+                        unreported.new += report.new;
+                        unreported.changed += report.changed;
+                        unreported.missing += report.missing;
+                        unreported.restored += report.restored;
                         total_errors += report.errors.len();
                         if report.stopped {
                             stopped = true;
@@ -734,14 +789,18 @@ fn run_engine_loop(
                 }
             }
 
-            if stopped {
+            {
                 let mut ctrl = shared.0.lock().unwrap_or_else(|e| e.into_inner());
-                ctrl.needs_index = true;
-            } else {
+                ctrl.indexing = false;
+                ctrl.needs_index |= stopped;
+            }
+            if !stopped {
+                let done = std::mem::take(&mut unreported);
                 emit(ReviewEngineEvent::IndexFinished {
-                    new: total_new,
-                    changed: total_changed,
-                    missing: total_missing,
+                    new: done.new,
+                    changed: done.changed,
+                    missing: done.missing,
+                    restored: done.restored,
                     errors: total_errors,
                 });
             }
