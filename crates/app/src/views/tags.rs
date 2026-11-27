@@ -1,7 +1,7 @@
 use crate::model::count_phrase;
 use crate::theme::{self, Palette};
 use crate::views::label_actions::{LabelAction, draw_label_menu_items, flatten_category_tree};
-use crate::views::{end_row_unless_buttons_fit, text_width};
+use crate::views::{push_buttons_to_row_end, text_width};
 use crate::vision_worker::TagsApplyEvent;
 use catalog::{
     Catalog, DEFAULT_CUSTOM_THRESHOLD, LabelKind, LabelNode, RuleId, RuleMode, VisionRule,
@@ -954,6 +954,7 @@ fn draw_rule_row(
         .horizontal(|ui| {
             crate::views::row_with_end(
                 ui,
+                rule.id,
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     let mut enabled = rule.enabled;
@@ -1017,15 +1018,13 @@ fn draw_catalog_labels_section(
                 .size(theme::FONT_HEADING)
                 .strong(),
         );
-        end_row_unless_buttons_fit(ui, &["Nueva categoría", "Nueva etiqueta"]);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Nueva etiqueta").clicked() {
-                outcome.label_action = Some(LabelAction::CreateTag);
-            }
-            if ui.button("Nueva categoría").clicked() {
-                outcome.label_action = Some(LabelAction::CreateCategory { parent: None });
-            }
-        });
+        push_buttons_to_row_end(ui, &["Nueva categoría", "Nueva etiqueta"]);
+        if ui.button("Nueva categoría").clicked() {
+            outcome.label_action = Some(LabelAction::CreateCategory { parent: None });
+        }
+        if ui.button("Nueva etiqueta").clicked() {
+            outcome.label_action = Some(LabelAction::CreateTag);
+        }
     });
     ui.label(
         RichText::new(
@@ -1091,6 +1090,7 @@ fn draw_catalog_label_row(
             ui.horizontal(|ui| {
                 crate::views::row_with_end(
                     ui,
+                    node.label,
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         if depth > 0 {

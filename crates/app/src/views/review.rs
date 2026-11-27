@@ -1,7 +1,7 @@
 use crate::model::count_phrase;
 use crate::review_flow::{ReviewDecision, ReviewFlow, THRESHOLD_MAX, THRESHOLD_MIN, UndoOutcome};
 use crate::theme::{self, Palette};
-use crate::views::end_row_unless_buttons_fit;
+use crate::views::push_buttons_to_row_end;
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::{Catalog, LabelKind, Source};
 use eframe::egui::{
@@ -253,18 +253,16 @@ pub fn draw(
                     .size(theme::FONT_HEADING)
                     .strong(),
                 );
-                end_row_unless_buttons_fit(
+                push_buttons_to_row_end(
                     ui,
                     &["Aceptar todo el grupo", "Rechazar todo el grupo"],
                 );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Rechazar todo el grupo").clicked() {
-                        request_group = Some(ReviewDecision::Reject);
-                    }
-                    if ui.button("Aceptar todo el grupo").clicked() {
-                        request_group = Some(ReviewDecision::Accept);
-                    }
-                });
+                if ui.button("Aceptar todo el grupo").clicked() {
+                    request_group = Some(ReviewDecision::Accept);
+                }
+                if ui.button("Rechazar todo el grupo").clicked() {
+                    request_group = Some(ReviewDecision::Reject);
+                }
             });
             ui.add_space(theme::SPACE_SM);
 
@@ -294,15 +292,13 @@ pub fn draw(
                                 .strong()
                                 .color(palette.review_badge_fg.color32()),
                             );
-                            end_row_unless_buttons_fit(ui, &["Confirmar", "Cancelar"]);
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Cancelar").clicked() {
-                                    cancel_group = true;
-                                }
-                                if ui.button("Confirmar").clicked() {
-                                    confirm_group = true;
-                                }
-                            });
+                            push_buttons_to_row_end(ui, &["Confirmar", "Cancelar"]);
+                            if ui.button("Confirmar").clicked() {
+                                confirm_group = true;
+                            }
+                            if ui.button("Cancelar").clicked() {
+                                cancel_group = true;
+                            }
                         });
                     });
                 ui.add_space(theme::SPACE_SM);
@@ -458,6 +454,7 @@ fn draw_row_body(
 ) -> Option<ReviewDecision> {
     let ((), decision) = crate::views::row_with_end(
         ui,
+        (row.asset, row.label),
         Layout::top_down(Align::Min),
         |ui| {
             ui.vertical(|ui| {

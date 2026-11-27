@@ -1,6 +1,6 @@
 use crate::model::count_phrase;
 use crate::theme::{self, Palette};
-use crate::views::end_row_unless_buttons_fit;
+use crate::views::push_buttons_to_row_end;
 use crate::worker::{ThumbPool, ThumbRequest};
 use crate::works_worker::WorksEvent;
 use catalog::{
@@ -560,32 +560,27 @@ pub fn draw(
                                         .strong(),
                                 );
 
-                                end_row_unless_buttons_fit(
+                                push_buttons_to_row_end(
                                     ui,
                                     &["Aceptar grupo", "Descartar grupo"],
                                 );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui
-                                        .add_enabled(
-                                            !busy,
-                                            egui::Button::new("Descartar grupo"),
-                                        )
-                                        .clicked()
-                                    {
-                                        outcome.dismiss_group =
-                                            Some((group.folder.clone(), group.work));
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            !busy,
-                                            theme::primary_button(palette, "Aceptar grupo"),
-                                        )
-                                        .clicked()
-                                    {
-                                        outcome.accept_group =
-                                            Some((group.folder.clone(), group.work));
-                                    }
-                                });
+                                if ui
+                                    .add_enabled(
+                                        !busy,
+                                        theme::primary_button(palette, "Aceptar grupo"),
+                                    )
+                                    .clicked()
+                                {
+                                    outcome.accept_group =
+                                        Some((group.folder.clone(), group.work));
+                                }
+                                if ui
+                                    .add_enabled(!busy, egui::Button::new("Descartar grupo"))
+                                    .clicked()
+                                {
+                                    outcome.dismiss_group =
+                                        Some((group.folder.clone(), group.work));
+                                }
                             });
 
                             let ch_part = if group.chapter.is_empty() {
@@ -727,63 +722,27 @@ pub fn draw(
                             ))
                             .show(ui, |ui| {
                                 let inner_h = (ROW_HEIGHT - theme::SPACE_SM * 2.0).max(24.0);
-                                ui.allocate_ui_with_layout(
-                                    Vec2::new(ui.available_width(), inner_h),
-                                    Layout::right_to_left(Align::Center),
-                                    |ui| {
-                                        let mentions_btn =
-                                            count_phrase(work.images, "mención", "menciones");
-                                        if ui
-                                            .button(mentions_btn)
-                                            .on_hover_text(
-                                                "Mostrar en la galería las imágenes que mencionan esta obra",
-                                            )
-                                            .clicked()
-                                        {
-                                            outcome.open_in_gallery = Some(work.label);
-                                        }
-                                        let belongs_btn =
-                                            count_phrase(work.belongs_to, "página", "páginas");
-                                        if ui
-                                            .add_enabled(
-                                                work.belongs_to > 0,
-                                                egui::Button::new(belongs_btn),
-                                            )
-                                            .on_hover_text(
-                                                "Mostrar las imágenes que pertenecen a esta obra ordenadas por capítulo y página",
-                                            )
-                                            .clicked()
-                                        {
-                                            outcome.open_belongs_in_gallery =
-                                                Some((work.label, work.name.clone()));
-                                        }
-                                        if work.aliases > 0 {
-                                            ui.label(
-                                                RichText::new(format!("{} alias", work.aliases))
-                                                    .size(theme::FONT_SMALL)
-                                                    .color(palette.text_secondary.color32()),
-                                            );
-                                        }
-                                        ui.with_layout(
-                                            Layout::left_to_right(Align::Center),
-                                            |ui| {
-                                                let resp = ui.add(
-                                                    egui::Button::new(
-                                                        RichText::new(&work.name)
-                                                            .color(palette.text_primary.color32())
-                                                            .strong(),
-                                                    )
-                                                    .frame(false)
-                                                    .truncate(),
-                                                );
-                                                if resp.on_hover_text(&work.name).clicked() {
-                                                    state.selected = Some(work.label);
-                                                    select_changed = true;
-                                                }
-                                            },
-                                        );
-                                    },
-                                );
+                                let action = ui
+                                    .allocate_ui_with_layout(
+                                        Vec2::new(ui.available_width(), inner_h),
+                                        Layout::left_to_right(Align::Center),
+                                        |ui| draw_work_row(ui, palette, work),
+                                    )
+                                    .inner;
+                                match action {
+                                    Some(WorkRowAction::Select) => {
+                                        state.selected = Some(work.label);
+                                        select_changed = true;
+                                    }
+                                    Some(WorkRowAction::Belongs) => {
+                                        outcome.open_belongs_in_gallery =
+                                            Some((work.label, work.name.clone()));
+                                    }
+                                    Some(WorkRowAction::Mentions) => {
+                                        outcome.open_in_gallery = Some(work.label);
+                                    }
+                                    None => {}
+                                }
                             });
                         ui.add_space(theme::SPACE_XS);
                     }
@@ -1045,6 +1004,67 @@ pub fn draw(
     outcome
 }
 
+enum WorkRowAction {
+    Select,
+    Belongs,
+    Mentions,
+}
+
+/// Name of a work, with its alias count and gallery buttons at the end.
+fn draw_work_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    work: &WorkSummary,
+) -> Option<WorkRowAction> {
+    let (select, open) = crate::views::row_with_end(
+        ui,
+        work.label,
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.add(
+                egui::Button::new(
+                    RichText::new(&work.name)
+                        .color(palette.text_primary.color32())
+                        .strong(),
+                )
+                .frame(false)
+                .truncate(),
+            )
+            .on_hover_text(&work.name)
+            .clicked()
+            .then_some(WorkRowAction::Select)
+        },
+        |ui| {
+            if work.aliases > 0 {
+                ui.label(
+                    RichText::new(format!("{} alias", work.aliases))
+                        .size(theme::FONT_SMALL)
+                        .color(palette.text_secondary.color32()),
+                );
+            }
+            let belongs = ui
+                .add_enabled(
+                    work.belongs_to > 0,
+                    egui::Button::new(count_phrase(work.belongs_to, "página", "páginas")),
+                )
+                .on_hover_text(
+                    "Mostrar las imágenes que pertenecen a esta obra ordenadas por capítulo y página",
+                )
+                .clicked();
+            let mentions = ui
+                .button(count_phrase(work.images, "mención", "menciones"))
+                .on_hover_text("Mostrar en la galería las imágenes que mencionan esta obra")
+                .clicked();
+            if belongs {
+                Some(WorkRowAction::Belongs)
+            } else {
+                mentions.then_some(WorkRowAction::Mentions)
+            }
+        },
+    );
+    select.or(open)
+}
+
 fn draw_thumb_box(
     ui: &egui::Ui,
     palette: &Palette,
@@ -1088,4 +1108,57 @@ fn fit_rect(bounds: egui::Rect, content: Vec2) -> egui::Rect {
     let size = content * scale;
     let origin = bounds.center() - size * 0.5;
     egui::Rect::from_min_size(origin, size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_visits_a_work_row_from_left_to_right() {
+        let work = WorkSummary {
+            label: LabelId(1),
+            name: "Una obra".into(),
+            aliases: 2,
+            images: 3,
+            belongs_to: 4,
+            belongs_to_suggested: 0,
+        };
+        for screen_reader in [false, true] {
+            let order = crate::views::tab_order(600.0, screen_reader, |ui| {
+                ui.horizontal(|ui| draw_work_row(ui, &theme::DARK_PALETTE, &work));
+            });
+            crate::views::assert_reading_order(&order);
+        }
+    }
+
+    #[test]
+    fn rows_with_different_buttons_stay_inside_the_list() {
+        let wide = WorkSummary {
+            label: LabelId(1),
+            name: "Una obra".into(),
+            aliases: 12,
+            images: 12345,
+            belongs_to: 6789,
+            belongs_to_suggested: 0,
+        };
+        let narrow = WorkSummary {
+            label: LabelId(2),
+            aliases: 0,
+            images: 1,
+            belongs_to: 0,
+            ..wide.clone()
+        };
+        let order = crate::views::tab_order(600.0, false, |ui| {
+            for work in [&wide, &narrow] {
+                ui.horizontal(|ui| draw_work_row(ui, &theme::DARK_PALETTE, work));
+            }
+        });
+        for rect in order {
+            assert!(
+                rect.max.x <= 600.5,
+                "una fila se sale de la lista: {rect:?}"
+            );
+        }
+    }
 }

@@ -22,9 +22,10 @@ fn text_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>, style: egui::Tex
         .x
 }
 
-/// In a wrapped row, moves to a new row when these buttons do not fit in what is left of it,
-/// so a right-aligned group never paints over the text before it.
-fn end_row_unless_buttons_fit(ui: &mut egui::Ui, labels: &[&str]) {
+/// In a wrapped row, pushes the buttons added next, in this order, to the end of the row, or of
+/// a new row when they do not fit in what is left of it, so they never paint over the text
+/// before them. Unlike a right-to-left layout, Tab visits them in reading order.
+fn push_buttons_to_row_end(ui: &mut egui::Ui, labels: &[&str]) {
     let pad = 2.0 * ui.spacing().button_padding.x + ui.spacing().item_spacing.x;
     let needed: f32 = labels
         .iter()
@@ -33,20 +34,23 @@ fn end_row_unless_buttons_fit(ui: &mut egui::Ui, labels: &[&str]) {
     if ui.available_size_before_wrap().x < needed {
         ui.end_row();
     }
+    ui.add_space((ui.available_size_before_wrap().x - needed).max(0.0));
 }
 
 /// In a horizontal `ui`, keeps room at the end for what `end` adds, so `start` shrinks instead
 /// of pushing it out. Unlike a right-to-left layout, both parts are created, and so visited
-/// by Tab, in reading order.
+/// by Tab, in reading order. `row` tells this row apart from the others in its list.
 fn row_with_end<S, E>(
     ui: &mut egui::Ui,
+    row: impl egui::AsIdSalt,
     start_layout: egui::Layout,
     start: impl FnOnce(&mut egui::Ui) -> S,
     end: impl FnOnce(&mut egui::Ui) -> E,
 ) -> (S, E) {
     // The end's size is known only once laid out: use the last one, and redo the frame when
-    // it changes. Its height keeps both parts centred on the same line.
-    let key = ui.scope_id().with("row_end_size");
+    // it changes. Its height keeps both parts centred on the same line. Sibling rows share
+    // their scope id, so the row's own key keeps each one's size apart.
+    let key = ui.scope_id().with(row).with("row_end_size");
     let end_size = ui
         .data(|d| d.get_temp::<egui::Vec2>(key))
         .unwrap_or_default();
@@ -119,5 +123,30 @@ fn assert_reading_order(order: &[egui::Rect]) {
             pair[0],
             pair[1]
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buttons_pushed_to_the_row_end_keep_reading_order() {
+        for width in [220.0, 700.0] {
+            let order = tab_order(width, false, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Una cabecera con un título bastante largo");
+                    push_buttons_to_row_end(ui, &["Aceptar", "Rechazar"]);
+                    let _ = ui.button("Aceptar");
+                    let _ = ui.button("Rechazar");
+                });
+            });
+            assert_reading_order(&order);
+            assert_eq!(order.len(), 2);
+            assert!(
+                order[1].max.x > width - 16.0 && order[0].min.y == order[1].min.y,
+                "a {width} px los botones no van juntos al final: {order:?}"
+            );
+        }
     }
 }
