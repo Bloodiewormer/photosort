@@ -2050,7 +2050,17 @@ impl eframe::App for PhotosortApp {
                     .iter()
                     .filter_map(|p| p.cover_asset_id)
                     .collect();
-                let asset_paths = self.face_thumbs(&covers);
+                let mut wanted = covers;
+                if let Some(cat) = &self.catalog
+                    && let Ok(list) = cat.unnamed_persons_with_min_photos(3)
+                    && let Some(p) = list
+                        .iter()
+                        .find(|p| !self.persons_view.postponed_persons.contains(&p.id))
+                {
+                    let faces = cat.person_faces(p.id).unwrap_or_default();
+                    wanted.extend(faces.iter().map(|f| f.asset_id));
+                }
+                let asset_paths = self.face_thumbs(&wanted);
                 let (outcome, catalog_mutated) = if let Some(cat) = &mut self.catalog {
                     let outcome = views::persons::draw(
                         ui,
@@ -2077,6 +2087,16 @@ impl eframe::App for PhotosortApp {
                                 self.banner_error =
                                     Some(format!("No se pudieron unir las personas: {e}"))
                             }
+                        }
+                    }
+                    if let Some(ids) = &outcome.merged_many {
+                        for src in &ids[1..] {
+                            if let Err(e) = cat.merge_persons(*src, ids[0]) {
+                                self.banner_error =
+                                    Some(format!("No se pudieron unir las personas: {e}"));
+                                break;
+                            }
+                            catalog_mutated = true;
                         }
                     }
                     if let Some((pid, hidden)) = outcome.toggled_hidden {
