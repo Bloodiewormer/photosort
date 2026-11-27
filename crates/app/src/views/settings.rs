@@ -98,7 +98,7 @@ pub fn draw(
                                         let count = root_counts.get(root).copied().unwrap_or(0);
                                         let full_path = root.display().to_string();
 
-                                        let row_id = egui::Id::new(("library_row", root));
+                                        let row_id = ui.scope_id().with(("library_row", root));
                                         let ((), row_area) = crate::views::row_with_click_area(
                                             ui,
                                             row_id,

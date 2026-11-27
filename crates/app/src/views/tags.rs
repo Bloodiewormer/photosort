@@ -1091,7 +1091,7 @@ fn draw_catalog_label_row(
     depth: usize,
     outcome: &mut TagsViewOutcome,
 ) {
-    let row_id = egui::Id::new(("catalog_label_row", node.label));
+    let row_id = ui.scope_id().with(("catalog_label_row", node.label));
     let ((), row_area) = crate::views::row_with_click_area(ui, row_id, |ui| {
         Frame::new()
             .fill(palette.bg_card.color32())

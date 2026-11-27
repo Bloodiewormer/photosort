@@ -331,7 +331,7 @@ pub fn draw(
                             Stroke::new(1.0, palette.border.color32())
                         };
 
-                        let card_id = egui::Id::new(("review_card", idx));
+                        let card_id = ui.scope_id().with(("review_card", idx));
                         let ((), card_area) = crate::views::row_with_click_area(ui, card_id, |ui| {
                         Frame::new()
                             .fill(bg)
