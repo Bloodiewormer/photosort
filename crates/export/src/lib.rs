@@ -86,6 +86,8 @@ pub enum Outcome {
 #[derive(Debug)]
 pub struct ExportReport {
     pub outcomes: Vec<(PathBuf, Outcome)>,
+    /// Per source, the manifest's `warning`: something optional that did not happen.
+    pub warnings: Vec<(PathBuf, String)>,
     pub manifest_json: PathBuf,
     pub manifest_csv: PathBuf,
     pub stopped: bool,
@@ -319,9 +321,7 @@ fn resolve(
             }
         }
         n += 1;
-        let target = dest
-            .join_name(&candidate)
-            .ok_or_else(|| format!("{name:?} is not a plain file name"))?;
+        let target = dest.join_name(&candidate).map_err(|e| e.to_string())?;
         if let Some(existing_sha) = reserved.get(&key(&candidate)) {
             if existing_sha == sha {
                 return Ok(Resolved { target, same: true });
@@ -367,10 +367,12 @@ fn times_of(md: &fs::Metadata) -> io::Result<FileTimes> {
 #[allow(clippy::disallowed_methods)] // creates a single subfolder component inside the DestPath destination
 fn ensure_subfolder(dir: &DestPath) -> io::Result<()> {
     match fs::create_dir(dir.as_path()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e),
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
     }
+    // What is there now may be a link, not the folder that was just asked for.
+    dir.verify().map_err(io::Error::other)
 }
 
 /// First-level folder of each library root for [`Layout::PreserveFolders`], only when the items come
@@ -407,9 +409,7 @@ fn root_folders(items: &[ExportItem]) -> HashMap<&Path, OsString> {
 fn ensure_dir_chain(dest: &DestPath, comps: &[OsString]) -> io::Result<DestPath> {
     let mut cur = dest.clone();
     for comp in comps {
-        cur = cur
-            .join_name(comp.as_os_str())
-            .ok_or_else(|| io::Error::other(format!("invalid subfolder name {comp:?}")))?;
+        cur = cur.join_name(comp).map_err(io::Error::other)?;
         ensure_subfolder(&cur)?;
     }
     Ok(cur)
@@ -419,7 +419,7 @@ fn ensure_dir_chain(dest: &DestPath, comps: &[OsString]) -> io::Result<DestPath>
 fn resolve_target_dir(dest: &DestPath, comps: &[OsString]) -> Option<DestPath> {
     let mut cur = dest.clone();
     for comp in comps {
-        cur = cur.join_name(comp.as_os_str())?;
+        cur = cur.join_name(comp).ok()?;
     }
     Some(cur)
 }
@@ -439,6 +439,7 @@ fn write_verified(
     let mut created = false;
     let result = (|| {
         let mut src = File::open(source)?;
+        part.verify().map_err(io::Error::other)?;
         let mut out = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -453,6 +454,8 @@ fn write_verified(
         }
         out.set_times(times_of(md)?)?;
         drop(out);
+        // A long copy gives time for the folder to change under us.
+        target.verify().map_err(io::Error::other)?;
         if fs::symlink_metadata(target.as_path()).is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -487,7 +490,7 @@ fn embed_jpeg_copy(
     tagpart_name.push(".tagpart");
     let tagpart = target_dir
         .join_name(&tagpart_name)
-        .ok_or("the temporary tagging name is not valid")?;
+        .map_err(|e| e.to_string())?;
 
     let mut created = false;
     let write_res = (|| -> io::Result<String> {
@@ -616,7 +619,7 @@ fn copy_one(
         part_name.push(".part");
         let part = target_dir
             .join_name(&part_name)
-            .ok_or("the temporary name is not valid")?;
+            .map_err(|e| e.to_string())?;
         write_verified(&item.source, &part, &resolved.target, &sha, &md)
             .map_err(|e| e.to_string())?;
         Outcome::Copied(path.clone())
@@ -633,7 +636,7 @@ fn copy_one(
             // An identical sidecar from an earlier export is kept instead of adding `name (1).xmp`.
             let same = target_dir
                 .join_name(OsStr::new(&format!("{base_name}.xmp")))
-                .is_some_and(|p| fs::read(p.as_path()).is_ok_and(|b| b == xmp_xml.as_bytes()));
+                .is_ok_and(|p| fs::read(p.as_path()).is_ok_and(|b| b == xmp_xml.as_bytes()));
             if !same && let Err(e) = write_new(&target_dir, &base_name, "xmp", xmp_xml) {
                 warnings.push(format!("XMP sidecar not written: {e}"));
             }
@@ -690,9 +693,13 @@ pub fn export_with_options(
     options: ExportOptions,
     progress: &mut dyn FnMut(&ExportProgress) -> Control,
 ) -> io::Result<ExportReport> {
+    // Checked on both sides: the folder may have become a link since it was chosen.
+    dest.verify().map_err(io::Error::other)?;
     fs::create_dir_all(dest.as_path())?;
+    dest.verify().map_err(io::Error::other)?;
     let total = items.len();
     let mut outcomes = Vec::with_capacity(total);
+    let mut all_warnings = Vec::new();
     let mut files: Vec<Value> = Vec::with_capacity(total);
     let has_tagged_hashes = options.embed_jpeg_tags;
     let mut csv = if has_tagged_hashes {
@@ -784,8 +791,9 @@ pub fn export_with_options(
             file_obj["sha256_original"] = json!(sha);
             file_obj["sha256_after_tagging"] = json!(final_sha);
         }
-        if let Some(w) = &warning {
+        if let Some(w) = warning {
             file_obj["warning"] = json!(w);
+            all_warnings.push((item.source.clone(), w));
         }
         files.push(file_obj);
 
@@ -855,6 +863,7 @@ pub fn export_with_options(
     let manifest_csv = write_new(dest, "manifest", "csv", &csv)?;
     Ok(ExportReport {
         outcomes,
+        warnings: all_warnings,
         manifest_json,
         manifest_csv,
         stopped,
@@ -1023,7 +1032,7 @@ fn write_new(dest: &DestPath, base: &str, ext: &str, content: &str) -> io::Resul
         };
         let target = dest
             .join_name(OsStr::new(&name))
-            .ok_or_else(|| io::Error::other("not a plain file name"))?;
+            .map_err(io::Error::other)?;
         match OpenOptions::new()
             .write(true)
             .create_new(true)

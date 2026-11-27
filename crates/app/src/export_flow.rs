@@ -122,7 +122,7 @@ pub fn validate_destination(path: &Path, roots: &[LibraryRoot]) -> Result<DestPa
         Err(GuardError::ParentDirComponent(_)) => {
             Err("La ruta de destino no puede contener «..». Elige una carpeta válida.".into())
         }
-        Err(GuardError::Io(e)) => Err(format!("No se pudo validar la carpeta de destino: {e}")),
+        Err(e) => Err(format!("No se pudo validar la carpeta de destino: {e}")),
     }
 }
 
@@ -169,6 +169,8 @@ pub struct ExportSummary {
     pub copied: usize,
     pub already_present: usize,
     pub failed: Vec<(PathBuf, String)>,
+    /// Exported files where something optional (XMP sidecar, embedded tags) did not happen.
+    pub warnings: Vec<(PathBuf, String)>,
     pub stopped: bool,
     pub manifest_json: PathBuf,
     pub manifest_csv: PathBuf,
@@ -191,6 +193,7 @@ impl ExportSummary {
             copied,
             already_present,
             failed,
+            warnings: report.warnings,
             stopped: report.stopped,
             manifest_json: report.manifest_json,
             manifest_csv: report.manifest_csv,
