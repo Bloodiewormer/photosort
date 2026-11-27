@@ -125,9 +125,11 @@ fn short(path: &Path) -> std::path::Display<'_> {
 impl fmt::Display for GuardError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InsideLibrary { .. } => {
-                f.write_str("la ruta lleva dentro de una biblioteca, donde no se escribe nada")
-            }
+            Self::InsideLibrary { root, .. } => write!(
+                f,
+                "la ruta lleva dentro de la biblioteca «{}», donde no se escribe nada",
+                short(root)
+            ),
             Self::ContainsLibrary { root, .. } => write!(
                 f,
                 "la carpeta contiene la biblioteca «{}»; elige otra fuera de todas las bibliotecas",

@@ -178,3 +178,20 @@ fn old_settings_without_background_review_fields_loads_with_safe_defaults() {
     assert!(!loaded.settings.stage_vision);
     assert!(!loaded.settings.stage_ocr);
 }
+
+#[test]
+fn a_data_dir_refused_by_the_guard_is_named_in_the_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+    let s = Settings {
+        library_roots: vec![library.clone()],
+        ..Settings::default()
+    };
+
+    let err = save(&library.join("data"), &s).unwrap_err();
+    assert!(matches!(err, SettingsError::Guard(_)), "{err:?}");
+    let text = err.to_string();
+    assert!(text.contains("carpeta de datos"), "{text}");
+    assert!(text.contains("«library»"), "{text}");
+}

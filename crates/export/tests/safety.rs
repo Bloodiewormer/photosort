@@ -472,13 +472,27 @@ fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
         match &report.outcomes[0].1 {
             Outcome::Blocked(reason) => assert_eq!(
                 reason,
-                "la ruta lleva dentro de una biblioteca, donde no se escribe nada"
+                "la ruta lleva dentro de la biblioteca «library», donde no se escribe nada"
             ),
             other => panic!("{name}: expected a blocked item, got {other:?}"),
         }
         assert!(matches!(report.outcomes[1].1, Outcome::Copied(_)));
         assert!(dest_path.join(copied).is_file());
         assert!(dest_path.join(format!("{copied}.xmp")).is_file());
+
+        // The manifest keeps recording a blocked item as failed, and the summary adds up.
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report.manifest_json).unwrap()).unwrap();
+        let status = |i: usize| json["files"][i]["status"].as_str().unwrap().to_owned();
+        assert!(status(0).starts_with("failed: la ruta lleva"), "{name}");
+        assert!(json["files"][0]["dest_path"].is_null(), "{name}");
+        assert_eq!(status(1), "copied", "{name}");
+        assert_eq!(json["summary"]["failed"], 1, "{name}");
+        assert_eq!(json["summary"]["copied"], 1, "{name}");
+        assert_eq!(json["summary"]["already_present"], 0, "{name}");
+        let csv = fs::read_to_string(&report.manifest_csv).unwrap();
+        // Quoted: the reason has a comma.
+        assert!(csv.contains(",\"failed: la ruta lleva"), "{name}: {csv}");
     }
 
     // A link where a sidecar would go: the copy is made and the report carries the warning.
@@ -498,7 +512,7 @@ fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
     assert!(
         report.warnings[0]
             .1
-            .starts_with("no se escribió el archivo XMP: la ruta lleva dentro de una biblioteca"),
+            .starts_with("no se escribió el archivo XMP: la ruta lleva dentro de la biblioteca"),
         "{:?}",
         report.warnings
     );
