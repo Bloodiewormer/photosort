@@ -39,10 +39,10 @@ pub use vision::{
     independent_ordering_confidence,
 };
 pub use works::{
-    AD_CATEGORY, AssetWork, AssetWorkMatches, CHAPTER_PAGE_CATEGORY, CREDITS_CATEGORY,
+    AD_CATEGORY, AssetCover, AssetWork, AssetWorkMatches, CHAPTER_PAGE_CATEGORY, CREDITS_CATEGORY,
     PROMO_CATEGORY, ParsedWorkFilename, ProposedWorkGroup, RECRUITMENT_CATEGORY,
-    SCANLATION_PAGE_CATEGORIES, WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal,
-    WorkSummary, extract_chapter_from_folder_name, extract_page_from_stem,
+    SCANLATION_PAGE_CATEGORIES, WorkAlias, WorkEntry, WorkLineMatch, WorkMatch, WorkMatcher,
+    WorkProposal, WorkSummary, extract_chapter_from_folder_name, extract_page_from_stem,
     extract_work_title_from_stem, parse_work_from_stem, work_match_key,
 };
 
@@ -248,6 +248,21 @@ CREATE TABLE IF NOT EXISTS proposed_work_group (
     UNIQUE (folder, work_id)
 );
 CREATE INDEX IF NOT EXISTS proposed_work_group_status ON proposed_work_group(status);
+CREATE TABLE IF NOT EXISTS asset_cover (
+    id         INTEGER PRIMARY KEY,
+    asset_id   INTEGER NOT NULL REFERENCES asset(id),
+    cover_idx  INTEGER NOT NULL,
+    x0         REAL NOT NULL,
+    y0         REAL NOT NULL,
+    x1         REAL NOT NULL,
+    y1         REAL NOT NULL,
+    work_id    INTEGER REFERENCES label(id) ON DELETE SET NULL,
+    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    status     TEXT NOT NULL CHECK (status IN ('suggested', 'accepted', 'rejected')),
+    UNIQUE (asset_id, cover_idx)
+);
+CREATE INDEX IF NOT EXISTS asset_cover_asset ON asset_cover(asset_id);
+CREATE INDEX IF NOT EXISTS asset_cover_work ON asset_cover(work_id);
 ";
 
 #[derive(Debug)]
@@ -330,6 +345,7 @@ impl Catalog {
         cat.migrate_label_parent()?;
         cat.migrate_asset_metadata()?;
         cat.migrate_proposed_work_group()?;
+        cat.migrate_asset_cover()?;
         cat.migrate_faces_and_people()?;
         cat.seed_builtin_vision_rules()?;
         cat.calibrate_builtin_vision_rules()?;
@@ -478,6 +494,59 @@ impl Catalog {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Ensures the `asset_cover` table and its indexes exist without writing when up to date.
+    fn migrate_asset_cover(&mut self) -> Result<(), CatalogError> {
+        let has_table = self.has_asset_cover_table()?;
+        if has_table {
+            return Ok(());
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_table_now: bool = tx
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'asset_cover'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !has_table_now {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS asset_cover (
+                    id         INTEGER PRIMARY KEY,
+                    asset_id   INTEGER NOT NULL REFERENCES asset(id),
+                    cover_idx  INTEGER NOT NULL,
+                    x0         REAL NOT NULL,
+                    y0         REAL NOT NULL,
+                    x1         REAL NOT NULL,
+                    y1         REAL NOT NULL,
+                    work_id    INTEGER REFERENCES label(id) ON DELETE SET NULL,
+                    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+                    status     TEXT NOT NULL CHECK (status IN ('suggested', 'accepted', 'rejected')),
+                    UNIQUE (asset_id, cover_idx)
+                );
+                CREATE INDEX IF NOT EXISTS asset_cover_asset ON asset_cover(asset_id);
+                CREATE INDEX IF NOT EXISTS asset_cover_work ON asset_cover(work_id);",
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn has_asset_cover_table(&self) -> Result<bool, CatalogError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'asset_cover'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Ensures the `person` table (including `centroid`), all face grouping columns on `asset_face`,
