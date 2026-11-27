@@ -6,6 +6,7 @@
 
 use crate::{AssetId, Catalog, CatalogError};
 use rusqlite::{OptionalExtension, params};
+use std::path::PathBuf;
 
 pub const SFACE_SIMILARITY_THRESHOLD: f32 = 0.5;
 
@@ -427,33 +428,7 @@ impl Catalog {
              WHERE af.asset_id = ?1
              ORDER BY af.face_idx ASC",
         )?;
-        let rows = stmt.query_map([asset.0], |r| {
-            let lm_str: Option<String> = r.get(8)?;
-            let landmarks = lm_str
-                .as_deref()
-                .and_then(crate::vision::decode_landmarks)
-                .unwrap_or([[0.0, 0.0]; 5]);
-            let person_id: Option<i64> = r.get(9)?;
-            Ok(FaceDetail {
-                id: r.get(0)?,
-                asset_id: AssetId(r.get(1)?),
-                face_idx: r.get::<_, i64>(2)? as usize,
-                bbox: [
-                    r.get::<_, f64>(3)? as f32,
-                    r.get::<_, f64>(4)? as f32,
-                    r.get::<_, f64>(5)? as f32,
-                    r.get::<_, f64>(6)? as f32,
-                ],
-                score: r.get::<_, f64>(7)? as f32,
-                landmarks,
-                person_id: person_id.map(PersonId),
-                person_name: r.get(10)?,
-                user_assigned: r.get::<_, i64>(11)? == 1,
-                similarity: r.get::<_, Option<f64>>(12)?.map(|s| s as f32),
-                has_embedding: r.get::<_, i64>(13)? == 1,
-                image_longest: r.get::<_, Option<i64>>(14)?.map(|v| v as u32),
-            })
-        })?;
+        let rows = stmt.query_map([asset.0], face_detail_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -484,32 +459,35 @@ impl Catalog {
              WHERE af.person_id = ?1
              ORDER BY af.score DESC, af.id ASC",
         )?;
-        let rows = stmt.query_map([person.0], |r| {
-            let lm_str: Option<String> = r.get(8)?;
-            let landmarks = lm_str
-                .as_deref()
-                .and_then(crate::vision::decode_landmarks)
-                .unwrap_or([[0.0, 0.0]; 5]);
-            let person_id: Option<i64> = r.get(9)?;
-            Ok(FaceDetail {
-                id: r.get(0)?,
-                asset_id: AssetId(r.get(1)?),
-                face_idx: r.get::<_, i64>(2)? as usize,
-                bbox: [
-                    r.get::<_, f64>(3)? as f32,
-                    r.get::<_, f64>(4)? as f32,
-                    r.get::<_, f64>(5)? as f32,
-                    r.get::<_, f64>(6)? as f32,
-                ],
-                score: r.get::<_, f64>(7)? as f32,
-                landmarks,
-                person_id: person_id.map(PersonId),
-                person_name: r.get(10)?,
-                user_assigned: r.get::<_, i64>(11)? == 1,
-                similarity: r.get::<_, Option<f64>>(12)?.map(|s| s as f32),
-                has_embedding: r.get::<_, i64>(13)? == 1,
-                image_longest: r.get::<_, Option<i64>>(14)?.map(|v| v as u32),
-            })
+        let rows = stmt.query_map([person.0], face_detail_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The cover face of every person that has one, picked as `list_persons` picks it, with the
+    /// path of a present copy of its photo and the photo's SHA-256. One query for all persons.
+    pub fn person_covers(
+        &self,
+    ) -> Result<Vec<(FaceDetail, Option<PathBuf>, String)>, CatalogError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT af.id, af.asset_id, af.face_idx, af.x1, af.y1, af.x2, af.y2, af.score,
+                    af.landmarks, af.person_id, p.name, af.user_assigned, af.similarity,
+                    af.embedding IS NOT NULL, max(a.width, a.height),
+                    (SELECT l.path FROM location l
+                     WHERE l.asset_id = af.asset_id AND l.missing = 0
+                     ORDER BY l.path ASC LIMIT 1),
+                    a.sha256
+             FROM person p
+             JOIN asset_face af ON af.id = (SELECT af2.id FROM asset_face af2
+                                            WHERE af2.person_id = p.id
+                                            ORDER BY af2.score DESC LIMIT 1)
+             JOIN asset a ON a.id = af.asset_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                face_detail_from_row(r)?,
+                r.get::<_, Option<String>>(15)?.map(PathBuf::from),
+                r.get(16)?,
+            ))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -548,7 +526,7 @@ impl Catalog {
 
         let Some((existing_pid, user_assigned)) = current else {
             return Err(CatalogError::InvalidOperation(format!(
-                "face {face_id} not found"
+                "no se encontró el rostro {face_id}"
             )));
         };
 
@@ -654,4 +632,33 @@ impl Catalog {
         let rows = stmt.query_map([], |r| Ok(AssetId(r.get(0)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+}
+
+/// Reads the first 15 columns that `asset_face_details` and `person_faces` select.
+fn face_detail_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FaceDetail> {
+    let lm_str: Option<String> = r.get(8)?;
+    let landmarks = lm_str
+        .as_deref()
+        .and_then(crate::vision::decode_landmarks)
+        .unwrap_or([[0.0, 0.0]; 5]);
+    let person_id: Option<i64> = r.get(9)?;
+    Ok(FaceDetail {
+        id: r.get(0)?,
+        asset_id: AssetId(r.get(1)?),
+        face_idx: r.get::<_, i64>(2)? as usize,
+        bbox: [
+            r.get::<_, f64>(3)? as f32,
+            r.get::<_, f64>(4)? as f32,
+            r.get::<_, f64>(5)? as f32,
+            r.get::<_, f64>(6)? as f32,
+        ],
+        score: r.get::<_, f64>(7)? as f32,
+        landmarks,
+        person_id: person_id.map(PersonId),
+        person_name: r.get(10)?,
+        user_assigned: r.get::<_, i64>(11)? == 1,
+        similarity: r.get::<_, Option<f64>>(12)?.map(|s| s as f32),
+        has_embedding: r.get::<_, i64>(13)? == 1,
+        image_longest: r.get::<_, Option<i64>>(14)?.map(|v| v as u32),
+    })
 }

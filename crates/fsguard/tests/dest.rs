@@ -30,6 +30,15 @@ fn an_export_folder_inside_a_library_is_refused() {
 }
 
 #[test]
+fn a_path_inside_a_library_names_the_library_folder_but_not_its_full_path() {
+    let (tmp, root) = fixture();
+    let err = ensure_writable(&tmp.path().join("library").join("out"), &[root]).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("«library»"), "{text}");
+    assert!(!text.contains(&*tmp.path().to_string_lossy()), "{text}");
+}
+
+#[test]
 fn an_export_folder_beside_the_library_is_accepted() {
     let (tmp, root) = fixture();
     let dest = ensure_export_dir(&tmp.path().join("export"), &[root]).unwrap();

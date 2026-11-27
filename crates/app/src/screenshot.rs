@@ -1,5 +1,5 @@
 use crate::demo::{DEFAULT_DEMO_COUNT, validate_count};
-use crate::settings::Theme;
+use crate::settings::{Theme, file_has_single_link};
 use eframe::egui::{self, ColorImage, ScreenshotCallback, ViewportCommand};
 use fsguard::{DestPath, GuardError, LibraryRoot, ensure_writable};
 use image::codecs::png::PngEncoder;
@@ -485,6 +485,17 @@ fn create_dir_dest(dir: &DestPath) -> io::Result<()> {
     fs::create_dir_all(dir.as_path())
 }
 
+fn is_existing_png(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 8];
+    let ok = file.read_exact(&mut header).is_ok() && &header == b"\x89PNG\r\n\x1a\n";
+    drop(file);
+    ok
+}
+
 #[allow(clippy::disallowed_methods)] // `dest` is a fsguard DestPath verified outside library roots
 fn write_rgba_png_dest(
     dest: &DestPath,
@@ -492,7 +503,35 @@ fn write_rgba_png_dest(
     width: u32,
     height: u32,
 ) -> Result<u64, String> {
-    let file = File::create(dest.as_path()).map_err(|e| e.to_string())?;
+    dest.verify().map_err(|e| e.to_string())?;
+
+    let file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest.as_path())
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Decisión: se sobrescribe solo si el archivo existente es un PNG con un único enlace para permitir actualizar capturas sin riesgo de afectar originales ni enlaces duros.
+            let is_safe_png = file_has_single_link(dest.as_path()).unwrap_or(false)
+                && is_existing_png(dest.as_path());
+            if is_safe_png && fs::remove_file(dest.as_path()).is_ok() {
+                dest.verify().map_err(|e| e.to_string())?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dest.as_path())
+                    .map_err(|e| e.to_string())?
+            } else {
+                return Err(format!(
+                    "El archivo de captura '{}' ya existe y no se sobrescribe.",
+                    dest.as_path().display()
+                ));
+            }
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+
     let writer = BufWriter::new(file);
     PngEncoder::new(writer)
         .write_image(raw, width, height, ColorType::Rgba8.into())

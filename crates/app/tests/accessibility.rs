@@ -40,10 +40,14 @@ struct Harness {
 
 impl Harness {
     fn new(view: CaptureView, theme: Theme) -> Self {
+        Self::open(demo_setup(), view, theme)
+    }
+
+    fn open(setup: &DemoSetup, view: CaptureView, theme: Theme) -> Self {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let app = PhotosortApp::new_with_mode(&cc, demo_setup().data_dir.clone(), true, |_, _| {
+        let app = PhotosortApp::new_with_mode(&cc, setup.data_dir.clone(), true, |_, _| {
             (Arc::new(NoThumbnails), None)
         })
         .with_initial_view(view, None)
@@ -127,9 +131,17 @@ impl Harness {
 
     /// Activates a control the way a screen reader does.
     fn click(&mut self, name: &str) {
+        self.activate(Role::Button, name);
+    }
+
+    fn toggle(&mut self, name: &str) {
+        self.activate(Role::CheckBox, name);
+    }
+
+    fn activate(&mut self, role: Role, name: &str) {
         let target = self
-            .find(Role::Button, name)
-            .unwrap_or_else(|| panic!("no hay botón «{name}»"));
+            .find(role, name)
+            .unwrap_or_else(|| panic!("no hay {role:?} «{name}»"));
         self.run(vec![Event::AccessKitActionRequest(ActionRequest {
             action: Action::Click,
             target_tree: TreeId::ROOT,
@@ -495,4 +507,56 @@ fn names_that_egui_gives_are_in_spanish() {
     for english in ["Close window", "Resize panel"] {
         assert!(!harness.has_name_containing(english), "{english}");
     }
+}
+
+#[test]
+fn persons_view_reuses_what_it_loaded_until_the_app_changes_the_catalog() {
+    // Its own data: the test writes to the catalog.
+    let config = DemoConfig {
+        count: 40,
+        seed: demo::DEFAULT_SEED,
+    };
+    let setup = demo::prepare_demo(None, config, None).expect("datos de demostración");
+    let db = app::settings::db_dest_path(&setup.data_dir, &[]).expect("ruta del catálogo");
+    let mut cat = catalog::Catalog::open(&db).expect("catálogo");
+
+    // The demo's unnamed person is in two photos; the naming card asks from three.
+    let persons = cat.list_persons(true).expect("personas");
+    let unnamed = persons
+        .iter()
+        .find(|p| p.name.is_none())
+        .expect("sin nombre");
+    let alex = persons
+        .iter()
+        .find(|p| p.name.as_deref() == Some("Alex"))
+        .expect("Alex");
+    let face = cat.person_faces(alex.id).expect("rostros")[0].id;
+    cat.assign_face_to_person(face, unnamed.id, false)
+        .expect("asignar");
+
+    let mut harness = Harness::open(&setup, CaptureView::Persons, Theme::Dark);
+    assert!(harness.has_name_containing("Misma persona: Alex"));
+
+    // A write behind the app's back: drawing again must not read it.
+    let alex = cat
+        .find_person_by_name("Alex")
+        .expect("consulta")
+        .expect("Alex");
+    cat.rename_person(alex.id, Some("Renombrada por fuera"))
+        .expect("renombrar");
+    harness.settle();
+    assert!(harness.has_name_containing("Misma persona: Alex"));
+    assert!(!harness.has_name_containing("Renombrada por fuera"));
+
+    // «Más tarde» takes the naming card away at once.
+    assert!(harness.find(Role::Button, "Más tarde").is_some());
+    harness.click("Más tarde");
+    assert!(harness.find(Role::Button, "Más tarde").is_none());
+
+    // A change made in the view reloads: the merged card is gone and the new name is read.
+    harness.toggle("Misma persona: Alex");
+    harness.toggle("Misma persona: Sin nombre");
+    harness.click("Unir");
+    assert!(harness.has_name_containing("Misma persona: Renombrada por fuera"));
+    assert!(!harness.has_name_containing("Misma persona: Sin nombre"));
 }

@@ -18,6 +18,8 @@ pub struct SettingsViewState {
     pub confirm_clear_face_data: bool,
     /// Photos done and total while faces are being grouped.
     pub face_grouping: Option<(usize, usize)>,
+    /// Cancel was asked for and the worker is still on its current photo.
+    pub face_grouping_cancelling: bool,
     pub vision_dir_error: Option<String>,
     pub ocr_dir_error: Option<String>,
 }
@@ -351,7 +353,13 @@ pub fn draw(
                                                 .size(theme::FONT_SMALL)
                                                 .color(palette.text_secondary.color32()),
                                         );
-                                        if ui.button("Cancelar").clicked() {
+                                        let cancelling = state.face_grouping_cancelling;
+                                        let label =
+                                            if cancelling { "Cancelando…" } else { "Cancelar" };
+                                        if ui
+                                            .add_enabled(!cancelling, egui::Button::new(label))
+                                            .clicked()
+                                        {
                                             outcome.cancel_face_grouping = true;
                                         }
                                     });

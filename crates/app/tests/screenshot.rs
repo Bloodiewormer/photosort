@@ -380,3 +380,93 @@ fn write_screenshot_png_saves_valid_png_and_normalises_hidpi_scale() {
     let decoded = image::open(&saved.path).unwrap();
     assert_eq!((decoded.width(), decoded.height()), (80, 50));
 }
+
+#[test]
+fn write_screenshot_png_overwrites_existing_single_link_png() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    let roots = [LibraryRoot::new(&lib).unwrap()];
+
+    let out_path = tmp.path().join("shots").join("test_overwrite.png");
+    let dest = guard_screenshot_path(&out_path, &roots).unwrap();
+
+    let red = ColorImage::new([10, 10], vec![Color32::RED; 100]);
+    let first = write_screenshot_png(&dest, &roots, &red, None).unwrap();
+    assert_eq!((first.width, first.height), (10, 10));
+
+    let blue = ColorImage::new([20, 20], vec![Color32::BLUE; 400]);
+    let second = write_screenshot_png(&dest, &roots, &blue, None).unwrap();
+    assert_eq!((second.width, second.height), (20, 20));
+
+    let decoded = image::open(&out_path).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (20, 20));
+}
+
+#[test]
+fn write_screenshot_png_refuses_to_overwrite_hard_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    let roots = [LibraryRoot::new(&lib).unwrap()];
+
+    let shots_dir = tmp.path().join("shots");
+    fs::create_dir_all(&shots_dir).unwrap();
+
+    let original_photo = tmp.path().join("original_photo.png");
+    let original_bytes = b"\x89PNG\r\n\x1a\ncontenido original protegido";
+    fs::write(&original_photo, original_bytes).unwrap();
+
+    let target_shot = shots_dir.join("linked_shot.png");
+    fs::hard_link(&original_photo, &target_shot).unwrap();
+
+    let dest = guard_screenshot_path(&target_shot, &roots).unwrap();
+    let red = ColorImage::new([10, 10], vec![Color32::RED; 100]);
+
+    let err = write_screenshot_png(&dest, &roots, &red, None).unwrap_err();
+    assert!(
+        err.contains("ya existe"),
+        "error inesperado al rechazar sobreescritura de enlace duro: {err}"
+    );
+
+    assert_eq!(
+        fs::read(&original_photo).unwrap(),
+        original_bytes,
+        "el archivo original enlazado fue alterado"
+    );
+    assert_eq!(
+        fs::read(&target_shot).unwrap(),
+        original_bytes,
+        "el destino con enlace duro fue alterado"
+    );
+}
+
+#[test]
+fn write_screenshot_png_refuses_to_overwrite_non_png_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    let roots = [LibraryRoot::new(&lib).unwrap()];
+
+    let shots_dir = tmp.path().join("shots");
+    fs::create_dir_all(&shots_dir).unwrap();
+
+    let existing_text = shots_dir.join("existing.png");
+    let text_content = b"archivo de texto que no es png";
+    fs::write(&existing_text, text_content).unwrap();
+
+    let dest = guard_screenshot_path(&existing_text, &roots).unwrap();
+    let red = ColorImage::new([10, 10], vec![Color32::RED; 100]);
+
+    let err = write_screenshot_png(&dest, &roots, &red, None).unwrap_err();
+    assert!(
+        err.contains("ya existe"),
+        "error inesperado al rechazar sobreescritura de no-png: {err}"
+    );
+
+    assert_eq!(
+        fs::read(&existing_text).unwrap(),
+        text_content,
+        "el archivo no-png fue alterado"
+    );
+}

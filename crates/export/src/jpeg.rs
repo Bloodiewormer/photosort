@@ -49,7 +49,7 @@ impl SegmentSpan {
 /// of the start of SOS (header and entropy-coded scan data).
 fn parse_segments(data: &[u8]) -> Result<(Vec<SegmentSpan>, usize), String> {
     if !is_jpeg(data) {
-        return Err("not a valid JPEG: missing SOI marker (0xFF, 0xD8)".to_string());
+        return Err("no es un JPEG válido: falta el marcador inicial (0xFF, 0xD8)".to_string());
     }
 
     let mut pos = 2; // right after SOI
@@ -57,14 +57,16 @@ fn parse_segments(data: &[u8]) -> Result<(Vec<SegmentSpan>, usize), String> {
 
     while pos < data.len() {
         if data[pos] != 0xFF {
-            return Err(format!("expected a JPEG marker at byte {pos}"));
+            return Err(format!(
+                "JPEG dañado: se esperaba un marcador en el byte {pos}"
+            ));
         }
         // Skip any fill bytes 0xFF
         while pos < data.len() && data[pos] == 0xFF {
             pos += 1;
         }
         if pos >= data.len() {
-            return Err("truncated JPEG: marker type missing".to_string());
+            return Err("JPEG incompleto: falta el tipo de marcador".to_string());
         }
         let marker = data[pos];
         let marker_start = pos - 1; // including the 0xFF before it
@@ -77,7 +79,9 @@ fn parse_segments(data: &[u8]) -> Result<(Vec<SegmentSpan>, usize), String> {
 
         // EOI, a second SOI or a stuffed zero cannot appear before SOS.
         if matches!(marker, 0xD9 | 0xD8 | 0x00) {
-            return Err(format!("unexpected marker 0x{marker:02X} before SOS"));
+            return Err(format!(
+                "JPEG dañado: marcador 0x{marker:02X} inesperado antes de los datos de imagen"
+            ));
         }
 
         // SOS (0xDA): Start of Scan
@@ -89,15 +93,17 @@ fn parse_segments(data: &[u8]) -> Result<(Vec<SegmentSpan>, usize), String> {
 
         // Other markers require a 2-byte big-endian length
         if pos + 2 > data.len() {
-            return Err("truncated JPEG segment length".to_string());
+            return Err("JPEG incompleto: falta la longitud de un segmento".to_string());
         }
         let seg_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         if seg_len < 2 {
-            return Err(format!("invalid JPEG segment length {seg_len}"));
+            return Err(format!(
+                "JPEG dañado: longitud de segmento no válida ({seg_len})"
+            ));
         }
         let seg_end = pos + seg_len;
         if seg_end > data.len() {
-            return Err("JPEG segment extends beyond end of file".to_string());
+            return Err("JPEG incompleto: un segmento pasa del final del archivo".to_string());
         }
 
         let payload_start = pos + 2;
@@ -114,7 +120,7 @@ fn parse_segments(data: &[u8]) -> Result<(Vec<SegmentSpan>, usize), String> {
         pos = seg_end;
     }
 
-    Err("no SOS marker found in JPEG".to_string())
+    Err("JPEG incompleto: no tiene datos de imagen".to_string())
 }
 
 /// Builds a new APP1 XMP segment containing `xmp_packet`.
@@ -123,7 +129,7 @@ fn build_xmp_segment(xmp_packet: &[u8]) -> Result<Vec<u8>, String> {
     let total_len = payload_len + 2; // includes 2 bytes of length
     if total_len > 65535 {
         return Err(format!(
-            "XMP packet length ({total_len} bytes) exceeds JPEG segment maximum (65535 bytes)"
+            "las etiquetas ocupan {total_len} bytes y un segmento JPEG admite 65535 como máximo"
         ));
     }
     let len_u16 = total_len as u16;

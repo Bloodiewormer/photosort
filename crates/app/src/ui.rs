@@ -55,6 +55,7 @@ pub struct PhotosortApp {
     works_view: WorksViewState,
     persons: Vec<catalog::Person>,
     persons_view: views::persons::PersonsViewState,
+    person_cards: views::persons::PersonCards,
     vision_rules: Vec<VisionRule>,
     vision_analyzed_count: usize,
     tags_view: TagsViewState,
@@ -211,6 +212,7 @@ impl PhotosortApp {
             works_view: WorksViewState::default(),
             persons: Vec::new(),
             persons_view: views::persons::PersonsViewState::default(),
+            person_cards: Default::default(),
             vision_rules: Vec::new(),
             vision_analyzed_count: 0,
             tags_view: TagsViewState::default(),
@@ -414,6 +416,10 @@ impl PhotosortApp {
             Ok(p) => self.persons = p,
             Err(e) => self.banner_error = Some(format!("Error al cargar personas: {e}")),
         }
+        self.reload_person_cards();
+        let Some(cat) = &self.catalog else {
+            return;
+        };
         match cat.list_stage_errors_in_roots(&roots) {
             Ok(list) => self.stage_errors = list,
             Err(e) => self.banner_error = Some(format!("Error al cargar errores de revisión: {e}")),
@@ -497,28 +503,23 @@ impl PhotosortApp {
         }
     }
 
+    fn reload_person_cards(&mut self) {
+        if let Some(cat) = &self.catalog {
+            self.person_cards =
+                views::persons::PersonCards::load(cat, &self.persons_view.postponed_persons);
+        }
+    }
+
     /// Face crops are cut from gallery thumbnails: asks for the ones a face view needs, even when
     /// those photos are not on screen in the gallery.
-    fn face_thumbs(&self, assets: &[AssetId]) -> HashMap<AssetId, String> {
-        let mut map = HashMap::new();
-        let Some(cat) = &self.catalog else {
-            return map;
-        };
-        for &asset in assets {
-            let Ok(Some(entry)) = cat.entry_for(asset) else {
-                continue;
-            };
-            if !self.thumb_textures.contains_key(&entry.sha256)
-                && !self.thumb_failed.contains(&entry.sha256)
+    fn request_face_thumbs<'a>(&self, thumbs: impl IntoIterator<Item = &'a ThumbRequest>) {
+        for thumb in thumbs {
+            if !self.thumb_textures.contains_key(&thumb.sha256)
+                && !self.thumb_failed.contains(&thumb.sha256)
             {
-                self.thumb_pool.request(ThumbRequest {
-                    source: entry.path.clone(),
-                    sha256: entry.sha256.clone(),
-                });
+                self.thumb_pool.request(thumb.clone());
             }
-            map.insert(asset, entry.sha256);
         }
-        map
     }
 
     fn reload_inspector_details(&mut self) {
@@ -800,6 +801,7 @@ impl PhotosortApp {
                     }
                     FaceGroupEvent::Failed(err) => {
                         finished_face_group = true;
+                        needs_full_reload = true;
                         self.banner_error = Some(format!("Error al agrupar rostros: {err}"));
                     }
                 }
@@ -1091,6 +1093,7 @@ impl PhotosortApp {
     fn stop_face_grouping(&mut self) {
         self.face_group_worker = None;
         self.settings_state.face_grouping = None;
+        self.settings_state.face_grouping_cancelling = false;
         self.sync_engine_yield();
     }
 
@@ -1593,46 +1596,26 @@ impl PhotosortApp {
                 let work_banner = self.work_order_view.as_ref().map(|(_, name)| name.as_str());
 
                 let mut naming_outcome = None;
-                let naming_candidate = if let Some(cat) = &self.catalog {
-                    cat.unnamed_persons_with_min_photos(3)
-                        .ok()
-                        .and_then(|list| {
-                            list.into_iter()
-                                .find(|p| !self.persons_view.postponed_persons.contains(&p.id))
-                        })
+                if let Some((_, faces)) = &self.person_cards.naming {
+                    let thumbs = &self.person_cards.thumbs;
+                    self.request_face_thumbs(faces.iter().filter_map(|f| thumbs.get(&f.asset_id)));
+                }
+
+                let top_banner = if let (Some(cat), Some((candidate, faces))) =
+                    (&self.catalog, &self.person_cards.naming)
+                {
+                    let pv = &mut self.persons_view;
+                    let tt = &self.thumb_textures;
+                    let thumbs = &self.person_cards.thumbs;
+                    let out_ref = &mut naming_outcome;
+                    Some(move |ui: &mut egui::Ui| {
+                        *out_ref = Some(views::persons::draw_naming_card(
+                            ui, palette, candidate, faces, pv, cat, tt, thumbs,
+                        ));
+                    })
                 } else {
                     None
                 };
-                let sample_faces = if let (Some(cat), Some(c)) = (&self.catalog, &naming_candidate)
-                {
-                    cat.person_faces(c.id).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let face_assets: Vec<AssetId> = sample_faces.iter().map(|f| f.asset_id).collect();
-                let asset_paths = self.face_thumbs(&face_assets);
-
-                let top_banner =
-                    if let (Some(cat), Some(candidate)) = (&self.catalog, &naming_candidate) {
-                        let pv = &mut self.persons_view;
-                        let tt = &self.thumb_textures;
-                        let ap = &asset_paths;
-                        let out_ref = &mut naming_outcome;
-                        Some(move |ui: &mut egui::Ui| {
-                            *out_ref = Some(views::persons::draw_naming_card(
-                                ui,
-                                palette,
-                                candidate,
-                                &sample_faces,
-                                pv,
-                                cat,
-                                tt,
-                                ap,
-                            ));
-                        })
-                    } else {
-                        None
-                    };
 
                 let gal_out = views::gallery::draw(
                     ui,
@@ -1651,6 +1634,9 @@ impl PhotosortApp {
                     &self.thumb_failed,
                 );
                 if let Some(out) = naming_outcome {
+                    if out.postponed.is_some() {
+                        self.reload_person_cards();
+                    }
                     let mut catalog_mutated = false;
                     if let Some(cat) = &mut self.catalog {
                         if let Some((pid, name)) = out.renamed {
@@ -2078,30 +2064,16 @@ impl PhotosortApp {
                 }
             }
             ActiveView::Persons => {
-                let covers: Vec<AssetId> = self
-                    .persons
-                    .iter()
-                    .filter_map(|p| p.cover_asset_id)
-                    .collect();
-                let mut wanted = covers;
-                if let Some(cat) = &self.catalog
-                    && let Ok(list) = cat.unnamed_persons_with_min_photos(3)
-                    && let Some(p) = list
-                        .iter()
-                        .find(|p| !self.persons_view.postponed_persons.contains(&p.id))
-                {
-                    let faces = cat.person_faces(p.id).unwrap_or_default();
-                    wanted.extend(faces.iter().map(|f| f.asset_id));
-                }
-                let asset_paths = self.face_thumbs(&wanted);
+                self.request_face_thumbs(self.person_cards.thumbs.values());
                 let (outcome, catalog_mutated) = if let Some(cat) = &mut self.catalog {
                     let outcome = views::persons::draw(
                         ui,
                         palette,
                         &mut self.persons_view,
                         cat,
+                        &self.persons,
+                        &self.person_cards,
                         &self.thumb_textures,
-                        &asset_paths,
                     );
                     let mut catalog_mutated = false;
                     if let Some((pid, name)) = &outcome.renamed {
@@ -2169,8 +2141,10 @@ impl PhotosortApp {
                     self.filter.persons.insert(pid);
                     self.active_view = ActiveView::Gallery;
                     self.reload_entries();
-                } else if catalog_mutated || outcome.filter_changed {
+                } else if catalog_mutated {
                     self.reload_catalog();
+                } else if outcome.postponed.is_some() {
+                    self.reload_person_cards();
                 }
             }
             ActiveView::Tags => {
@@ -2253,6 +2227,7 @@ impl PhotosortApp {
                     && let Some(worker) = &self.face_group_worker
                 {
                     worker.cancel();
+                    self.settings_state.face_grouping_cancelling = true;
                 }
                 if outcome.clear_face_grouping {
                     // A running grouping would recreate the data being deleted.
@@ -2268,13 +2243,14 @@ impl PhotosortApp {
                             self.status_notice = Some(
                                 "Se han borrado los datos de rostros, grupos y nombres".into(),
                             );
-                            self.reload_catalog();
                         }
                         Err(e) => {
                             self.banner_error =
                                 Some(format!("No se pudieron borrar los datos de rostros: {e}"));
                         }
                     }
+                    // Also on failure: the stopped grouping may have changed the catalog.
+                    self.reload_catalog();
                 }
                 if outcome.start_face_grouping {
                     self.start_face_grouping(&ctx);

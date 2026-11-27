@@ -2,13 +2,13 @@
 #![allow(clippy::disallowed_methods)]
 
 use app::export_flow::{
-    ALL_LAYOUTS, ExportPhase, ExportWizard, PreviewState, build_export_items, layout_description,
-    layout_label, remember_export_dir, select_entries, validate_destination,
+    ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, build_export_items,
+    layout_description, layout_label, remember_export_dir, select_entries, validate_destination,
 };
 use app::model::Selection;
 use app::settings::{self, Settings};
 use catalog::{Catalog, Entry, Filter, LabelKind, Sort, Source, Status};
-use export::{ExportItem, Layout};
+use export::{ExportItem, ExportReport, Layout, Outcome};
 use fsguard::{LibraryRoot, ensure_writable};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -239,6 +239,7 @@ fn wizard_state_machine_transitions_choose_preview_running_done() {
         assert_eq!(summary.copied, 2);
         assert_eq!(summary.already_present, 0);
         assert!(summary.failed.is_empty());
+        assert!(summary.blocked.is_empty());
         assert!(!summary.stopped);
         assert!(summary.manifest_json.exists());
         assert!(summary.manifest_csv.exists());
@@ -249,6 +250,34 @@ fn wizard_state_machine_transitions_choose_preview_running_done() {
     }
     assert!(export_dir.join("Fotos").join("a.jpg").exists());
     assert!(export_dir.join("Sin categoría").join("b.png").exists());
+}
+
+#[test]
+fn the_summary_lists_blocked_files_apart_and_never_as_exported() {
+    let report = ExportReport {
+        outcomes: vec![
+            (
+                PathBuf::from("a.jpg"),
+                Outcome::Copied(PathBuf::from("out/a.jpg")),
+            ),
+            (PathBuf::from("b.jpg"), Outcome::Blocked("enlace".into())),
+            (PathBuf::from("c.jpg"), Outcome::Failed("ilegible".into())),
+        ],
+        warnings: vec![],
+        manifest_json: PathBuf::from("out/manifest.json"),
+        manifest_csv: PathBuf::from("out/manifest.csv"),
+        stopped: false,
+    };
+    let summary = ExportSummary::from_report(PathBuf::from("out"), report);
+    assert_eq!((summary.copied, summary.already_present), (1, 0));
+    assert_eq!(
+        summary.blocked,
+        vec![(PathBuf::from("b.jpg"), "enlace".to_string())]
+    );
+    assert_eq!(
+        summary.failed,
+        vec![(PathBuf::from("c.jpg"), "ilegible".to_string())]
+    );
 }
 
 #[test]
