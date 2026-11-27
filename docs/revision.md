@@ -7,8 +7,8 @@
 No existe una bandera fija en la base de datos. Una foto cuenta como **revisada** únicamente si tiene completadas en la tabla `analysis`, con su versión actual, **todas las etapas activadas** por el usuario:
 
 1. **Reglas rápidas** (`rules`, activada por defecto): lee cabeceras y metadatos EXIF para sugerir capturas de pantalla, WhatsApp, GIF, formato vertical largo y fotos de cámara. No requiere modelos.
-2. **Reconocer imágenes** (`vision`, desactivada por defecto): calcula embeddings con SigLIP 2, detecta rostros con YuNet y aplica las reglas visuales. Requiere carpeta de modelos de visión.
-3. **Leer texto** (`ocr`, desactivada por defecto): extrae texto con OCR y ejecuta el emparejamiento de obras y páginas promocionales. Es la etapa más lenta y requiere carpeta de modelos OCR.
+2. **Reconocer imágenes** (`vision`, desactivada por defecto): calcula embeddings con SigLIP 2, detecta rostros con YuNet y aplica las reglas visuales. Requiere carpeta de modelos de visión; al elegir una carpeta válida se activa la etapa y, si existe una carpeta `ocr` hija o hermana válida, se rellena también la de OCR.
+3. **Leer texto** (`ocr`, desactivada por defecto): extrae texto con OCR y ejecuta el emparejamiento de obras y páginas promocionales. Es la etapa más lenta y requiere carpeta de modelos OCR; al elegir una carpeta válida se activa la etapa y se comprueba su carpeta padre para visión. Activar cualquiera de las dos etapas sin carpeta abre directamente el selector.
 
 Si el usuario activa una etapa más adelante, las fotos a las que les falte pasan automáticamente a **Sin revisar**. Si no hay ninguna etapa activada, ninguna foto cuenta como revisada.
 
