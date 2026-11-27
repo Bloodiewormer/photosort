@@ -294,6 +294,33 @@ pub fn plan_demo_images(count: usize, seed: u64) -> Vec<ImageSpec> {
             false,
             PatternKind::Stripes,
         ),
+        (
+            "manga/Isla de Cristal/Capítulo 01",
+            "001.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::Gradient,
+        ),
+        (
+            "manga/Isla de Cristal/Capítulo 01",
+            "002.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::Stripes,
+        ),
+        (
+            "manga/Isla de Cristal/Capítulo 01",
+            "003.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::Checker,
+        ),
     ];
 
     for (i, &(folder, name, width, height, format, with_alpha, pattern)) in
@@ -1298,6 +1325,8 @@ fn seed_demo_works(cat: &mut Catalog) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     cat.apply_filename_works(None).map_err(|e| e.to_string())?;
+    cat.apply_folder_work_groups(None)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -34,8 +34,9 @@ pub use vision::{
 };
 pub use works::{
     AD_CATEGORY, AssetWork, AssetWorkMatches, CHAPTER_PAGE_CATEGORY, CREDITS_CATEGORY,
-    PROMO_CATEGORY, ParsedWorkFilename, RECRUITMENT_CATEGORY, SCANLATION_PAGE_CATEGORIES,
-    WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal, WorkSummary,
+    PROMO_CATEGORY, ParsedWorkFilename, ProposedWorkGroup, RECRUITMENT_CATEGORY,
+    SCANLATION_PAGE_CATEGORIES, WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal,
+    WorkSummary, extract_chapter_from_folder_name, extract_page_from_stem,
     extract_work_title_from_stem, parse_work_from_stem, work_match_key,
 };
 
@@ -218,6 +219,16 @@ CREATE TABLE IF NOT EXISTS near_duplicate_member (
     PRIMARY KEY (group_id, asset_id)
 );
 CREATE INDEX IF NOT EXISTS near_duplicate_member_asset ON near_duplicate_member(asset_id);
+CREATE TABLE IF NOT EXISTS proposed_work_group (
+    id         INTEGER PRIMARY KEY,
+    folder     TEXT NOT NULL,
+    work_id    INTEGER NOT NULL REFERENCES label(id),
+    chapter    TEXT NOT NULL DEFAULT '',
+    page_count INTEGER NOT NULL DEFAULT 0,
+    status     TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'accepted', 'dismissed')),
+    UNIQUE (folder, work_id)
+);
+CREATE INDEX IF NOT EXISTS proposed_work_group_status ON proposed_work_group(status);
 ";
 
 #[derive(Debug)]
@@ -299,6 +310,7 @@ impl Catalog {
         let mut cat = Self { conn };
         cat.migrate_label_parent()?;
         cat.migrate_asset_metadata()?;
+        cat.migrate_proposed_work_group()?;
         cat.seed_builtin_vision_rules()?;
         cat.calibrate_builtin_vision_rules()?;
         Ok(cat)
@@ -399,6 +411,50 @@ impl Catalog {
             if !now_existing.contains(col) {
                 tx.execute(&format!("ALTER TABLE asset ADD COLUMN {col} {ty}"), [])?;
             }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Ensures the `proposed_work_group` table and index exist on older catalogs without writing when up to date.
+    fn migrate_proposed_work_group(&mut self) -> Result<(), CatalogError> {
+        let has_table: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proposed_work_group'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if has_table {
+            return Ok(());
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_table_now: bool = tx
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proposed_work_group'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !has_table_now {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS proposed_work_group (
+                    id         INTEGER PRIMARY KEY,
+                    folder     TEXT NOT NULL,
+                    work_id    INTEGER NOT NULL REFERENCES label(id),
+                    chapter    TEXT NOT NULL DEFAULT '',
+                    page_count INTEGER NOT NULL DEFAULT 0,
+                    status     TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'accepted', 'dismissed')),
+                    UNIQUE (folder, work_id)
+                );
+                CREATE INDEX IF NOT EXISTS proposed_work_group_status ON proposed_work_group(status);",
+            )?;
         }
         tx.commit()?;
         Ok(())

@@ -362,6 +362,10 @@ impl PhotosortApp {
             }
             Err(e) => self.banner_error = Some(format!("Error al cargar obras: {e}")),
         }
+        match cat.list_proposed_work_groups(Some(&roots)) {
+            Ok(groups) => self.works_view.proposed_groups = groups,
+            Err(e) => self.banner_error = Some(format!("Error al cargar grupos propuestos: {e}")),
+        }
         if let Ok(queue) = cat.review_queue_in_roots(1.1, &roots) {
             self.pending_suggestions_assets = queue.into_iter().map(|i| i.asset).collect();
         }
@@ -1703,7 +1707,11 @@ impl eframe::App for PhotosortApp {
                     self.catalog.as_mut(),
                     self.works_worker.is_some(),
                     other_heavy,
+                    &self.thumb_pool,
+                    &self.thumb_textures,
+                    &self.thumb_failed,
                 );
+                self.last_thumbs_ready = outcome.thumbs_ready;
                 if let Some(err) = outcome.error {
                     self.banner_error = Some(err);
                 }
@@ -1718,6 +1726,35 @@ impl eframe::App for PhotosortApp {
                         .is_some_and(|(id, _)| *id == work_id)
                     {
                         self.work_order_view = None;
+                    }
+                }
+                if let Some((folder, work_id)) = outcome.accept_group
+                    && let Some(cat) = &self.catalog
+                {
+                    match cat.accept_proposed_work_group(&folder, work_id) {
+                        Ok(n) => {
+                            self.reload_catalog();
+                            self.status_notice = Some(format!(
+                                "Grupo aceptado: {} de pertenencia confirmadas.",
+                                count_phrase(n, "página", "páginas")
+                            ));
+                        }
+                        Err(e) => {
+                            self.banner_error = Some(format!("No se pudo aceptar el grupo: {e}"));
+                        }
+                    }
+                }
+                if let Some((folder, work_id)) = outcome.dismiss_group
+                    && let Some(cat) = &self.catalog
+                {
+                    match cat.dismiss_proposed_work_group(&folder, work_id) {
+                        Ok(_) => {
+                            self.reload_catalog();
+                            self.status_notice = Some("Grupo propuesto descartado.".into());
+                        }
+                        Err(e) => {
+                            self.banner_error = Some(format!("No se pudo descartar el grupo: {e}"));
+                        }
                     }
                 }
                 if outcome.catalog_mutated {

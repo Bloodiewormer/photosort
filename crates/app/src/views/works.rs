@@ -1,12 +1,15 @@
 use crate::model::count_phrase;
 use crate::theme::{self, Palette};
+use crate::worker::{ThumbPool, ThumbRequest};
 use crate::works_worker::WorksEvent;
-use catalog::{Catalog, LabelId, WorkAlias, WorkProposal, WorkSummary, work_match_key};
-use eframe::egui::{
-    self, Align, CornerRadius, Frame, Key, Layout, Margin, ProgressBar, RichText, ScrollArea,
-    Stroke, Vec2,
+use catalog::{
+    Catalog, LabelId, ProposedWorkGroup, WorkAlias, WorkProposal, WorkSummary, work_match_key,
 };
-use std::collections::BTreeSet;
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, Frame, Key, Layout, Margin, ProgressBar, RichText,
+    ScrollArea, Sense, Stroke, TextureHandle, Vec2,
+};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 const ROW_HEIGHT: f32 = 42.0;
@@ -45,6 +48,7 @@ pub struct WorksViewState {
     pub confirm_delete: Option<LabelId>,
     /// Work whose bulk ownership confirmation is waiting for a second click.
     pub confirm_accept_all: Option<LabelId>,
+    pub proposed_groups: Vec<ProposedWorkGroup>,
 }
 
 impl Default for WorksViewState {
@@ -61,6 +65,7 @@ impl Default for WorksViewState {
             run_state: WorksRunState::Idle,
             confirm_delete: None,
             confirm_accept_all: None,
+            proposed_groups: Vec::new(),
         }
     }
 }
@@ -127,6 +132,9 @@ pub struct WorksViewOutcome {
     pub deleted: Option<LabelId>,
     pub status_notice: Option<String>,
     pub error: Option<String>,
+    pub accept_group: Option<(PathBuf, LabelId)>,
+    pub dismiss_group: Option<(PathBuf, LabelId)>,
+    pub thumbs_ready: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -139,8 +147,13 @@ pub fn draw(
     cat: Option<&mut Catalog>,
     worker_running: bool,
     other_heavy_task: Option<&str>,
+    thumb_pool: &ThumbPool,
+    thumb_textures: &HashMap<String, TextureHandle>,
+    thumb_failed: &HashSet<String>,
 ) -> WorksViewOutcome {
     let mut outcome = WorksViewOutcome::default();
+    let mut visible_hashes: HashSet<String> = HashSet::new();
+    let mut to_request: Vec<ThumbRequest> = Vec::new();
 
     let mut create_work_name: Option<String> = None;
     let mut add_alias: Option<(LabelId, String)> = None;
@@ -493,6 +506,124 @@ pub fn draw(
                                     .color(palette.chip_exclude_fg.color32()),
                             );
                         });
+                }
+            }
+
+            // Proposed groups section
+            if !state.proposed_groups.is_empty() {
+                ui.add_space(theme::SPACE_MD);
+                ui.label(
+                    RichText::new(format!(
+                        "Grupos propuestos ({})",
+                        state.proposed_groups.len()
+                    ))
+                    .size(theme::FONT_HEADING)
+                    .strong(),
+                );
+                ui.add_space(theme::SPACE_XS);
+                ui.label(
+                    RichText::new(
+                        "Carpetas cuyas páginas pertenecen a una obra según el nombre o la mayoría detectada.",
+                    )
+                    .size(theme::FONT_SMALL)
+                    .color(palette.text_secondary.color32()),
+                );
+                ui.add_space(theme::SPACE_SM);
+
+                for group in &state.proposed_groups {
+                    Frame::new()
+                        .fill(palette.bg_card.color32())
+                        .stroke(Stroke::new(1.0, palette.border.color32()))
+                        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+                        .inner_margin(Margin::same(theme::SPACE_MD as i8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let folder_name = group
+                                    .folder
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or_else(|| group.folder.to_str().unwrap_or(""));
+                                let full_folder = group.folder.display().to_string();
+                                ui.label(RichText::new(folder_name).strong())
+                                    .on_hover_text(&full_folder);
+                                ui.label(
+                                    RichText::new("→")
+                                        .color(palette.text_secondary.color32()),
+                                );
+                                ui.label(
+                                    RichText::new(&group.work_name)
+                                        .color(palette.accent.color32())
+                                        .strong(),
+                                );
+
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui
+                                        .add_enabled(
+                                            !busy,
+                                            egui::Button::new("Descartar grupo"),
+                                        )
+                                        .clicked()
+                                    {
+                                        outcome.dismiss_group =
+                                            Some((group.folder.clone(), group.work));
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            !busy,
+                                            theme::primary_button(palette, "Aceptar grupo"),
+                                        )
+                                        .clicked()
+                                    {
+                                        outcome.accept_group =
+                                            Some((group.folder.clone(), group.work));
+                                    }
+                                });
+                            });
+
+                            let ch_part = if group.chapter.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · Capítulo {}", group.chapter)
+                            };
+                            ui.label(
+                                RichText::new(format!(
+                                    "{}{ch_part}",
+                                    count_phrase(group.page_count, "página", "páginas")
+                                ))
+                                .size(theme::FONT_SMALL)
+                                .color(palette.text_secondary.color32()),
+                            );
+
+                            if !group.sample_entries.is_empty() {
+                                ui.add_space(theme::SPACE_SM);
+                                ui.horizontal(|ui| {
+                                    for entry in &group.sample_entries {
+                                        visible_hashes.insert(entry.sha256.clone());
+                                        if !thumb_textures.contains_key(&entry.sha256)
+                                            && !thumb_failed.contains(&entry.sha256)
+                                        {
+                                            to_request.push(ThumbRequest {
+                                                source: entry.path.clone(),
+                                                sha256: entry.sha256.clone(),
+                                            });
+                                        }
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            Vec2::new(56.0, 56.0),
+                                            Sense::hover(),
+                                        );
+                                        draw_thumb_box(
+                                            ui,
+                                            palette,
+                                            rect,
+                                            thumb_textures.get(&entry.sha256),
+                                            thumb_failed.contains(&entry.sha256),
+                                        );
+                                    }
+                                });
+                            }
+                        });
+                    ui.add_space(theme::SPACE_SM);
                 }
             }
 
@@ -892,5 +1023,57 @@ pub fn draw(
         }
     }
 
+    outcome.thumbs_ready =
+        visible_hashes.is_empty() || (!visible_hashes.is_empty() && to_request.is_empty());
+    thumb_pool.set_visible(&visible_hashes);
+    for req in to_request {
+        thumb_pool.request(req);
+    }
+
     outcome
+}
+
+fn draw_thumb_box(
+    ui: &egui::Ui,
+    palette: &Palette,
+    rect: egui::Rect,
+    texture: Option<&TextureHandle>,
+    failed: bool,
+) {
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(theme::RADIUS_SM),
+        palette.bg_canvas.color32(),
+    );
+    if let Some(tex) = texture {
+        let fit = fit_rect(rect, tex.size_vec2());
+        painter.image(
+            tex.id(),
+            fit,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        let placeholder = if failed { "Sin miniatura" } else { "..." };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            placeholder,
+            egui::FontId::proportional(theme::FONT_SMALL),
+            palette.text_secondary.color32(),
+        );
+    }
+}
+
+fn fit_rect(bounds: egui::Rect, content: Vec2) -> egui::Rect {
+    if content.x <= 0.0 || content.y <= 0.0 || bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return bounds;
+    }
+    let scale = (bounds.width() / content.x)
+        .min(bounds.height() / content.y)
+        .min(1.0);
+    let size = content * scale;
+    let origin = bounds.center() - size * 0.5;
+    egui::Rect::from_min_size(origin, size)
 }

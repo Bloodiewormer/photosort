@@ -1570,3 +1570,263 @@ fn ad_detection_avoids_dialogue_false_positives_and_discord_in_credits() {
         "Discord listed in credits must not turn credits page into Anuncio"
     );
 }
+
+#[test]
+fn folder_with_two_work_named_and_three_numbered_pages_proposes_work_and_pages() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        (
+            "manga/relojero_cap1/Crónicas del Relojero - Cap 1 - 01.png",
+            b"p1",
+        ),
+        (
+            "manga/relojero_cap1/Crónicas del Relojero - Cap 1 - 02.png",
+            b"p2",
+        ),
+        ("manga/relojero_cap1/003.png", b"p3"),
+        ("manga/relojero_cap1/004.png", b"p4"),
+        ("manga/relojero_cap1/005.png", b"p5"),
+    ]);
+
+    let work = cat.create_work("Crónicas del Relojero").unwrap();
+    cat.apply_filename_works(None).unwrap();
+
+    // Before folder proposals: pages 3, 4, 5 have no pertenencia.
+    assert!(
+        cat.asset_work(ids["manga/relojero_cap1/003.png"])
+            .unwrap()
+            .is_none()
+    );
+
+    let proposed = cat.apply_folder_work_groups(None).unwrap();
+    assert_eq!(proposed, 3, "must propose work for the 3 numbered pages");
+
+    let aw3 = cat
+        .asset_work(ids["manga/relojero_cap1/003.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw3.work, work);
+    assert_eq!(aw3.chapter, "1");
+    assert_eq!(aw3.page, Some(3));
+    assert_eq!(aw3.status, Status::Suggested);
+
+    let aw4 = cat
+        .asset_work(ids["manga/relojero_cap1/004.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw4.page, Some(4));
+
+    let aw5 = cat
+        .asset_work(ids["manga/relojero_cap1/005.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw5.page, Some(5));
+
+    let groups = cat.list_proposed_work_groups(None).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].work, work);
+    assert_eq!(groups[0].chapter, "1");
+    assert_eq!(groups[0].page_count, 5);
+}
+
+#[test]
+fn folder_named_after_alias_proposes_work() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("manga/Clockmaker/Capítulo 12/001.png", b"p1"),
+        ("manga/Clockmaker/Capítulo 12/p_12.png", b"p12"),
+    ]);
+
+    let work = cat.create_work("Crónicas del Relojero").unwrap();
+    cat.add_work_alias(work, "Clockmaker").unwrap();
+
+    let proposed = cat.apply_folder_work_groups(None).unwrap();
+    assert_eq!(proposed, 2);
+
+    let aw1 = cat
+        .asset_work(ids["manga/Clockmaker/Capítulo 12/001.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw1.work, work);
+    assert_eq!(aw1.chapter, "12");
+    assert_eq!(aw1.page, Some(1));
+    assert_eq!(aw1.status, Status::Suggested);
+
+    let aw2 = cat
+        .asset_work(ids["manga/Clockmaker/Capítulo 12/p_12.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw2.page, Some(12));
+
+    let groups = cat.list_proposed_work_groups(None).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].work_name, "Crónicas del Relojero");
+    assert_eq!(groups[0].chapter, "12");
+}
+
+#[test]
+fn folder_proposals_do_not_touch_accepted_or_rejected_belongings() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("manga/relojero/Otra Obra - Cap 99 - 00.png", b"p0"),
+        ("manga/relojero/Relojero - Cap 1 - 01.png", b"p1"),
+        ("manga/relojero/Relojero - Cap 1 - 02.png", b"p2"),
+        ("manga/relojero/003.png", b"p3"),
+        ("manga/relojero/004.png", b"p4"),
+    ]);
+
+    let work_relojero = cat.create_work("Relojero").unwrap();
+    let work_otra = cat.create_work("Otra Obra").unwrap();
+
+    // Filename matching suggests for 00, 01, 02
+    cat.apply_filename_works(None).unwrap();
+
+    // 00 is accepted for Otra Obra
+    cat.accept_asset_work(ids["manga/relojero/Otra Obra - Cap 99 - 00.png"])
+        .unwrap();
+
+    // 01 and 02 were suggested for Relojero; accept 01, reject 02 for Relojero
+    cat.accept_asset_work(ids["manga/relojero/Relojero - Cap 1 - 01.png"])
+        .unwrap();
+    cat.reject_asset_work(ids["manga/relojero/Relojero - Cap 1 - 02.png"])
+        .unwrap();
+
+    // Set 003 as rejected for Relojero
+    cat.suggest_work_from_path(
+        ids["manga/relojero/003.png"],
+        &std::path::PathBuf::from("Relojero - Cap 1 - 03.png"),
+    )
+    .unwrap();
+    cat.reject_asset_work(ids["manga/relojero/003.png"])
+        .unwrap();
+
+    // Apply folder proposals (majority in folder is Relojero)
+    cat.apply_folder_work_groups(None).unwrap();
+
+    // 00 must still belong to Otra Obra and remain accepted
+    let aw0 = cat
+        .asset_work(ids["manga/relojero/Otra Obra - Cap 99 - 00.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw0.work, work_otra);
+    assert_eq!(aw0.status, Status::Accepted);
+
+    // 01 must remain accepted for Relojero
+    let aw1 = cat
+        .asset_work(ids["manga/relojero/Relojero - Cap 1 - 01.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw1.work, work_relojero);
+    assert_eq!(aw1.status, Status::Accepted);
+
+    // 02 must remain rejected for Relojero
+    let aw2 = cat
+        .asset_work(ids["manga/relojero/Relojero - Cap 1 - 02.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw2.work, work_relojero);
+    assert_eq!(aw2.status, Status::Rejected);
+
+    // 03 must remain rejected for Relojero
+    let aw3 = cat
+        .asset_work(ids["manga/relojero/003.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw3.work, work_relojero);
+    assert_eq!(aw3.status, Status::Rejected);
+
+    // 04 had no pertenencia, now suggested for Relojero
+    let aw4 = cat
+        .asset_work(ids["manga/relojero/004.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(aw4.work, work_relojero);
+    assert_eq!(aw4.status, Status::Suggested);
+    assert_eq!(aw4.page, Some(4));
+}
+
+#[test]
+fn dismissed_group_is_remembered_and_never_comes_back() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("manga/Clockmaker/Capítulo 01/001.png", b"p1"),
+        ("manga/Clockmaker/Capítulo 01/002.png", b"p2"),
+    ]);
+
+    let work = cat.create_work("Crónicas del Relojero").unwrap();
+    cat.add_work_alias(work, "Clockmaker").unwrap();
+
+    cat.apply_folder_work_groups(None).unwrap();
+    let groups = cat.list_proposed_work_groups(None).unwrap();
+    assert_eq!(groups.len(), 1);
+
+    // Discard the group
+    let dismissed = cat
+        .dismiss_proposed_work_group(&groups[0].folder, work)
+        .unwrap();
+    assert_eq!(dismissed, 2);
+
+    // No pending proposed groups, suggestions removed
+    assert!(cat.list_proposed_work_groups(None).unwrap().is_empty());
+    assert!(
+        cat.asset_work(ids["manga/Clockmaker/Capítulo 01/001.png"])
+            .unwrap()
+            .is_none()
+    );
+
+    // Re-run folder proposals: dismissed group must NOT come back
+    let proposed_again = cat.apply_folder_work_groups(None).unwrap();
+    assert_eq!(
+        proposed_again, 0,
+        "dismissed group must never be proposed again"
+    );
+    assert!(cat.list_proposed_work_groups(None).unwrap().is_empty());
+    assert!(
+        cat.asset_work(ids["manga/Clockmaker/Capítulo 01/001.png"])
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn ordering_of_pages_without_chapter_grouped_by_folder_and_not_mixed_with_chapters() {
+    let (_tmp, mut cat, _ids) = setup_catalog(&[
+        ("manga/obra/ch1/Obra - Cap 1 - 01.png", b"c1p1"),
+        ("manga/obra/ch1/Obra - Cap 1 - 02.png", b"c1p2"),
+        ("manga/obra/no_ch_a/001.png", b"a1"),
+        ("manga/obra/no_ch_a/002.png", b"a2"),
+        ("manga/obra/no_ch_b/001.png", b"b1"),
+        ("manga/obra/no_ch_b/002.png", b"b2"),
+    ]);
+
+    let work = cat.create_work("Obra").unwrap();
+
+    cat.apply_filename_works(None).unwrap();
+    cat.apply_folder_work_groups(None).unwrap();
+
+    let entries = cat.entries_belonging_to_work(work, None).unwrap();
+    let filenames: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let parent = e
+                .path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let file = e.path.file_name().unwrap().to_str().unwrap();
+            format!("{parent}/{file}")
+        })
+        .collect();
+
+    assert_eq!(
+        filenames,
+        vec![
+            "ch1/Obra - Cap 1 - 01.png",
+            "ch1/Obra - Cap 1 - 02.png",
+            "no_ch_a/001.png",
+            "no_ch_a/002.png",
+            "no_ch_b/001.png",
+            "no_ch_b/002.png",
+        ],
+        "pages without chapter must follow numbered chapters and be grouped by folder then page"
+    );
+}
