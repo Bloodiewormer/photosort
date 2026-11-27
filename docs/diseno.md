@@ -68,7 +68,7 @@ Límites conocidos:
 
 - Las ventanas (exportar, etiquetas, propuestas de obras) y el visor no retienen el foco: con Tab se puede salir a lo que hay detrás.
 - El menú contextual de los filtros de la barra lateral solo se abre con el ratón. Con teclado, pulsar el filtro cambia su modo, y las órdenes sobre etiquetas están en «Acciones», en la vista Etiquetas.
-- Los nombres que pone egui, como «Close window» y «Resize panel», están en inglés.
+- egui pone en inglés el nombre de algunos de sus controles. «Close window» y «Resize panel» se traducen antes de llegar al lector de pantalla; si una versión nueva de egui añade otro, hay que sumarlo a `theme::SpanishNames`.
 - Las pruebas leen el árbol de AccessKit, no lo que dice un lector de pantalla.
 
 ### Comprobación pendiente con Narrador
