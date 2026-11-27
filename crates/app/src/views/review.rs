@@ -1,6 +1,7 @@
 use crate::model::count_phrase;
 use crate::review_flow::{ReviewDecision, ReviewFlow, THRESHOLD_MAX, THRESHOLD_MIN, UndoOutcome};
 use crate::theme::{self, Palette};
+use crate::views::end_row_unless_buttons_fit;
 use crate::worker::{ThumbPool, ThumbRequest};
 use catalog::{Catalog, LabelKind, Source};
 use eframe::egui::{
@@ -252,6 +253,10 @@ pub fn draw(
                     .size(theme::FONT_HEADING)
                     .strong(),
                 );
+                end_row_unless_buttons_fit(
+                    ui,
+                    &["Aceptar todo el grupo", "Rechazar todo el grupo"],
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Rechazar todo el grupo").clicked() {
                         request_group = Some(ReviewDecision::Reject);
@@ -289,26 +294,15 @@ pub fn draw(
                                 .strong()
                                 .color(palette.review_badge_fg.color32()),
                             );
-                            // Inside a wrapped row, only the space left on the row counts.
-                            if ui.available_size_before_wrap().x < 240.0 {
-                                ui.horizontal(|ui| {
-                                    if ui.button("Cancelar").clicked() {
-                                        cancel_group = true;
-                                    }
-                                    if ui.button("Confirmar").clicked() {
-                                        confirm_group = true;
-                                    }
-                                });
-                            } else {
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Cancelar").clicked() {
-                                        cancel_group = true;
-                                    }
-                                    if ui.button("Confirmar").clicked() {
-                                        confirm_group = true;
-                                    }
-                                });
-                            }
+                            end_row_unless_buttons_fit(ui, &["Confirmar", "Cancelar"]);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Cancelar").clicked() {
+                                    cancel_group = true;
+                                }
+                                if ui.button("Confirmar").clicked() {
+                                    confirm_group = true;
+                                }
+                            });
                         });
                     });
                 ui.add_space(theme::SPACE_SM);
@@ -363,53 +357,7 @@ pub fn draw(
                                     );
                                     ui.add_space(theme::SPACE_SM);
 
-                                    ui.vertical(|ui| {
-                                        let filename = row
-                                            .path
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().into_owned())
-                                            .unwrap_or_else(|| row.path.display().to_string());
-                                        ui.label(
-                                            RichText::new(filename)
-                                                .size(theme::FONT_BODY)
-                                                .strong(),
-                                        );
-                                        ui.label(
-                                            RichText::new(row.path.display().to_string())
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.text_secondary.color32()),
-                                        );
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{}: {}",
-                                                    kind_label(row.label_kind),
-                                                    row.label_name
-                                                ))
-                                                .size(theme::FONT_SMALL)
-                                                .strong(),
-                                            );
-                                            ui.separator();
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "Confianza: {:.0}%",
-                                                    row.confidence * 100.0
-                                                ))
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.status_suggested_fg.color32()),
-                                            );
-                                            ui.separator();
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "Fuente: {}",
-                                                    source_label(row.source)
-                                                ))
-                                                .size(theme::FONT_SMALL)
-                                                .color(palette.text_secondary.color32()),
-                                            );
-                                        });
-                                    });
-
+                                    // The buttons take their place first; the text gets what is left.
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                         if ui.button("Rechazar").clicked() {
                                             row_action = Some((idx, ReviewDecision::Reject));
@@ -417,6 +365,55 @@ pub fn draw(
                                         if ui.button("Aceptar").clicked() {
                                             row_action = Some((idx, ReviewDecision::Accept));
                                         }
+                                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                            let filename = row
+                                                .path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_else(|| row.path.display().to_string());
+                                            ui.label(
+                                                RichText::new(filename)
+                                                    .size(theme::FONT_BODY)
+                                                    .strong(),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(row.path.display().to_string())
+                                                        .size(theme::FONT_SMALL)
+                                                        .color(palette.text_secondary.color32()),
+                                                )
+                                                .truncate(),
+                                            );
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{}: {}",
+                                                        kind_label(row.label_kind),
+                                                        row.label_name
+                                                    ))
+                                                    .size(theme::FONT_SMALL)
+                                                    .strong(),
+                                                );
+                                                ui.separator();
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Confianza: {:.0}%",
+                                                        row.confidence * 100.0
+                                                    ))
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(palette.status_suggested_fg.color32()),
+                                                );
+                                                ui.separator();
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Fuente: {}",
+                                                        source_label(row.source)
+                                                    ))
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(palette.text_secondary.color32()),
+                                                );
+                                            });
+                                        });
                                     });
                                 });
                             });

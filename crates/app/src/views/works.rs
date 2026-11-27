@@ -1,5 +1,6 @@
 use crate::model::count_phrase;
 use crate::theme::{self, Palette};
+use crate::views::end_row_unless_buttons_fit;
 use crate::worker::{ThumbPool, ThumbRequest};
 use crate::works_worker::WorksEvent;
 use catalog::{
@@ -540,7 +541,7 @@ pub fn draw(
                         .inner_margin(Margin::same(theme::SPACE_MD as i8))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 let folder_name = group
                                     .folder
                                     .file_name()
@@ -559,6 +560,10 @@ pub fn draw(
                                         .strong(),
                                 );
 
+                                end_row_unless_buttons_fit(
+                                    ui,
+                                    &["Aceptar grupo", "Descartar grupo"],
+                                );
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if ui
                                         .add_enabled(
@@ -632,7 +637,7 @@ pub fn draw(
             ui.add_space(theme::SPACE_MD);
 
             // Create new work + filter bar
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let edit = ui.add(
                     egui::TextEdit::singleline(&mut state.new_work_input)
                         .desired_width(240.0)
@@ -648,11 +653,16 @@ pub fn draw(
                     }
                 }
 
-                ui.separator();
+                // The filter drops to its own row instead of running under the detail panel.
+                if ui.available_size_before_wrap().x < 260.0 {
+                    ui.end_row();
+                } else {
+                    ui.separator();
+                }
 
                 ui.add(
                     egui::TextEdit::singleline(&mut state.filter)
-                        .desired_width((ui.available_width() - 80.0).max(160.0))
+                        .desired_width((ui.available_size_before_wrap().x - 80.0).max(160.0))
                         .hint_text(theme::hint_text(palette, "Filtrar obras…")),
                 );
                 if !state.filter.is_empty() && ui.button("Limpiar").clicked() {
@@ -766,7 +776,7 @@ pub fn draw(
                                                     .frame(false)
                                                     .truncate(),
                                                 );
-                                                if resp.clicked() {
+                                                if resp.on_hover_text(&work.name).clicked() {
                                                     state.selected = Some(work.label);
                                                     select_changed = true;
                                                 }
