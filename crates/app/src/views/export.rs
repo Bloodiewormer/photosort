@@ -590,8 +590,11 @@ fn info_row_with_tooltip(
     });
 }
 
+/// Enter as the default action: only with no control focused, so that Enter on «Cerrar» or
+/// «Volver» never starts an export.
 fn enter_pressed(ctx: &egui::Context) -> bool {
-    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+    !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
 }
 
 fn repaint_notify(ctx: &egui::Context) -> Notify {
