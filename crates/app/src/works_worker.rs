@@ -125,6 +125,14 @@ impl WorksWorker {
                     break;
                 }
 
+                let entry = match &roots {
+                    Some(r) => cat.entry_for_in_roots(asset, r),
+                    None => cat.entry_for(asset),
+                };
+                let Ok(Some(entry)) = entry else {
+                    continue;
+                };
+
                 match cat.apply_work_matches(asset, &matcher) {
                     Ok(res) => {
                         processed += 1;
@@ -135,6 +143,15 @@ impl WorksWorker {
                         if count > 0 {
                             matched_assets += 1;
                             suggestions += count;
+                        }
+
+                        if cat.is_promo_page(asset).unwrap_or(false) {
+                            let _ = crate::promo_covers::refresh_covers(
+                                &mut cat,
+                                asset,
+                                &entry.path,
+                                &res.work_rects,
+                            );
                         }
                     }
                     Err(e) => {

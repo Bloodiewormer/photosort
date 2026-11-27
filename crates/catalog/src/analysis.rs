@@ -323,6 +323,23 @@ impl Catalog {
         Ok(total)
     }
 
+    /// Returns `true` if `asset` completed `stage` at `version` or a later one.
+    pub fn is_stage_done(
+        &self,
+        asset: AssetId,
+        stage: &str,
+        version: u32,
+    ) -> Result<bool, CatalogError> {
+        let done: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM analysis WHERE asset_id = ?1 AND stage = ?2 AND version >= ?3
+             )",
+            params![asset.0, stage, i64::from(version)],
+            |r| r.get(0),
+        )?;
+        Ok(done != 0)
+    }
+
     /// Records that `asset` completed `stage` at `version`. Never lowers a recorded version.
     /// Also clears any persisted error record for `(asset, stage)`.
     pub fn mark_done(&self, asset: AssetId, stage: &str, version: u32) -> Result<(), CatalogError> {

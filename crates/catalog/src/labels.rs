@@ -837,6 +837,14 @@ impl Catalog {
         Ok(RenameOutcome::Renamed)
     }
 
+    /// Looks up the name of a label by its id.
+    pub fn label_name(&self, id: LabelId) -> Result<Option<String>, CatalogError> {
+        Ok(self
+            .conn
+            .query_row("SELECT name FROM label WHERE id = ?1", [id.0], |r| r.get(0))
+            .optional()?)
+    }
+
     /// Moves a category under `new_parent` (or to the root when `None`). Rejects cycles.
     pub fn move_category(
         &self,

@@ -521,6 +521,7 @@ impl PhotosortApp {
         match (self.inspector.asset, &self.catalog) {
             (Some(asset), Some(cat)) => {
                 self.inspector.asset_work = cat.asset_work(asset).unwrap_or(None);
+                self.inspector.covers = cat.asset_covers(asset).unwrap_or_default();
                 self.inspector.ocr_lines = cat.ocr_lines(asset).unwrap_or_default();
                 self.inspector.ocr_done = cat.has_ocr_done(asset).unwrap_or(false);
                 let drawn = cat.labels_of(asset).unwrap_or_default().iter().any(|a| {
@@ -547,6 +548,7 @@ impl PhotosortApp {
             }
             _ => {
                 self.inspector.asset_work = None;
+                self.inspector.covers.clear();
                 self.inspector.ocr_lines.clear();
                 self.inspector.ocr_done = false;
                 self.inspector.faces.clear();
@@ -1753,6 +1755,24 @@ impl eframe::App for PhotosortApp {
                             Err(e) => {
                                 self.banner_error =
                                     Some(format!("No se pudo descartar la obra: {e}"))
+                            }
+                        }
+                    }
+                    if let Some((asset, cover_idx)) = insp_out.accept_cover {
+                        match cat.accept_asset_cover(asset, cover_idx) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo confirmar la portada: {e}"))
+                            }
+                        }
+                    }
+                    if let Some((asset, cover_idx)) = insp_out.reject_cover {
+                        match cat.reject_asset_cover(asset, cover_idx) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo descartar la portada: {e}"))
                             }
                         }
                     }
