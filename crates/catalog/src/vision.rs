@@ -16,9 +16,9 @@ pub const EMBEDDING_BYTES: usize = EMBEDDING_DIM * 4;
 /// Foto, Meme or Capturas de pantalla.
 pub const YUNET_FACE_SCORE_THRESHOLD: f32 = 0.8;
 
-/// UNCALIBRATED placeholder threshold for built-in exclusive TYPE rules, chosen from the
-/// synthetic verification set only. Users can tune each rule's threshold from the UI.
-pub const DEFAULT_TYPE_THRESHOLD: f32 = 0.08;
+/// Threshold for built-in exclusive TYPE rules, calibrated on 335 real images (see
+/// docs/vision-evaluacion.md). Users can tune each rule's threshold from the UI.
+pub const DEFAULT_TYPE_THRESHOLD: f32 = 0.06;
 
 /// UNCALIBRATED placeholder threshold for the built-in `"persona"` independent tag rule.
 pub const DEFAULT_PERSON_THRESHOLD: f32 = 0.10;
@@ -26,6 +26,22 @@ pub const DEFAULT_PERSON_THRESHOLD: f32 = 0.10;
 /// UNCALIBRATED placeholder threshold for built-in independent content category and page-type
 /// vision rules. Users should calibrate each rule using «Probar» on their own images.
 pub const DEFAULT_CATEGORY_THRESHOLD: f32 = 0.10;
+
+/// Calibrated on 335 real images: anime art scores lower than the generic category default.
+const ANIME_THRESHOLD: f32 = 0.085;
+
+/// Calibrated on 335 real images: below this, lists of covers and promo pages match too.
+const MANGA_COVER_THRESHOLD: f32 = 0.16;
+
+/// No threshold separated these from the rest on 335 real images; the user can turn them on.
+const DISABLED_BY_DEFAULT: &[&str] = &[
+    BUILTIN_KEY_MANHWA,
+    BUILTIN_KEY_WEBTOON,
+    BUILTIN_KEY_VIDEOGAMES,
+];
+
+/// Marks catalogs whose untouched built-in rules already got the calibrated values.
+const META_BUILTINS_CALIBRATED: &str = "vision_builtins_calibrated:2026-11-27";
 
 /// UNCALIBRATED placeholder threshold for newly created custom independent tag rules.
 pub const DEFAULT_CUSTOM_THRESHOLD: f32 = 0.10;
@@ -555,7 +571,7 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
         kind: LabelKind::Category,
         name: CAT_ANIME,
         mode: RuleMode::Independent,
-        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        threshold: ANIME_THRESHOLD,
         positives: &[
             "an anime screenshot or anime style artwork with Japanese animation characters",
             "a Japanese anime television series frame or anime movie still",
@@ -671,7 +687,7 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
         kind: LabelKind::Category,
         name: MANGA_COVER_CATEGORY,
         mode: RuleMode::Independent,
-        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        threshold: MANGA_COVER_THRESHOLD,
         positives: &[
             "a colorful manga volume cover or chapter cover page with title logo and character art",
             "a Japanese manga book cover illustration with series title text",
@@ -791,14 +807,15 @@ impl Catalog {
             tx.execute(
                 "INSERT OR IGNORE INTO vision_rule
                      (label_id, mode, threshold, enabled, positives, negatives, builtin_key)
-                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
+                 VALUES (?1, ?2, ?3, ?7, ?4, ?5, ?6)",
                 params![
                     label_id,
                     spec.mode.as_str(),
                     f64::from(spec.threshold),
                     pos,
                     neg,
-                    spec.key
+                    spec.key,
+                    !DISABLED_BY_DEFAULT.contains(&spec.key),
                 ],
             )?;
             tx.execute(
@@ -813,6 +830,50 @@ impl Catalog {
         tx.execute(
             "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES (?1, '1')",
             [META_BUILTINS_SEEDED],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Gives built-in rules the user never edited the values calibrated on real images. Rules the
+    /// user changed in any way keep their values. Runs once per catalog.
+    pub(crate) fn calibrate_builtin_vision_rules(&mut self) -> Result<(), CatalogError> {
+        let done = |c: &rusqlite::Connection| -> Result<bool, CatalogError> {
+            Ok(c.prepare("SELECT 1 FROM catalog_meta WHERE key = ?1")?
+                .exists([META_BUILTINS_CALIBRATED])?)
+        };
+        if done(&self.conn)? {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if done(&tx)? {
+            return Ok(());
+        }
+        for spec in BUILTIN_RULES {
+            let old = if spec.mode == RuleMode::Type {
+                0.08
+            } else {
+                DEFAULT_CATEGORY_THRESHOLD
+            };
+            tx.execute(
+                "UPDATE vision_rule SET threshold = ?2, enabled = ?3
+                 WHERE builtin_key = ?1 AND enabled = 1 AND abs(threshold - ?4) < 1e-6
+                   AND positives = ?5 AND negatives = ?6",
+                params![
+                    spec.key,
+                    f64::from(spec.threshold),
+                    !DISABLED_BY_DEFAULT.contains(&spec.key),
+                    old,
+                    spec.positives.join("\n"),
+                    spec.negatives.join("\n"),
+                ],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO catalog_meta (key, value) VALUES (?1, '1')",
+            [META_BUILTINS_CALIBRATED],
         )?;
         tx.commit()?;
         Ok(())

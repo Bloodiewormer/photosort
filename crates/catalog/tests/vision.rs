@@ -510,10 +510,10 @@ fn content_categories_combine_independently_with_image_type() {
     seed_orthogonal_rule_embeddings(&mut s.cat);
     let (compiled, _) = s.cat.compile_vision_rules(SIGLIP2_MODEL_ID).unwrap();
 
-    // Image aligns with both Capturas de pantalla (dim 3) and Videojuegos (dim 15).
+    // Image aligns with both Capturas de pantalla (dim 3) and Animales (dim 11).
     let mut v = vec![0.0f32; EMBEDDING_DIM];
     v[3] = 0.72;
-    v[15] = 0.69;
+    v[11] = 0.69;
     let asset = s.asset("game_shot.png");
     s.cat
         .save_vision_result(asset, SIGLIP2_MODEL_ID, &normalized(v), &[])
@@ -532,8 +532,8 @@ fn content_categories_combine_independently_with_image_type() {
         "expected Capturas de pantalla in {names:?}"
     );
     assert!(
-        names.contains(&CAT_VIDEOGAMES.to_string()),
-        "expected Videojuegos in {names:?}"
+        names.contains(&CAT_ANIMALS.to_string()),
+        "expected Animales in {names:?}"
     );
 }
 
@@ -702,4 +702,23 @@ fn opening_an_up_to_date_catalog_does_not_need_the_write_lock() {
     let reopened = Catalog::open(&s.db);
     writer.execute_batch("ROLLBACK").unwrap();
     assert!(reopened.is_ok(), "{:?}", reopened.err());
+}
+
+#[test]
+fn calibrated_values_reach_untouched_rules_of_older_catalogs_only() {
+    let s = setup(&[("a.jpg", b"aaa")]);
+    let raw = rusqlite::Connection::open(s.db.as_path()).unwrap();
+    // As an older catalog left them: old defaults, one rule edited by the user.
+    raw.execute_batch(
+        "UPDATE vision_rule SET threshold = 0.08, enabled = 1 WHERE builtin_key LIKE 'type_%';
+         UPDATE vision_rule SET enabled = 1 WHERE builtin_key = 'cat_webtoon';
+         UPDATE vision_rule SET threshold = 0.2 WHERE builtin_key = 'type_photo';
+         DELETE FROM catalog_meta WHERE key LIKE 'vision_builtins_calibrated:%';",
+    )
+    .unwrap();
+    let rules = Catalog::open(&s.db).unwrap().list_vision_rules().unwrap();
+    let rule = |name: &str| rules.iter().find(|r| r.name == name).unwrap();
+    assert!((rule(TYPE_MANGA).threshold - 0.06).abs() < 1e-6);
+    assert!((rule(TYPE_PHOTO).threshold - 0.2).abs() < 1e-6);
+    assert!(!rule(CAT_WEBTOON).enabled);
 }

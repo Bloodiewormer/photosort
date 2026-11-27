@@ -180,3 +180,31 @@ cargo run --release -p vision --example vision_eval -- retrieval --models $env:P
 cargo run --release -p vision --example vision_eval -- agree --models $env:PHOTOSORT_VISION_MODELS
 cargo run --release -p vision --example vision_eval -- matrix --models $env:PHOTOSORT_VISION_MODELS --reps 3 --passes 2
 ```
+
+## Calibración con imágenes reales
+
+2026-11-27. Muestra aprobada por el usuario: 335 imágenes de una carpeta propia, solo lectura. Cada imagen se etiquetó a mano por su tipo y por las categorías presentes. El catálogo, las puntuaciones y las hojas de contacto quedaron en una carpeta local fuera del repositorio. Aquí solo hay cifras agregadas.
+
+Composición: 140 fotos (133 con personas), 43 capturas, 24 páginas de manga, 15 ilustraciones, 8 memes y 105 gráficos sin tipo claro (listas de proyectos de scanlation, páginas promocionales, infografías), que no cuentan para el tipo. Hay 146 imágenes de estilo anime, 6 portadas de manga, 2 de manhwa o webtoon y 3 de videojuegos.
+
+| Regla | Antes | Ahora | Resultado en la muestra |
+|---|---|---|---|
+| Tipo (las seis) | 0,08 | **0,06** | Fotos con tipo correcto: de 57 a 133 de 140. Sin cambios en los otros tipos. Tipo por máximo coseno: 196 de 230 aciertos (85 %); el error más común son capturas de aplicaciones de manga tomadas por `Manga` (12). |
+| `persona` | 0,10 | 0,10 | 123 de 133 aciertos, 12 falsos positivos. Sin cambios. |
+| `Anime` | 0,10 | **0,085** | De 34 a 134 aciertos de 146, con precisión del 85 %. |
+| `Portada de manga` | 0,10 | **0,16** | Antes 114 sugerencias con 5 aciertos; ahora 2 sugerencias, las 2 correctas (recupera 2 de 6). |
+| `Manhwa` | 0,10 | **desactivada** | 60 sugerencias para 2 casos reales. Con ningún umbral la precisión pasa del 3 %. |
+| `Webtoon` | 0,10 | **desactivada** | 155 sugerencias para 2 casos reales. Mismo problema. |
+| `Videojuegos` | 0,10 | **desactivada** | 13 sugerencias, 1 correcta; ningún umbral separa los 3 casos reales. |
+
+`Animales`, `Naturaleza y paisajes`, `Computadoras y hardware` y `Tecnología y electrónica` tienen 1 a 4 casos en la muestra: no hay datos para calibrarlas y conservan 0,10.
+
+Los catálogos existentes reciben estos valores una sola vez al abrirse, **solo en las reglas que el usuario no ha tocado** (umbral, estado y descripciones iguales a los anteriores por defecto).
+
+Para repetirlo con otra muestra:
+
+```powershell
+cargo run --release -p app --example calibrar -- <carpeta de muestra> <carpeta de salida fuera de la biblioteca> <carpeta de modelos>
+```
+
+Escribe `puntuaciones.csv` (coseno de cada regla por imagen) y hojas de contacto numeradas en la carpeta de salida.

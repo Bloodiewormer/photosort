@@ -296,6 +296,7 @@ impl Catalog {
         cat.migrate_label_parent()?;
         cat.migrate_asset_metadata()?;
         cat.seed_builtin_vision_rules()?;
+        cat.calibrate_builtin_vision_rules()?;
         Ok(cat)
     }
 
