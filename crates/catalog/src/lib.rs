@@ -3,6 +3,7 @@ mod browse;
 mod dupes;
 mod labels;
 mod ocr;
+mod persons;
 mod vision;
 mod works;
 
@@ -22,14 +23,19 @@ pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
     ocr_search_key,
 };
+pub use persons::{
+    FaceDetail, Person, PersonId, SFACE_SIMILARITY_THRESHOLD, cosine_similarity_128,
+    decode_face_embedding, encode_face_embedding,
+};
 pub use vision::{
     CAT_ANIMALS, CAT_ANIME, CAT_COMPUTERS_HARDWARE, CAT_MANHWA, CAT_NATURE_LANDSCAPES,
     CAT_TECH_ELECTRONICS, CAT_VIDEOGAMES, CAT_WEBTOON, CompiledRule, CompiledVisionRules,
     DEFAULT_CATEGORY_THRESHOLD, DEFAULT_CUSTOM_THRESHOLD, DEFAULT_PERSON_THRESHOLD,
     DEFAULT_TYPE_THRESHOLD, DetectedFace, EMBEDDING_BYTES, EMBEDDING_DIM, MANGA_COVER_CATEGORY,
-    RankedAsset, RuleId, RuleMode, SIGLIP2_MODEL_ID, TAG_PERSON, TYPE_DOCUMENT, TYPE_ILLUSTRATION,
-    TYPE_MANGA, TYPE_MEME, TYPE_PHOTO, VISION_STAGE, VISION_VERSION, VisionRule, VisionSuggestion,
-    YUNET_FACE_SCORE_THRESHOLD, decode_embedding_array, encode_embedding,
+    RankedAsset, RuleId, RuleMode, SIGLIP2_MODEL_ID, TAG_GROUP, TAG_PERSON, TAG_PORTRAIT,
+    TYPE_DOCUMENT, TYPE_ILLUSTRATION, TYPE_MANGA, TYPE_MEME, TYPE_PHOTO, VISION_STAGE,
+    VISION_VERSION, VisionRule, VisionSuggestion, YUNET_FACE_SCORE_THRESHOLD,
+    decode_embedding_array, decode_landmarks, encode_embedding, encode_landmarks,
     independent_ordering_confidence,
 };
 pub use works::{
@@ -157,18 +163,31 @@ CREATE TABLE IF NOT EXISTS asset_embedding (
     vector   BLOB NOT NULL CHECK (length(vector) = 3072)
 );
 CREATE INDEX IF NOT EXISTS asset_embedding_model ON asset_embedding(model, asset_id);
+CREATE TABLE IF NOT EXISTS person (
+    id      INTEGER PRIMARY KEY,
+    name    TEXT,
+    hidden  INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+    ignored INTEGER NOT NULL DEFAULT 0 CHECK (ignored IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS person_name ON person(name);
 CREATE TABLE IF NOT EXISTS asset_face (
-    id       INTEGER PRIMARY KEY,
-    asset_id INTEGER NOT NULL REFERENCES asset(id),
-    face_idx INTEGER NOT NULL,
-    x1       REAL NOT NULL,
-    y1       REAL NOT NULL,
-    x2       REAL NOT NULL,
-    y2       REAL NOT NULL,
-    score    REAL NOT NULL CHECK (score BETWEEN 0 AND 1),
+    id            INTEGER PRIMARY KEY,
+    asset_id      INTEGER NOT NULL REFERENCES asset(id),
+    face_idx      INTEGER NOT NULL,
+    x1            REAL NOT NULL,
+    y1            REAL NOT NULL,
+    x2            REAL NOT NULL,
+    y2            REAL NOT NULL,
+    score         REAL NOT NULL CHECK (score BETWEEN 0 AND 1),
+    landmarks     TEXT,
+    person_id     INTEGER REFERENCES person(id) ON DELETE SET NULL,
+    user_assigned INTEGER NOT NULL DEFAULT 0 CHECK (user_assigned IN (0, 1)),
+    similarity    REAL,
+    embedding     BLOB CHECK (embedding IS NULL OR length(embedding) = 512),
     UNIQUE (asset_id, face_idx)
 );
 CREATE INDEX IF NOT EXISTS asset_face_asset ON asset_face(asset_id);
+CREATE INDEX IF NOT EXISTS asset_face_person ON asset_face(person_id);
 CREATE TABLE IF NOT EXISTS vision_rule (
     id          INTEGER PRIMARY KEY,
     label_id    INTEGER NOT NULL UNIQUE REFERENCES label(id),
@@ -299,6 +318,7 @@ impl Catalog {
         let mut cat = Self { conn };
         cat.migrate_label_parent()?;
         cat.migrate_asset_metadata()?;
+        cat.migrate_faces_and_people()?;
         cat.seed_builtin_vision_rules()?;
         cat.calibrate_builtin_vision_rules()?;
         Ok(cat)
@@ -402,6 +422,92 @@ impl Catalog {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Ensures the `person` table and all face grouping columns on `asset_face` exist, without writing when up to date.
+    fn migrate_faces_and_people(&mut self) -> Result<(), CatalogError> {
+        let has_person = self.has_person_table()?;
+        let has_cols = self.asset_face_has_person_columns()?;
+        if has_person && has_cols {
+            return Ok(());
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS person (
+                 id      INTEGER PRIMARY KEY,
+                 name    TEXT,
+                 hidden  INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+                 ignored INTEGER NOT NULL DEFAULT 0 CHECK (ignored IN (0, 1))
+             );
+             CREATE INDEX IF NOT EXISTS person_name ON person(name);",
+        )?;
+
+        let mut existing_cols = std::collections::HashSet::new();
+        {
+            let mut check = tx.prepare("PRAGMA table_info(asset_face)")?;
+            let cols = check.query_map([], |r| r.get::<_, String>(1))?;
+            for c in cols {
+                existing_cols.insert(c?);
+            }
+        }
+
+        if !existing_cols.contains("landmarks") {
+            tx.execute_batch("ALTER TABLE asset_face ADD COLUMN landmarks TEXT;")?;
+        }
+        if !existing_cols.contains("person_id") {
+            tx.execute_batch(
+                "ALTER TABLE asset_face ADD COLUMN person_id INTEGER REFERENCES person(id) ON DELETE SET NULL;",
+            )?;
+        }
+        if !existing_cols.contains("user_assigned") {
+            tx.execute_batch(
+                "ALTER TABLE asset_face ADD COLUMN user_assigned INTEGER NOT NULL DEFAULT 0 CHECK (user_assigned IN (0, 1));",
+            )?;
+        }
+        if !existing_cols.contains("similarity") {
+            tx.execute_batch("ALTER TABLE asset_face ADD COLUMN similarity REAL;")?;
+        }
+        if !existing_cols.contains("embedding") {
+            tx.execute_batch(
+                "ALTER TABLE asset_face ADD COLUMN embedding BLOB CHECK (embedding IS NULL OR length(embedding) = 512);",
+            )?;
+        }
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS asset_face_person ON asset_face(person_id);")?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn has_person_table(&self) -> Result<bool, CatalogError> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'person')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    fn asset_face_has_person_columns(&self) -> Result<bool, CatalogError> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(asset_face)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        let mut landmarks = false;
+        let mut person_id = false;
+        let mut user_assigned = false;
+        let mut similarity = false;
+        let mut embedding = false;
+        for c in cols {
+            match c?.as_str() {
+                "landmarks" => landmarks = true,
+                "person_id" => person_id = true,
+                "user_assigned" => user_assigned = true,
+                "similarity" => similarity = true,
+                "embedding" => embedding = true,
+                _ => {}
+            }
+        }
+        Ok(landmarks && person_id && user_assigned && similarity && embedding)
     }
 
     /// Stores read-only image metadata (dimensions, normalized format, EXIF capture timestamp and

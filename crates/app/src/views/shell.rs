@@ -21,6 +21,7 @@ pub enum ActiveView {
     Suggestions,
     Duplicates,
     Works,
+    Persons,
     Tags,
     Settings,
     Errors,
@@ -325,8 +326,10 @@ pub fn draw_sidebar(
     suggestions_count: usize,
     duplicates_count: usize,
     works_count: usize,
+    persons_count: usize,
     rules_count: usize,
     all_labels: &[LabelNode],
+    all_persons: &[catalog::Person],
     metadata_facets: &MetadataFacets,
     filter: &mut FilterState,
     sidebar_state: &mut SidebarState,
@@ -408,6 +411,11 @@ pub fn draw_sidebar(
                             ActiveView::Works,
                             "Obras",
                             (works_count > 0).then_some(works_count),
+                        ),
+                        (
+                            ActiveView::Persons,
+                            "Personas",
+                            (persons_count > 0).then_some(persons_count),
                         ),
                         (
                             ActiveView::Tags,
@@ -536,6 +544,7 @@ pub fn draw_sidebar(
                             &mut outcome,
                         );
                         draw_year_filter_group(ui, palette, metadata_facets, filter, &mut outcome);
+                        draw_persons_filter_group(ui, palette, all_persons, filter, &mut outcome);
                     }
                 });
 
@@ -1057,6 +1066,44 @@ fn draw_year_filter_group(
             }
         });
     });
+    ui.add_space(theme::SPACE_XS);
+}
+
+fn draw_persons_filter_group(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    persons: &[catalog::Person],
+    filter: &mut FilterState,
+    outcome: &mut SidebarOutcome,
+) {
+    if persons.is_empty() {
+        return;
+    }
+    let any_active = persons.iter().any(|p| filter.persons.contains(&p.id));
+    let title = if any_active {
+        format!("Personas ({})*", persons.len())
+    } else {
+        format!("Personas ({})", persons.len())
+    };
+
+    egui::CollapsingHeader::new(RichText::new(title).size(theme::FONT_BODY))
+        .id_salt("sidebar_filter_persons")
+        .default_open(any_active)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for person in persons.iter().take(16) {
+                    let active = filter.persons.contains(&person.id);
+                    let name = person.name.as_deref().unwrap_or("Sin nombre");
+                    if draw_toggle_chip(ui, palette, name, person.photo_count, active).clicked() {
+                        if !filter.persons.remove(&person.id) {
+                            filter.persons.insert(person.id);
+                        }
+                        outcome.filter_changed = true;
+                        outcome.switch_view = Some(ActiveView::Gallery);
+                    }
+                }
+            });
+        });
     ui.add_space(theme::SPACE_XS);
 }
 

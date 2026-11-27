@@ -52,6 +52,8 @@ pub struct PhotosortApp {
     metadata_facets: MetadataFacets,
     works: Vec<WorkSummary>,
     works_view: WorksViewState,
+    persons: Vec<catalog::Person>,
+    persons_view: views::persons::PersonsViewState,
     vision_rules: Vec<VisionRule>,
     vision_analyzed_count: usize,
     tags_view: TagsViewState,
@@ -204,6 +206,8 @@ impl PhotosortApp {
             metadata_facets: MetadataFacets::default(),
             works: Vec::new(),
             works_view: WorksViewState::default(),
+            persons: Vec::new(),
+            persons_view: views::persons::PersonsViewState::default(),
             vision_rules: Vec::new(),
             vision_analyzed_count: 0,
             tags_view: TagsViewState::default(),
@@ -296,6 +300,9 @@ impl PhotosortApp {
             }
             CaptureView::Works => {
                 self.active_view = ActiveView::Works;
+            }
+            CaptureView::Persons => {
+                self.active_view = ActiveView::Persons;
             }
             CaptureView::Tags => {
                 self.active_view = ActiveView::Tags;
@@ -395,6 +402,10 @@ impl PhotosortApp {
         if let Ok(n) = cat.count_assets_with_vision_in_roots(&roots) {
             self.vision_analyzed_count = n;
         }
+        match cat.list_persons(true) {
+            Ok(p) => self.persons = p,
+            Err(e) => self.banner_error = Some(format!("Error al cargar personas: {e}")),
+        }
         match cat.list_stage_errors_in_roots(&roots) {
             Ok(list) => self.stage_errors = list,
             Err(e) => self.banner_error = Some(format!("Error al cargar errores de revisión: {e}")),
@@ -486,6 +497,18 @@ impl PhotosortApp {
                 self.inspector.ocr_done = cat.has_ocr_done(asset).unwrap_or(false);
                 self.inspector.faces = cat.asset_faces(asset).unwrap_or_default();
                 self.inspector.vision_done = cat.has_vision_done(asset).unwrap_or(false);
+                let details = cat.asset_face_details(asset).unwrap_or_default();
+                let mut face_details = Vec::with_capacity(details.len());
+                for d in details {
+                    let name = d.person_id.and_then(|pid| {
+                        self.persons
+                            .iter()
+                            .find(|p| p.id == pid)
+                            .and_then(|p| p.name.clone())
+                    });
+                    face_details.push((d, name));
+                }
+                self.inspector.face_details = face_details;
             }
             _ => {
                 self.inspector.asset_work = None;
@@ -493,6 +516,7 @@ impl PhotosortApp {
                 self.inspector.ocr_done = false;
                 self.inspector.faces.clear();
                 self.inspector.vision_done = false;
+                self.inspector.face_details.clear();
             }
         }
     }
@@ -935,6 +959,101 @@ impl PhotosortApp {
         }
     }
 
+    fn process_pending_face_embeddings(&mut self) {
+        if self.demo_mode {
+            self.status_notice = Some("Modo demo: rostros agrupados (sin cargar modelos)".into());
+            self.reload_catalog();
+            return;
+        }
+
+        let Some(models_dir) = &self.settings.vision_models_dir else {
+            self.status_notice =
+                Some("Falta la carpeta de modelos de visión; configúrala en Configuración".into());
+            return;
+        };
+
+        if !vision::manifest::has_sface(models_dir) {
+            self.status_notice =
+                Some("Falta el modelo SFace en la carpeta de modelos de visión".into());
+            return;
+        }
+
+        let Some(cat) = &mut self.catalog else {
+            return;
+        };
+
+        let assets = match cat.assets_with_faces_needing_embeddings() {
+            Ok(list) => list,
+            Err(e) => {
+                self.banner_error = Some(format!("Error al buscar rostros pendientes: {e}"));
+                return;
+            }
+        };
+
+        if assets.is_empty() {
+            self.status_notice =
+                Some("Todos los rostros detectados ya tienen vector y grupo".into());
+            return;
+        }
+
+        let options = crate::vision_worker::session_options(self.settings.ocr_device);
+        let mut sface = match vision::SFace::load(models_dir, &options) {
+            Ok(s) => s,
+            Err(e) => {
+                self.banner_error = Some(format!("No se pudo cargar el modelo SFace: {e}"));
+                return;
+            }
+        };
+
+        let mut grouped_faces = 0usize;
+        let mut processed_assets = 0usize;
+
+        for asset in &assets {
+            let path = match cat.entry_for(*asset) {
+                Ok(Some(entry)) => entry.path,
+                _ => continue,
+            };
+
+            let faces = match cat.asset_face_details(*asset) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            let pending_faces: Vec<_> = faces.into_iter().filter(|f| !f.has_embedding).collect();
+            if pending_faces.is_empty() {
+                continue;
+            }
+
+            let img = match thumbs::decode(&path, crate::vision_worker::VISION_DECODE_MAX_PX) {
+                Ok(dyn_img) => dyn_img.to_rgb8(),
+                Err(_) => continue,
+            };
+
+            for face in pending_faces {
+                let aligned = vision::align_face(&img, &face.landmarks);
+                let emb = match sface.feature(&aligned) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+
+                if cat
+                    .group_face(face.id, &emb, vision::SFACE_SIMILARITY_THRESHOLD)
+                    .is_ok()
+                {
+                    grouped_faces += 1;
+                }
+            }
+            processed_assets += 1;
+        }
+
+        self.status_notice = Some(format!(
+            "Agrupación completada: {} agrupados en {}",
+            count_phrase(grouped_faces, "rostro", "rostros"),
+            count_phrase(processed_assets, "foto", "fotos")
+        ));
+        self.reload_catalog();
+    }
+
     fn start_near_dupes(&mut self, ctx: &egui::Context, threshold: f32) {
         if self.near_dupes_worker.is_some() {
             return;
@@ -1332,8 +1451,10 @@ impl eframe::App for PhotosortApp {
             self.review_flow.total_items(),
             self.duplicate_groups.len() + self.near_duplicate_groups.len(),
             self.works.len(),
+            self.persons.len(),
             self.vision_rules.len(),
             &self.all_labels,
+            &self.persons,
             &self.metadata_facets,
             &mut self.filter,
             &mut self.sidebar_state,
@@ -1427,6 +1548,52 @@ impl eframe::App for PhotosortApp {
                 );
 
                 let work_banner = self.work_order_view.as_ref().map(|(_, name)| name.as_str());
+
+                let mut naming_outcome = None;
+                let naming_candidate = if let Some(cat) = &self.catalog {
+                    cat.unnamed_persons_with_min_photos(3)
+                        .ok()
+                        .and_then(|list| {
+                            list.into_iter()
+                                .find(|p| !self.persons_view.postponed_persons.contains(&p.id))
+                        })
+                } else {
+                    None
+                };
+                let sample_faces = if let (Some(cat), Some(c)) = (&self.catalog, &naming_candidate)
+                {
+                    cat.person_faces(c.id).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let asset_paths: HashMap<AssetId, String> = self
+                    .entries
+                    .iter()
+                    .map(|e| (e.asset, e.sha256.clone()))
+                    .collect();
+
+                let top_banner =
+                    if let (Some(cat), Some(candidate)) = (&self.catalog, &naming_candidate) {
+                        let pv = &mut self.persons_view;
+                        let tt = &self.thumb_textures;
+                        let ap = &asset_paths;
+                        let out_ref = &mut naming_outcome;
+                        Some(move |ui: &mut egui::Ui| {
+                            *out_ref = Some(views::persons::draw_naming_card(
+                                ui,
+                                palette,
+                                candidate,
+                                &sample_faces,
+                                pv,
+                                cat,
+                                tt,
+                                ap,
+                            ));
+                        })
+                    } else {
+                        None
+                    };
+
                 let gal_out = views::gallery::draw(
                     ui,
                     palette,
@@ -1435,6 +1602,7 @@ impl eframe::App for PhotosortApp {
                     &mut self.filter.sort,
                     self.similarity_view.as_ref(),
                     work_banner,
+                    top_banner,
                     &self.reviewed_assets,
                     &self.pending_suggestions_assets,
                     self.counts.locations > 0,
@@ -1442,6 +1610,41 @@ impl eframe::App for PhotosortApp {
                     &self.thumb_textures,
                     &self.thumb_failed,
                 );
+                if let Some(out) = naming_outcome {
+                    let mut catalog_mutated = false;
+                    if let Some(cat) = &mut self.catalog {
+                        if let Some((pid, name)) = out.renamed {
+                            match cat.rename_person(pid, Some(&name)) {
+                                Ok(_) => catalog_mutated = true,
+                                Err(e) => {
+                                    self.banner_error =
+                                        Some(format!("No se pudo nombrar la persona: {e}"))
+                                }
+                            }
+                        }
+                        if let Some((src, target)) = out.merged {
+                            match cat.merge_persons(target, src) {
+                                Ok(_) => catalog_mutated = true,
+                                Err(e) => {
+                                    self.banner_error =
+                                        Some(format!("No se pudieron unir las personas: {e}"))
+                                }
+                            }
+                        }
+                        if let Some(pid) = out.ignored {
+                            match cat.set_person_ignored(pid, true) {
+                                Ok(_) => catalog_mutated = true,
+                                Err(e) => {
+                                    self.banner_error =
+                                        Some(format!("No se pudo ignorar la persona: {e}"))
+                                }
+                            }
+                        }
+                    }
+                    if catalog_mutated {
+                        self.reload_catalog();
+                    }
+                }
                 self.last_thumbs_ready = gal_out.thumbs_ready;
                 self.last_columns = gal_out.last_columns;
                 if gal_out.primary_cell_pos.is_some() {
@@ -1524,6 +1727,15 @@ impl eframe::App for PhotosortApp {
                     }
                 }
                 if let Some(cat) = &mut self.catalog {
+                    if let Some((person_id, asset_id)) = insp_out.remove_person_from_asset {
+                        match cat.remove_asset_from_person(asset_id, person_id) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo quitar la persona de la foto: {e}"))
+                            }
+                        }
+                    }
                     if let Some((asset, name)) = insp_out.create_work_from_ocr {
                         match cat
                             .create_work(&name)
@@ -1572,6 +1784,9 @@ impl eframe::App for PhotosortApp {
                 }
                 if catalog_mutated {
                     self.reload_catalog();
+                }
+                if insp_out.open_persons {
+                    self.active_view = ActiveView::Persons;
                 }
 
                 // Viewer overlay
@@ -1757,6 +1972,81 @@ impl eframe::App for PhotosortApp {
                     }
                 }
             }
+            ActiveView::Persons => {
+                let (outcome, catalog_mutated) = if let Some(cat) = &mut self.catalog {
+                    let asset_paths: HashMap<AssetId, String> = self
+                        .entries
+                        .iter()
+                        .map(|e| (e.asset, e.sha256.clone()))
+                        .collect();
+                    let outcome = views::persons::draw(
+                        ui,
+                        palette,
+                        &mut self.persons_view,
+                        cat,
+                        &self.thumb_textures,
+                        &asset_paths,
+                    );
+                    let mut catalog_mutated = false;
+                    if let Some((pid, name)) = &outcome.renamed {
+                        match cat.rename_person(*pid, Some(name.as_str())) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo renombrar la persona: {e}"))
+                            }
+                        }
+                    }
+                    if let Some((src, target)) = outcome.merged {
+                        match cat.merge_persons(target, src) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudieron unir las personas: {e}"))
+                            }
+                        }
+                    }
+                    if let Some((pid, hidden)) = outcome.toggled_hidden {
+                        match cat.set_person_hidden(pid, hidden) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo cambiar el estado de la persona: {e}"))
+                            }
+                        }
+                    }
+                    if let Some(pid) = outcome.ignored {
+                        match cat.set_person_ignored(pid, true) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo ignorar la persona: {e}"))
+                            }
+                        }
+                    }
+                    if let Some((pid, asset_id)) = outcome.removed_asset {
+                        match cat.remove_asset_from_person(asset_id, pid) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo quitar la foto de la persona: {e}"))
+                            }
+                        }
+                    }
+                    (outcome, catalog_mutated)
+                } else {
+                    (views::persons::PersonsOutcome::default(), false)
+                };
+
+                if let Some(pid) = outcome.open_in_gallery {
+                    self.filter.clear_filters();
+                    self.filter.persons.insert(pid);
+                    self.active_view = ActiveView::Gallery;
+                    self.reload_entries();
+                } else if catalog_mutated || outcome.filter_changed {
+                    self.reload_catalog();
+                }
+            }
             ActiveView::Tags => {
                 let other_heavy = if self.tags_apply_worker.is_some() {
                     None
@@ -1832,6 +2122,25 @@ impl eframe::App for PhotosortApp {
                 }
                 if outcome.theme_changed {
                     theme::apply_theme_preference(&ctx, self.settings.theme);
+                }
+                if outcome.clear_face_grouping
+                    && let Some(cat) = &mut self.catalog
+                {
+                    match cat.clear_face_grouping_data() {
+                        Ok(()) => {
+                            self.status_notice = Some(
+                                "Se han borrado los datos de rostros, grupos y nombres".into(),
+                            );
+                            self.reload_catalog();
+                        }
+                        Err(e) => {
+                            self.banner_error =
+                                Some(format!("No se pudieron borrar los datos de rostros: {e}"));
+                        }
+                    }
+                }
+                if outcome.start_face_grouping {
+                    self.process_pending_face_embeddings();
                 }
                 if outcome.settings_changed {
                     self.save_settings_and_sync_engine();

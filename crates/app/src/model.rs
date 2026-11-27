@@ -315,6 +315,7 @@ pub struct FilterState {
     pub formats: BTreeSet<String>,
     pub orientations: BTreeSet<Orientation>,
     pub capture_years: BTreeSet<i32>,
+    pub persons: BTreeSet<catalog::PersonId>,
     pub sort: Sort,
     pub reviewed: catalog::ReviewedFilter,
 }
@@ -328,6 +329,7 @@ impl Default for FilterState {
             formats: BTreeSet::new(),
             orientations: BTreeSet::new(),
             capture_years: BTreeSet::new(),
+            persons: BTreeSet::new(),
             sort: Sort::PathAsc,
             reviewed: catalog::ReviewedFilter::All,
         }
@@ -391,6 +393,7 @@ impl FilterState {
         self.formats.clear();
         self.orientations.clear();
         self.capture_years.clear();
+        self.persons.clear();
     }
 
     pub fn has_active_filters(&self) -> bool {
@@ -400,6 +403,7 @@ impl FilterState {
             || !self.formats.is_empty()
             || !self.orientations.is_empty()
             || !self.capture_years.is_empty()
+            || !self.persons.is_empty()
     }
 
     pub fn to_catalog_filter(&self) -> Filter {
@@ -415,6 +419,7 @@ impl FilterState {
         filter.formats = self.formats.iter().cloned().collect();
         filter.orientations = self.orientations.iter().copied().collect();
         filter.capture_years = self.capture_years.iter().copied().collect();
+        filter.persons = self.persons.iter().copied().collect();
         let trimmed = self.search.trim();
         if !trimmed.is_empty() {
             filter.search = Some(trimmed.to_owned());

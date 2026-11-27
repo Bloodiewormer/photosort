@@ -19,10 +19,13 @@ pub const SIGLIP2_CONFIG: &str = "siglip2/config.json";
 pub const SIGLIP2_PREPROCESSOR: &str = "siglip2/preprocessor_config.json";
 pub const SIGLIP2_TOKENIZER_CONFIG: &str = "siglip2/tokenizer_config.json";
 pub const YUNET_MODEL: &str = "yunet/face_detection_yunet_2023mar.onnx";
+pub const SFACE_MODEL: &str = "sface/face_recognition_sface_2021dec.onnx";
 
 const SIGLIP2_SOURCE: &str = "onnx-community/siglip2-base-patch16-256-ONNX rev d1114256522a37ffa257a0a58017348ab0058db2 (google/siglip2-base-patch16-256)";
 const YUNET_SOURCE: &str =
     "opencv/face_detection_yunet rev 3cc26e7f1014a5ee5d74a42acee58bafc9d0a310";
+const SFACE_SOURCE: &str =
+    "opencv/face_recognition_sface rev 3d7082438a6e4551e840c9b2bb60b71e8da4b524";
 
 pub const PINNED_SIGLIP2: [PinnedFile; 6] = [
     PinnedFile {
@@ -77,6 +80,14 @@ pub const PINNED_YUNET: [PinnedFile; 1] = [PinnedFile {
     license: "MIT",
 }];
 
+pub const PINNED_SFACE: [PinnedFile; 1] = [PinnedFile {
+    path: SFACE_MODEL,
+    size: 38_696_353,
+    sha256: "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+    source: SFACE_SOURCE,
+    license: "Apache-2.0",
+}];
+
 /// Checks every pinned SigLIP 2 file under `models_root`.
 pub fn verify_siglip2(models_root: &Path) -> Result<(), Vec<String>> {
     verify(models_root, &PINNED_SIGLIP2)
@@ -85,6 +96,16 @@ pub fn verify_siglip2(models_root: &Path) -> Result<(), Vec<String>> {
 /// Checks the pinned YuNet file under `models_root`.
 pub fn verify_yunet(models_root: &Path) -> Result<(), Vec<String>> {
     verify(models_root, &PINNED_YUNET)
+}
+
+/// Checks the pinned SFace file under `models_root`.
+pub fn verify_sface(models_root: &Path) -> Result<(), Vec<String>> {
+    verify(models_root, &PINNED_SFACE)
+}
+
+/// Returns `true` if the pinned SFace model file exists and is valid under `models_root`.
+pub fn has_sface(models_root: &Path) -> bool {
+    models_root.join(SFACE_MODEL).is_file() && verify_sface(models_root).is_ok()
 }
 
 /// Checks all pinned vision files (SigLIP 2 + YuNet) under `models_root`.

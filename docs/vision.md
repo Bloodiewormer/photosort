@@ -1,6 +1,6 @@
 # Reconocimiento de imágenes y etiquetas visuales
 
-`photosort` analiza las imágenes localmente con **SigLIP 2** (`base-patch16-256`, embeddings de imagen y texto de 768 dimensiones) y **YuNet** (detección de rostros) y guarda los resultados en el catálogo SQLite. A partir de esos vectores guardados, el usuario puede crear, editar, probar y reaplicar reglas de etiquetas **sin volver a leer ninguna imagen del disco**.
+`photosort` analiza las imágenes localmente con **SigLIP 2** (`base-patch16-256`, embeddings de imagen y texto de 768 dimensiones), **YuNet** (detección de rostros con 5 puntos de referencia) y opcionalmente **SFace** (reconocimiento y agrupación de rostros) y guarda los resultados en el catálogo SQLite. A partir de esos vectores guardados, el usuario puede crear, editar, probar y reaplicar reglas de etiquetas **sin volver a leer ninguna imagen del disco**.
 
 ## Garantías y privacidad
 
@@ -28,6 +28,16 @@ Los archivos ONNX divididos de SigLIP 2 no incluyen `logit_scale` ni `logit_bias
 - **Grupo Tipo (exclusivo):** solo se sugiere el tipo activado con mayor similitud coseno si alcanza su umbral. Su confianza de ordenación es `softmax(100 * cosenos)[ganador]`, para que las imágenes más ambiguas aparezcan primero en **Revisión**.
 - **Reglas independientes:** se sugieren si la similitud positiva alcanza el umbral y (si hay descripciones negativas) supera la mejor similitud negativa. Su confianza usa una heurística monótona creciente en `[0,50, 0,99]` respecto al margen sobre el umbral.
 - **Regla `persona` + YuNet:** `persona` también se sugiere cuando YuNet detecta un rostro con puntuación `≥ 0,80` **y** el tipo ganador es `Foto`, `Meme` o `Capturas de pantalla`. Un rostro dibujado en `Manga` o `Ilustración` no activa `persona`.
+- **Reglas geométricas `retrato` y `grupo de personas`:** se evalúan a partir de la geometría de los rostros detectados cuando el tipo ganador es `Foto`:
+  - `retrato`: se sugiere si hay exactamente 1 rostro con tamaño al menos de 80×80 píxeles.
+  - `grupo de personas`: se sugiere si hay 3 o más rostros con puntuación `≥ 0,80`.
+- **Reconocimiento y agrupación de rostros (SFace):**
+  - Modelo opcional en `sface/face_recognition_sface_2021dec.onnx` (OpenCV SFace, Apache-2.0). Si no está presente, la detección de rostros sigue funcionando normalmente.
+  - Conserva los 5 puntos de referencia faciales dados por YuNet y aplica una transformación de similitud hacia la plantilla estándar de ArcFace de 112×112 en BGR.
+  - Genera un vector normalizado L2 de 128 dimensiones. El umbral de similitud coseno de OpenCV para considerar la misma persona es `0,363`.
+  - **Agrupación incremental:** cada rostro se asigna a la persona más parecida si supera el umbral; si no, crea un grupo nuevo sin nombre. La asignación manual de un rostro por el usuario (`user_assigned = 1`) queda fijada y nunca es sobrescrita por análisis posteriores.
+  - **Propuesta de nombres:** cuando un grupo sin nombre aparece en 3 o más fotos, la aplicación muestra una tarjeta no intrusiva («Esta persona aparece en N fotos. ¿Cómo se llama?») con muestras de la cara. El usuario puede nombrarla, unirla si el nombre ya existe, posponer la pregunta («Más tarde») o marcarla como ignorada («No preguntar»).
+  - **Configuración y privacidad:** la etapa «Agrupar rostros» está desactivada por defecto. Al activarla se calcula el embedding de los rostros ya detectados decodificando únicamente en memoria las imágenes que contienen rostros. El botón «Borrar datos de rostros» permite reiniciar todos los grupos, nombres y embeddings previa confirmación. Ningún recorte ni dato se escribe junto a los archivos originales ni sale del equipo.
 - **Umbrales:** los calibrados se eligieron con una muestra real de 335 imágenes; los demás son provisionales. Usa el botón **Probar** en la pestaña **Etiquetas** para ver las imágenes ordenadas por similitud y elegir el corte adecuado.
 
 ## Flujo en la interfaz

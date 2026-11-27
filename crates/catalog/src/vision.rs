@@ -52,6 +52,8 @@ pub const TYPE_PHOTO: &str = "Foto";
 pub const TYPE_MEME: &str = "Meme";
 pub const TYPE_DOCUMENT: &str = "Documento";
 pub const TAG_PERSON: &str = "persona";
+pub const TAG_PORTRAIT: &str = "retrato";
+pub const TAG_GROUP: &str = "grupo de personas";
 
 pub const CAT_ANIME: &str = "Anime";
 pub const CAT_MANHWA: &str = "Manhwa";
@@ -70,6 +72,8 @@ const BUILTIN_KEY_SCREENSHOT: &str = "type_screenshot";
 const BUILTIN_KEY_MEME: &str = "type_meme";
 const BUILTIN_KEY_DOCUMENT: &str = "type_document";
 const BUILTIN_KEY_PERSON: &str = "tag_person";
+const BUILTIN_KEY_PORTRAIT: &str = "tag_portrait";
+const BUILTIN_KEY_GROUP: &str = "tag_group";
 
 const BUILTIN_KEY_ANIME: &str = "cat_anime";
 const BUILTIN_KEY_MANHWA: &str = "cat_manhwa";
@@ -128,6 +132,59 @@ pub struct DetectedFace {
     /// `[x1, y1, x2, y2]` in pixel coordinates of the decoded image.
     pub bbox: [f32; 4],
     pub score: f32,
+    /// 5 facial landmarks in pixel coordinates of the decoded image:
+    /// `[right_eye, left_eye, nose_tip, right_mouth_corner, left_mouth_corner]`.
+    pub landmarks: [[f32; 2]; 5],
+}
+
+impl DetectedFace {
+    pub fn new(bbox: [f32; 4], score: f32) -> Self {
+        Self {
+            bbox,
+            score,
+            landmarks: [[0.0, 0.0]; 5],
+        }
+    }
+
+    pub fn with_landmarks(bbox: [f32; 4], score: f32, landmarks: [[f32; 2]; 5]) -> Self {
+        Self {
+            bbox,
+            score,
+            landmarks,
+        }
+    }
+}
+
+/// Formats 5 landmarks into a compact string `x0,y0;x1,y1;x2,y2;x3,y3;x4,y4`.
+pub fn encode_landmarks(lm: &[[f32; 2]; 5]) -> String {
+    format!(
+        "{:.2},{:.2};{:.2},{:.2};{:.2},{:.2};{:.2},{:.2};{:.2},{:.2}",
+        lm[0][0],
+        lm[0][1],
+        lm[1][0],
+        lm[1][1],
+        lm[2][0],
+        lm[2][1],
+        lm[3][0],
+        lm[3][1],
+        lm[4][0],
+        lm[4][1]
+    )
+}
+
+/// Parses 5 landmarks from `x0,y0;x1,y1;x2,y2;x3,y3;x4,y4`.
+pub fn decode_landmarks(s: &str) -> Option<[[f32; 2]; 5]> {
+    let mut out = [[0.0f32; 2]; 5];
+    let parts: Vec<&str> = s.split(';').collect();
+    if parts.len() != 5 {
+        return None;
+    }
+    for (i, part) in parts.iter().enumerate() {
+        let (x, y) = part.split_once(',')?;
+        out[i][0] = x.trim().parse().ok()?;
+        out[i][1] = y.trim().parse().ok()?;
+    }
+    Some(out)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,13 +296,17 @@ impl CompiledVisionRules {
             }
         }
 
-        let max_strong_face: Option<f32> = faces
+        let strong_faces: Vec<&DetectedFace> = faces
+            .iter()
+            .filter(|f| f.score >= YUNET_FACE_SCORE_THRESHOLD)
+            .collect();
+
+        let max_strong_face: Option<f32> = strong_faces
             .iter()
             .map(|f| f.score)
-            .filter(|&s| s >= YUNET_FACE_SCORE_THRESHOLD)
             .fold(None, |acc, s| Some(acc.map_or(s, |a| a.max(s))));
 
-        // 2. Independent rules (content categories, manga cover, persona, custom tags).
+        // 2. Independent rules (content categories, manga cover, persona, retrato, grupo, custom tags).
         for rule in &self.rules {
             if rule.mode != RuleMode::Independent {
                 continue;
@@ -274,6 +335,27 @@ impl CompiledVisionRules {
 
             let face_conf = if is_person_rule(rule) && winning_type_allows_face_person {
                 max_strong_face.map(|s| f64::from(s.clamp(0.0, 1.0)))
+            } else if is_portrait_rule(rule) && winning_type_allows_face_person {
+                if strong_faces.len() == 1 {
+                    let f = strong_faces[0];
+                    let w = (f.bbox[2] - f.bbox[0]).max(0.0);
+                    let h = (f.bbox[3] - f.bbox[1]).max(0.0);
+                    if (w * h) >= 6400.0 || (w >= 80.0 && h >= 80.0) {
+                        Some(f64::from(f.score.clamp(0.0, 1.0)))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else if is_group_rule(rule) && winning_type_allows_face_person {
+                if strong_faces.len() >= 3 {
+                    let avg = strong_faces.iter().map(|f| f.score).sum::<f32>()
+                        / strong_faces.len() as f32;
+                    Some(f64::from(avg.clamp(0.0, 1.0)))
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -315,6 +397,16 @@ fn allows_face_person(rule: &CompiledRule) -> bool {
 fn is_person_rule(rule: &CompiledRule) -> bool {
     rule.builtin_key.as_deref() == Some(BUILTIN_KEY_PERSON)
         || rule.name.eq_ignore_ascii_case(TAG_PERSON)
+}
+
+fn is_portrait_rule(rule: &CompiledRule) -> bool {
+    rule.builtin_key.as_deref() == Some(BUILTIN_KEY_PORTRAIT)
+        || rule.name.eq_ignore_ascii_case(TAG_PORTRAIT)
+}
+
+fn is_group_rule(rule: &CompiledRule) -> bool {
+    rule.builtin_key.as_deref() == Some(BUILTIN_KEY_GROUP)
+        || rule.name.eq_ignore_ascii_case(TAG_GROUP)
 }
 
 fn allows_manga_cover(rule: &CompiledRule) -> bool {
@@ -699,6 +791,39 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
             "a real life camera photograph or smartphone screenshot",
         ],
     },
+    BuiltinSpec {
+        key: BUILTIN_KEY_PORTRAIT,
+        kind: LabelKind::Tag,
+        name: TAG_PORTRAIT,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a close-up portrait photograph of a person's face",
+            "a portrait photo of a single person looking at camera",
+            "a headshot portrait of a man or woman",
+        ],
+        negatives: &[
+            "a group of many people together",
+            "a landscape or object photo without faces",
+            "an anime drawing or comic book character",
+        ],
+    },
+    BuiltinSpec {
+        key: BUILTIN_KEY_GROUP,
+        kind: LabelKind::Tag,
+        name: TAG_GROUP,
+        mode: RuleMode::Independent,
+        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        positives: &[
+            "a group photo showing three or more people together",
+            "a photograph of a group of friends or a crowd of people",
+            "a family group portrait with multiple people",
+        ],
+        negatives: &[
+            "a solo portrait of only one person",
+            "an empty landscape without people",
+        ],
+    },
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -899,10 +1024,11 @@ impl Catalog {
         tx.execute("DELETE FROM asset_face WHERE asset_id = ?1", [asset.0])?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO asset_face (asset_id, face_idx, x1, y1, x2, y2, score)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO asset_face (asset_id, face_idx, x1, y1, x2, y2, score, landmarks)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for (idx, face) in faces.iter().enumerate() {
+                let lm_str = encode_landmarks(&face.landmarks);
                 stmt.execute(params![
                     asset.0,
                     idx as i64,
@@ -911,6 +1037,7 @@ impl Catalog {
                     f64::from(face.bbox[2]),
                     f64::from(face.bbox[3]),
                     f64::from(face.score.clamp(0.0, 1.0)),
+                    lm_str,
                 ])?;
             }
         }
@@ -954,12 +1081,17 @@ impl Catalog {
     /// Returns all detected faces stored for `asset`, ordered by `face_idx`.
     pub fn asset_faces(&self, asset: AssetId) -> Result<Vec<DetectedFace>, CatalogError> {
         let mut stmt = self.conn.prepare(
-            "SELECT x1, y1, x2, y2, score
+            "SELECT x1, y1, x2, y2, score, landmarks
              FROM asset_face
              WHERE asset_id = ?1
              ORDER BY face_idx ASC",
         )?;
         let rows = stmt.query_map([asset.0], |r| {
+            let lm_str: Option<String> = r.get(5)?;
+            let landmarks = lm_str
+                .as_deref()
+                .and_then(decode_landmarks)
+                .unwrap_or([[0.0, 0.0]; 5]);
             Ok(DetectedFace {
                 bbox: [
                     r.get::<_, f64>(0)? as f32,
@@ -968,6 +1100,7 @@ impl Catalog {
                     r.get::<_, f64>(3)? as f32,
                 ],
                 score: r.get::<_, f64>(4)? as f32,
+                landmarks,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1346,7 +1479,7 @@ impl Catalog {
             let mut emb_stmt =
                 tx.prepare_cached("SELECT vector FROM asset_embedding WHERE asset_id = ?1")?;
             let mut face_stmt = tx.prepare_cached(
-                "SELECT x1, y1, x2, y2, score FROM asset_face WHERE asset_id = ?1 ORDER BY face_idx ASC",
+                "SELECT x1, y1, x2, y2, score, landmarks FROM asset_face WHERE asset_id = ?1 ORDER BY face_idx ASC",
             )?;
 
             for &asset in assets {
@@ -1358,6 +1491,11 @@ impl Catalog {
                 let arr = decode_embedding_array(&blob)?;
                 let faces: Vec<DetectedFace> = face_stmt
                     .query_map([asset.0], |r| {
+                        let lm_str: Option<String> = r.get(5)?;
+                        let landmarks = lm_str
+                            .as_deref()
+                            .and_then(decode_landmarks)
+                            .unwrap_or([[0.0, 0.0]; 5]);
                         Ok(DetectedFace {
                             bbox: [
                                 r.get::<_, f64>(0)? as f32,
@@ -1366,6 +1504,7 @@ impl Catalog {
                                 r.get::<_, f64>(3)? as f32,
                             ],
                             score: r.get::<_, f64>(4)? as f32,
+                            landmarks,
                         })
                     })?
                     .collect::<Result<_, _>>()?;

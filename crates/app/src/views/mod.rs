@@ -5,6 +5,7 @@ pub mod export;
 pub mod gallery;
 pub mod inspector;
 pub mod label_actions;
+pub mod persons;
 pub mod review;
 pub mod settings;
 pub mod shell;
