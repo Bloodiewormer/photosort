@@ -73,9 +73,10 @@ where
     FV: Fn(&Path) -> Result<(), Vec<String>>,
     FO: Fn(&Path) -> Result<(), Vec<String>>,
 {
-    if let Err(errs) = verify_vision(picked) {
-        return Err(format_verify_error(ModelKind::Vision, &errs));
-    }
+    let mut near = vec![picked.join("models")];
+    near.extend(picked.ancestors().skip(1).take(2).map(Path::to_path_buf));
+    let picked = &find_dir(picked, &near, &verify_vision)
+        .map_err(|errs| format_verify_error(ModelKind::Vision, &errs))?;
     settings.vision_models_dir = Some(picked.to_path_buf());
     settings.stage_vision = true;
 
@@ -112,9 +113,10 @@ where
     FV: Fn(&Path) -> Result<(), Vec<String>>,
     FO: Fn(&Path) -> Result<(), Vec<String>>,
 {
-    if let Err(errs) = verify_ocr(picked) {
-        return Err(format_verify_error(ModelKind::Ocr, &errs));
-    }
+    let mut near = vec![picked.join("ocr"), picked.join("models").join("ocr")];
+    near.extend(picked.parent().map(|p| p.join("ocr")));
+    let picked = &find_dir(picked, &near, &verify_ocr)
+        .map_err(|errs| format_verify_error(ModelKind::Ocr, &errs))?;
     settings.ocr_models_dir = Some(picked.to_path_buf());
     settings.stage_ocr = true;
 
@@ -135,6 +137,22 @@ where
         return Ok(Some(parent.to_path_buf()));
     }
     Ok(None)
+}
+
+/// The user may pick the models folder itself, a folder above it or one of its subfolders: the
+/// first valid one of `picked` and `near` wins. The error is the one for `picked`.
+fn find_dir<F>(picked: &Path, near: &[PathBuf], verify: &F) -> Result<PathBuf, Vec<String>>
+where
+    F: Fn(&Path) -> Result<(), Vec<String>>,
+{
+    let errs = match verify(picked) {
+        Ok(()) => return Ok(picked.to_path_buf()),
+        Err(errs) => errs,
+    };
+    near.iter()
+        .find(|c| c.is_dir() && verify(c).is_ok())
+        .cloned()
+        .ok_or(errs)
 }
 
 #[cfg(test)]
@@ -209,6 +227,40 @@ mod tests {
         assert_eq!(s2.ocr_models_dir.as_deref(), Some(ocr.as_path()));
         assert!(s2.stage_vision);
         assert!(s2.stage_ocr);
+    }
+
+    #[test]
+    fn picking_a_folder_above_or_inside_the_models_finds_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models = tmp.path().join("models");
+        seed_fake_vision(&models);
+        seed_fake_ocr(&models.join("ocr"));
+
+        let mut above = Settings::default();
+        apply_picked_vision_dir_with(&mut above, tmp.path(), fake_verify_vision, fake_verify_ocr)
+            .unwrap();
+        assert_eq!(above.vision_models_dir.as_deref(), Some(models.as_path()));
+        assert_eq!(above.ocr_models_dir, Some(models.join("ocr")));
+
+        let mut inside = Settings::default();
+        let siglip = models.join("siglip2");
+        apply_picked_vision_dir_with(&mut inside, &siglip, fake_verify_vision, fake_verify_ocr)
+            .unwrap();
+        assert_eq!(inside.vision_models_dir.as_deref(), Some(models.as_path()));
+
+        let mut ocr_above = Settings::default();
+        apply_picked_ocr_dir_with(
+            &mut ocr_above,
+            tmp.path(),
+            fake_verify_vision,
+            fake_verify_ocr,
+        )
+        .unwrap();
+        assert_eq!(ocr_above.ocr_models_dir, Some(models.join("ocr")));
+        assert_eq!(
+            ocr_above.vision_models_dir.as_deref(),
+            Some(models.as_path())
+        );
     }
 
     #[test]
