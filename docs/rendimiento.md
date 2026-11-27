@@ -90,3 +90,10 @@ Cambios aplicados en `crates/catalog` sin alterar el comportamiento:
 | `entries (3 etiquetas)` (p95) | 53,57 ms | 21,81 ms | 2,5x |
 | `entries (SizeAsc)` (p95) | 72,81 ms | 39,99 ms | 1,8x |
 | `entries (ModifiedAsc)` (p95) | 70,17 ms | 44,17 ms | 1,6x |
+
+### Duplicados parecidos (todos contra todos sobre embeddings SigLIP 2)
+
+Medido con la prueba `#[ignore]` `benchmark_near_duplicates_45k_embeddings` (`cargo test --release -p catalog --test performance benchmark_near_duplicates_45k_embeddings -- --ignored --nocapture`) en el mismo equipo de prueba:
+
+- **45.000 vectores sintéticos de 768 dimensiones** (~1.012 millones de pares), umbral `0,95`, cálculo en paralelo con `std::thread::scope` y mosaicos de 64 × 64: **39,07 s** (detectando los 10 grupos inyectados).
+- El resultado se guarda en las tablas `near_duplicate_group` y `near_duplicate_member` para no recalcular al abrir la aplicación.

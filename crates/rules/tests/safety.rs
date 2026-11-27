@@ -54,6 +54,46 @@ fn write(root: &Path, rel: &str, bytes: &[u8]) {
     fs::write(p, bytes).unwrap();
 }
 
+/// Inserts a minimal valid TIFF/EXIF APP1 segment with `DateTimeOriginal` into a JPEG byte stream.
+fn jpeg_with_exif_datetime(raw_jpeg: &[u8], datetime_ascii: &[u8; 20]) -> Vec<u8> {
+    assert!(raw_jpeg.len() >= 2 && raw_jpeg[0] == 0xFF && raw_jpeg[1] == 0xD8);
+    // Minimal little-endian TIFF with IFD0 (1 entry: ExifIFDPointer -> offset 26)
+    // and ExifIFD (1 entry: DateTimeOriginal 0x9003 -> offset 44, 20 bytes ASCII).
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II"); // little-endian
+    tiff.extend_from_slice(&42u16.to_le_bytes());
+    tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+    // IFD0 at offset 8 (2 + 12 + 4 = 18 bytes -> ends at 26)
+    tiff.extend_from_slice(&1u16.to_le_bytes());
+    tiff.extend_from_slice(&0x8769u16.to_le_bytes()); // ExifIFDPointer
+    tiff.extend_from_slice(&4u16.to_le_bytes()); // LONG
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&26u32.to_le_bytes()); // ExifIFD offset = 26
+    tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+    // ExifIFD at offset 26 (2 + 12 + 4 = 18 bytes -> ends at 44)
+    tiff.extend_from_slice(&1u16.to_le_bytes());
+    tiff.extend_from_slice(&0x9003u16.to_le_bytes()); // DateTimeOriginal
+    tiff.extend_from_slice(&2u16.to_le_bytes()); // ASCII
+    tiff.extend_from_slice(&20u32.to_le_bytes());
+    tiff.extend_from_slice(&44u32.to_le_bytes()); // string offset = 44
+    tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+    // ASCII value at offset 44
+    tiff.extend_from_slice(datetime_ascii);
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"Exif\0\0");
+    payload.extend_from_slice(&tiff);
+    let seg_len = (payload.len() + 2) as u16;
+
+    let mut out = Vec::with_capacity(raw_jpeg.len() + payload.len() + 4);
+    out.extend_from_slice(&raw_jpeg[..2]); // SOI
+    out.extend_from_slice(&[0xFF, 0xE1]); // APP1
+    out.extend_from_slice(&seg_len.to_be_bytes());
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&raw_jpeg[2..]);
+    out
+}
+
 #[test]
 fn running_rules_leaves_the_originals_untouched() {
     let tmp = tempfile::tempdir().unwrap();
@@ -63,6 +103,7 @@ fn running_rules_leaves_the_originals_untouched() {
     JpegEncoder::new(&mut jpg)
         .encode(&vec![64u8; 64 * 64 * 3], 64, 64, ColorType::Rgb8.into())
         .unwrap();
+    let jpg_exif = jpeg_with_exif_datetime(&jpg, b"2023:07:14 10:22:33\0");
     let mut png = Vec::new();
     PngEncoder::new(&mut png)
         .write_image(&vec![128u8; 100 * 50 * 3], 100, 50, ColorType::Rgb8.into())
@@ -74,7 +115,7 @@ fn running_rules_leaves_the_originals_untouched() {
             .unwrap();
     }
 
-    write(&library, "IMG-20240101-WA0001.jpg", &jpg);
+    write(&library, "IMG-20240101-WA0001.jpg", &jpg_exif);
     write(&library, "sub/Screenshot_1.png", &png);
     write(&library, "sub/deep/strip.gif", &gif);
     write(&library, "sub/corrupt.jpg", b"not a valid jpeg");
@@ -98,4 +139,16 @@ fn running_rules_leaves_the_originals_untouched() {
     rules::run(&catalog).unwrap();
 
     assert_eq!(before, snapshot(&library));
+
+    // Verify metadata (dimensions, format, EXIF capture date) was stored cleanly in read-only pass.
+    let jpg_path = dunce::canonicalize(library.join("IMG-20240101-WA0001.jpg")).unwrap();
+    let jpg_asset = catalog.asset_of(&jpg_path).unwrap().unwrap();
+    let jpg_entry = catalog.entry_for(jpg_asset).unwrap().unwrap();
+    assert_eq!(jpg_entry.width, Some(64));
+    assert_eq!(jpg_entry.height, Some(64));
+    assert_eq!(jpg_entry.format.as_deref(), Some("JPEG"));
+    assert_eq!(
+        jpg_entry.captured_at_ns,
+        rules::parse_exif_datetime_ns("2023:07:14 10:22:33").map(|(ns, _)| ns)
+    );
 }

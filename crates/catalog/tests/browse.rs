@@ -447,3 +447,143 @@ fn two_connections_can_share_the_wal_database() {
     assert_eq!(report.new, 1);
     assert_eq!(reader.counts().unwrap().locations, 4);
 }
+
+#[test]
+fn metadata_sort_filters_and_legacy_migration_preserve_decisions() {
+    use catalog::{LabelKind, Orientation, Status};
+
+    // 1. Legacy catalog without asset metadata columns migrates without losing labels/decisions.
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("legacy_meta.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE asset (id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, size INTEGER NOT NULL);
+             CREATE TABLE location (id INTEGER PRIMARY KEY, asset_id INTEGER NOT NULL, root TEXT NOT NULL, path TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mtime_ns INTEGER, seen_run INTEGER NOT NULL, missing INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE label (id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('category', 'tag', 'entity')), name TEXT NOT NULL COLLATE NOCASE, UNIQUE (kind, name));
+             CREATE TABLE asset_label (asset_id INTEGER NOT NULL, label_id INTEGER NOT NULL, source TEXT NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL, PRIMARY KEY (asset_id, label_id));
+             INSERT INTO asset (id, sha256, size) VALUES (1, 'aaa', 100);
+             INSERT INTO location (asset_id, root, path, size, mtime_ns, seen_run, missing)
+                 VALUES (1, 'R', 'R/a.jpg', 100, 1000, 1, 0);
+             INSERT INTO label (id, kind, name) VALUES (1, 'tag', 'favorito');
+             INSERT INTO asset_label (asset_id, label_id, source, confidence, status)
+                 VALUES (1, 1, 'user', 1.0, 'accepted');",
+        )
+        .unwrap();
+    }
+    let db = ensure_writable(&db_path, &[]).unwrap();
+    let migrated = Catalog::open(&db).unwrap();
+    let assigns = migrated.labels_of(catalog::AssetId(1)).unwrap();
+    assert_eq!(assigns.len(), 1);
+    assert_eq!(assigns[0].name, "favorito");
+    assert_eq!(assigns[0].status, Status::Accepted);
+    migrated
+        .set_asset_metadata(
+            catalog::AssetId(1),
+            Some(1920),
+            Some(1080),
+            Some("JPEG"),
+            Some(1_700_000_000_000_000_000),
+            Some(2023),
+        )
+        .unwrap();
+
+    // 2. Capture date sort (with mtime fallback), pixel sort, and format/orientation/year filters.
+    let s = setup();
+    let a_manga = s.asset("manga/page.webp"); // mtime = 100
+    let a_funny = s.asset("memes/funny.jpg"); // mtime = 200
+    let a_chat = s.asset("shots/chat.png"); // mtime = 300
+
+    // page.webp: portrait 600x1000 (600k px), WEBP, captured_at = 250s (between funny=200 and chat=300)
+    s.cat
+        .set_asset_metadata(
+            a_manga,
+            Some(600),
+            Some(1000),
+            Some("WEBP"),
+            Some(1_700_000_250_000_000_000),
+            Some(2023),
+        )
+        .unwrap();
+    // funny.jpg: square 500x500 (250k px), JPEG, no EXIF capture date -> falls back to mtime (200s)
+    s.cat
+        .set_asset_metadata(a_funny, Some(500), Some(500), Some("JPEG"), None, None)
+        .unwrap();
+    // chat.png: landscape 1920x1080 (2.07M px), PNG, captured_at = 50s (earliest!)
+    s.cat
+        .set_asset_metadata(
+            a_chat,
+            Some(1920),
+            Some(1080),
+            Some("PNG"),
+            Some(1_700_000_050_000_000_000),
+            Some(2021),
+        )
+        .unwrap();
+
+    let order = |sort: Sort| s.rel_entries(&s.cat.entries(&Filter::default(), sort).unwrap());
+    assert_eq!(
+        order(Sort::CapturedAsc),
+        ["shots/chat.png", "memes/funny.jpg", "manga/page.webp"]
+    );
+    assert_eq!(
+        order(Sort::CapturedDesc),
+        ["manga/page.webp", "memes/funny.jpg", "shots/chat.png"]
+    );
+    assert_eq!(
+        order(Sort::PixelsDesc),
+        ["shots/chat.png", "manga/page.webp", "memes/funny.jpg"]
+    );
+    assert_eq!(
+        order(Sort::PixelsAsc),
+        ["memes/funny.jpg", "manga/page.webp", "shots/chat.png"]
+    );
+
+    let by_fmt = s
+        .cat
+        .entries(
+            &Filter {
+                formats: vec!["JPEG".into(), "WEBP".into()],
+                ..Default::default()
+            },
+            Sort::PathAsc,
+        )
+        .unwrap();
+    assert_eq!(
+        s.rel_entries(&by_fmt),
+        ["manga/page.webp", "memes/funny.jpg"]
+    );
+
+    let by_orient = s
+        .cat
+        .entries(
+            &Filter {
+                orientations: vec![Orientation::Landscape],
+                ..Default::default()
+            },
+            Sort::PathAsc,
+        )
+        .unwrap();
+    assert_eq!(s.rel_entries(&by_orient), ["shots/chat.png"]);
+
+    let by_year = s
+        .cat
+        .entries(
+            &Filter {
+                capture_years: vec![2023],
+                ..Default::default()
+            },
+            Sort::PathAsc,
+        )
+        .unwrap();
+    assert_eq!(s.rel_entries(&by_year), ["manga/page.webp"]);
+
+    let facets = s
+        .cat
+        .metadata_facets_in_roots(&[s.root.as_path().to_path_buf()])
+        .unwrap();
+    assert_eq!(facets.formats.len(), 3);
+    assert_eq!(facets.orientations.len(), 3);
+    assert_eq!(facets.years.len(), 2);
+    let _ = LabelKind::Tag;
+}

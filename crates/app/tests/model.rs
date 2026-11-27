@@ -10,6 +10,10 @@ fn sample_entries(n: usize) -> Vec<Entry> {
             sha256: format!("{i:064x}"),
             size: (i as u64 + 1) * 100,
             modified_ns: Some(1_700_000_000 + i as i64),
+            width: None,
+            height: None,
+            format: None,
+            captured_at_ns: None,
         })
         .collect()
 }
