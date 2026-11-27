@@ -149,7 +149,7 @@ pub fn draw(
                         )
                         .fill(bg)
                         .stroke(stroke)
-                        .min_size(Vec2::new(0.0, 34.0))
+                        .min_size(Vec2::new(ui.available_width(), 34.0))
                         .truncate();
                         if ui.add(btn).clicked() {
                             selected_group = Some(group.label);
@@ -289,7 +289,8 @@ pub fn draw(
                                 .strong()
                                 .color(palette.review_badge_fg.color32()),
                             );
-                            if ui.available_width() < 240.0 {
+                            // Inside a wrapped row, only the space left on the row counts.
+                            if ui.available_size_before_wrap().x < 240.0 {
                                 ui.horizontal(|ui| {
                                     if ui.button("Cancelar").clicked() {
                                         cancel_group = true;

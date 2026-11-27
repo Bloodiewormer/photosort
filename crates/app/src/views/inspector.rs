@@ -301,17 +301,20 @@ pub fn draw(
                                 .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                 .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                 .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&aw.work_name).strong(),
+                                    ui.set_min_width(ui.available_width());
+                                    // Sides lays out the status first, so the long name truncates instead of pushing it out.
+                                    egui::Sides::new().shrink_left().truncate().show(
+                                        ui,
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&aw.work_name).strong(),
+                                                )
+                                                .truncate(),
                                             )
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(&aw.work_name);
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
+                                            .on_hover_text(&aw.work_name);
+                                        },
+                                        |ui| {
                                                 let (st_text, st_color) = match aw.status {
                                                     Status::Accepted => (
                                                         "Confirmada",
@@ -331,9 +334,8 @@ pub fn draw(
                                                         .size(theme::FONT_SMALL)
                                                         .color(st_color),
                                                 );
-                                            },
-                                        );
-                                    });
+                                        },
+                                    );
                                     let mut parts = Vec::new();
                                     if !aw.chapter.is_empty() {
                                         parts.push(format!("Capítulo {}", aw.chapter));
@@ -389,11 +391,14 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            let label = person_name.as_deref().unwrap_or("Sin nombre");
-                                            ui.add(egui::Label::new(RichText::new(label).strong()).truncate())
-                                                .on_hover_text(label);
-                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        let label = person_name.as_deref().unwrap_or("Sin nombre");
+                                        egui::Sides::new().shrink_left().truncate().show(
+                                            ui,
+                                            |ui| {
+                                                ui.add(egui::Label::new(RichText::new(label).strong()).truncate())
+                                                    .on_hover_text(label);
+                                            },
+                                            |ui| {
                                                 if let Some(pid) = face.person_id {
                                                     if ui.button("Quitar").on_hover_text("Quitar esta foto de la persona").clicked() {
                                                         outcome.remove_person_from_asset = Some((pid, entry.asset));
@@ -401,8 +406,8 @@ pub fn draw(
                                                 } else if ui.button("Poner nombre").clicked() {
                                                     outcome.open_persons = true;
                                                 }
-                                            });
-                                        });
+                                            },
+                                        );
                                     });
                                 ui.add_space(theme::SPACE_XS);
                             }
@@ -470,6 +475,7 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
                                         for (idx, line) in main_ocr.iter().enumerate() {
                                             let mut checked = state.ocr_checked.contains(&idx);
                                             ui.horizontal_wrapped(|ui| {
@@ -615,6 +621,7 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
                                         for line in &status_bar_ocr {
                                             ui.add(
                                                 egui::Label::new(
@@ -658,22 +665,23 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(format!(
-                                                        "{}: {}",
-                                                        kind_label(assign.kind),
-                                                        assign.name
-                                                    ))
-                                                    .strong(),
+                                        egui::Sides::new().shrink_left().truncate().show(
+                                            ui,
+                                            |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(format!(
+                                                            "{}: {}",
+                                                            kind_label(assign.kind),
+                                                            assign.name
+                                                        ))
+                                                        .strong(),
+                                                    )
+                                                    .truncate(),
                                                 )
-                                                .truncate(),
-                                            )
-                                            .on_hover_text(&assign.name);
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
+                                                .on_hover_text(&assign.name);
+                                            },
+                                            |ui| {
                                                     let (st_text, st_color) = match assign.status {
                                                         Status::Accepted => (
                                                             "Aceptada",
@@ -693,9 +701,8 @@ pub fn draw(
                                                             .size(theme::FONT_SMALL)
                                                             .color(st_color),
                                                     );
-                                                },
-                                            );
-                                        });
+                                            },
+                                        );
                                         ui.horizontal(|ui| {
                                             let src_text = if assign.source == Source::User {
                                                 "Usuario".to_string()
@@ -790,8 +797,7 @@ fn meta_row(ui: &mut egui::Ui, palette: &Palette, key: &str, value: &str) {
                 .size(theme::FONT_SMALL)
                 .color(palette.text_secondary.color32()),
         );
-        ui.add(egui::Label::new(RichText::new(value).size(theme::FONT_SMALL)).truncate())
-            .on_hover_text(value);
+        ui.label(RichText::new(value).size(theme::FONT_SMALL));
     });
 }
 
@@ -837,29 +843,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn inspector_panel_resizes_to_minimum_width_without_bouncing() {
-        let ctx = egui::Context::default();
-        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
-        let entry = sample_entry();
-        let mut state = InspectorState {
+    fn inspector_state() -> InspectorState {
+        InspectorState {
             ocr_done: true,
-            ocr_lines: vec![
-                OcrLine {
-                    text: "時計仕掛けのクロニクル — 第12話 とても長いOCRテキスト".to_string(),
-                    score: 0.95,
-                    recognizer: OcrRecognizer::V6,
-                    rect: [10.0, 10.0, 200.0, 30.0],
-                    top_strip: false,
-                },
-                OcrLine {
-                    text: "바람 공주 · 제3화 (한국어 OCR 테스트)".to_string(),
-                    score: 0.90,
-                    recognizer: OcrRecognizer::Korean,
-                    rect: [10.0, 40.0, 200.0, 60.0],
-                    top_strip: false,
-                },
-            ],
+            ocr_lines: vec![OcrLine {
+                text: "時計仕掛けのクロニクル — 第12話 とても長いOCRテキスト".to_string(),
+                score: 0.95,
+                recognizer: OcrRecognizer::V6,
+                rect: [10.0, 10.0, 200.0, 30.0],
+                top_strip: false,
+            }],
             labels: vec![catalog::Assignment {
                 label: catalog::LabelId(1),
                 name: "Manga › Scanlation › Página promocional o índice de proyectos muy largo"
@@ -869,94 +862,93 @@ mod tests {
                 confidence: 0.85,
                 status: catalog::Status::Accepted,
             }],
+            asset_work: Some(catalog::AssetWork {
+                asset: AssetId(1),
+                work: catalog::LabelId(2),
+                work_name: "Una obra con un título larguísimo que no cabe en el panel".to_string(),
+                chapter: "23".to_string(),
+                page: Some(7),
+                source: catalog::Source::Rules,
+                confidence: 0.9,
+                status: catalog::Status::Accepted,
+            }),
             ..Default::default()
-        };
-
-        // Frame 1: default inspector width
-        let input1 = RawInput {
-            screen_rect: Some(screen),
-            ..Default::default()
-        };
-        let mut output1 = ctx.run_ui(input1, |ui| {
-            draw(
-                ui,
-                &theme::DARK_PALETTE,
-                Some(&entry),
-                true,
-                &mut state,
-                &[],
-                None,
-            );
-        });
-        output1.textures_delta.clear();
-
-        // Frame 2: drag panel resize handle from initial x (1000 - 328 = 672) to min width (1000 - 280 = 720)
-        let panel_border_x = 1000.0 - theme::INSPECTOR_WIDTH;
-        let target_border_x = 1000.0 - 280.0;
-        let events = vec![
-            Event::PointerMoved(Pos2::new(panel_border_x, 300.0)),
-            Event::PointerButton {
-                pos: Pos2::new(panel_border_x, 300.0),
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            Event::PointerMoved(Pos2::new(target_border_x, 300.0)),
-            Event::PointerButton {
-                pos: Pos2::new(target_border_x, 300.0),
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ];
-
-        let input2 = RawInput {
-            screen_rect: Some(screen),
-            events,
-            ..Default::default()
-        };
-        let mut output2 = ctx.run_ui(input2, |ui| {
-            draw(
-                ui,
-                &theme::DARK_PALETTE,
-                Some(&entry),
-                true,
-                &mut state,
-                &[],
-                None,
-            );
-        });
-        output2.textures_delta.clear();
-
-        // Frame 3: verify it stays at 280.0 without jumping
-        let input3 = RawInput {
-            screen_rect: Some(screen),
-            ..Default::default()
-        };
-        let mut actual_width = 0.0;
-        let mut output3 = ctx.run_ui(input3, |ui| {
-            let resp = draw(
-                ui,
-                &theme::DARK_PALETTE,
-                Some(&entry),
-                true,
-                &mut state,
-                &[],
-                None,
-            );
-            let _ = resp;
-        });
-        output3.textures_delta.clear();
-
-        #[allow(deprecated)]
-        let inspector_id = egui::Id::new("inspector");
-        if let Some(rect) = ctx.memory(|m| m.area_rect(inspector_id)) {
-            actual_width = rect.width();
         }
-        if actual_width > 0.0 {
+    }
+
+    /// Runs one frame and returns the inspector's stored outer width.
+    fn frame(ctx: &egui::Context, state: &mut InspectorState, events: Vec<Event>) -> f32 {
+        let entry = sample_entry();
+        let mut width = 0.0;
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                draw(
+                    ui,
+                    &theme::DARK_PALETTE,
+                    Some(&entry),
+                    true,
+                    state,
+                    &[],
+                    None,
+                );
+                // The size egui keeps for the panel: what it shows once the drag ends.
+                width = egui::PanelState::load(ui.ctx(), ui.scope_id().with("inspector"))
+                    .expect("estado del panel")
+                    .size()
+                    .x;
+            },
+        );
+        out.textures_delta.clear();
+        width
+    }
+
+    fn press(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn inspector_panel_resizes_to_minimum_width_without_bouncing() {
+        let ctx = egui::Context::default();
+        let mut state = inspector_state();
+        let start = frame(&ctx, &mut state, vec![]);
+        assert!(
+            (start - theme::INSPECTOR_WIDTH).abs() <= 1.0,
+            "inicial: {start}"
+        );
+
+        // Drag the panel's left border right, past the minimum, over several frames.
+        let border = Pos2::new(1000.0 - start, 300.0);
+        frame(&ctx, &mut state, vec![Event::PointerMoved(border)]);
+        frame(&ctx, &mut state, vec![press(border, true)]);
+        for x in [800.0, 850.0, 900.0] {
+            frame(
+                &ctx,
+                &mut state,
+                vec![Event::PointerMoved(Pos2::new(x, 300.0))],
+            );
+        }
+        let end = Pos2::new(900.0, 300.0);
+        frame(&ctx, &mut state, vec![press(end, false)]);
+
+        for _ in 0..3 {
+            let w = frame(
+                &ctx,
+                &mut state,
+                vec![Event::PointerMoved(Pos2::new(500.0, 300.0))],
+            );
             assert!(
-                (actual_width - 280.0).abs() <= 2.0,
-                "El ancho final debe mantenerse en el mínimo solicitado (280.0), obtenido: {actual_width}"
+                (w - 280.0).abs() <= 1.0,
+                "el panel rebotó a {w} en vez de quedarse en 280"
             );
         }
     }

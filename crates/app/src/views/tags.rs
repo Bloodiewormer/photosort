@@ -236,16 +236,25 @@ pub fn draw(
                             .color(palette.text_secondary.color32()),
                     );
                 } else {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&rule.name).size(theme::FONT_HEADING).strong());
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    egui::Sides::new().shrink_left().truncate().show(
+                        ui,
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&rule.name).size(theme::FONT_HEADING).strong(),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&rule.name);
+                        },
+                        |ui| {
                             ui.label(
                                 RichText::new(mode_text)
                                     .size(theme::FONT_SMALL)
                                     .color(palette.text_secondary.color32()),
                             );
-                        });
-                    });
+                        },
+                    );
                 }
                 ui.add_space(theme::SPACE_XS);
 
@@ -256,6 +265,7 @@ pub fn draw(
                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.label(
                             RichText::new(format!(
                                 "Sugerencias de IA · Aceptadas: {} · Rechazadas: {} · Pendientes: {}",
