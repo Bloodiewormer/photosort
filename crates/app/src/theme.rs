@@ -413,6 +413,7 @@ pub fn configure_styles(ctx: &egui::Context, preference: Theme) {
     ctx.style_mut_of(egui::Theme::Light, |s| {
         apply_style(s, false, &LIGHT_PALETTE)
     });
+    crate::fonts::configure_cjk_fallback_fonts(ctx);
     apply_theme_preference(ctx, preference);
 }
 

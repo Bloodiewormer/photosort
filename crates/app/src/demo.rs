@@ -1148,6 +1148,20 @@ fn seed_demo_ocr(
                     rect: [20.0, 100.0, 260.0, 124.0],
                     top_strip: false,
                 },
+                OcrLine {
+                    text: "時計仕掛けのクロニクル — 第12話".to_string(),
+                    score: 0.93,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [20.0, 140.0, 280.0, 168.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "바람 공주 · 제3화 (한국어 OCR)".to_string(),
+                    score: 0.88,
+                    recognizer: OcrRecognizer::Korean,
+                    rect: [20.0, 180.0, 270.0, 208.0],
+                    top_strip: false,
+                },
             ],
         )
         .map_err(|e| e.to_string())?;
