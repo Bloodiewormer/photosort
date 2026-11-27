@@ -360,7 +360,7 @@ pub fn draw(
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             let label = person_name.as_deref().unwrap_or("Sin nombre");
-                                            ui.label(RichText::new(format!("👤 {label}")).strong());
+                                            ui.label(RichText::new(label).strong());
                                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                                 if let Some(pid) = face.person_id {
                                                     if ui.button("Quitar").on_hover_text("Quitar esta foto de la persona").clicked() {

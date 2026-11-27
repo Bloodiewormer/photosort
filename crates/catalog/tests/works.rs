@@ -2070,3 +2070,20 @@ fn delete_work_cleans_proposed_work_groups_and_list_respects_roots() {
     assert!(cat.delete_work(work).unwrap());
     assert!(cat.list_proposed_work_groups(None).unwrap().is_empty());
 }
+
+#[test]
+fn a_folder_that_mixes_works_gets_no_majority_proposal() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("manga/Obra Uno - Cap 1 - 01.png", b"a1"),
+        ("manga/Obra Uno - Cap 1 - 02.png", b"a2"),
+        ("manga/Obra Uno - Cap 1 - 03.png", b"a3"),
+        ("manga/Obra Dos - Cap 4 - 01.png", b"b1"),
+        ("manga/007.png", b"x7"),
+        ("manga/008.png", b"x8"),
+    ]);
+    cat.create_work("Obra Uno").unwrap();
+    cat.create_work("Obra Dos").unwrap();
+    cat.apply_filename_works(None).unwrap();
+    assert_eq!(cat.apply_folder_work_groups(None).unwrap(), 0);
+    assert!(cat.asset_work(ids["manga/007.png"]).unwrap().is_none());
+}

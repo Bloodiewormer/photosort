@@ -2638,7 +2638,8 @@ impl Catalog {
     }
 
     /// Scans library folders and proposes work ownership for images without belonging in folders where:
-    /// - the majority of images with belonging (at least 2 and > 50%) point to the same work, or
+    /// - at least 2 images with belonging all point to the same work (folders that mix works are
+    ///   skipped), or
     /// - the folder or parent folder name (inside the library root) matches a work or alias.
     ///
     /// Never creates works, skips generic or mostly unnumbered folders, skips dismissed/accepted
@@ -2784,11 +2785,12 @@ impl Catalog {
             }
 
             // Determine candidate work:
-            // 1. Real majority of images with belonging (at least 2 and strictly > 50%).
+            // 1. At least 2 pages of one work and none of any other: a folder that mixes works
+            //    (a flat "manga" folder) says nothing about its unnamed pages.
             let mut candidate_work: Option<LabelId> = None;
             if let Some((&majority_work, &count)) = work_counts.iter().max_by_key(|(_, c)| *c)
                 && count >= 2
-                && count * 2 > total_with_belonging
+                && count == total_with_belonging
             {
                 candidate_work = Some(majority_work);
             }

@@ -205,13 +205,7 @@ fn draw_face_chip(
             Stroke::new(1.0, palette.border.color32()),
             egui::StrokeKind::Inside,
         );
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "👤",
-            egui::FontId::proportional(size_px * 0.5),
-            palette.text_secondary.color32(),
-        );
+        draw_silhouette(ui.painter(), rect, palette.text_hint.color32());
     }
 }
 
@@ -325,14 +319,10 @@ pub fn draw(
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let col_width = 320.0f32;
-                    let avail_width = ui.available_width();
-                    let cols = ((avail_width / (col_width + theme::SPACE_MD)).floor() as usize).max(1);
-
-                    egui::Grid::new("persons_grid")
-                        .spacing(Vec2::new(theme::SPACE_MD, theme::SPACE_MD))
-                        .show(ui, |ui| {
-                            for (idx, person) in filtered_persons.iter().enumerate() {
+                    // Top-aligned wrap so cards of different heights line up.
+                    ui.spacing_mut().item_spacing = Vec2::splat(theme::SPACE_MD);
+                    ui.with_layout(Layout::left_to_right(Align::Min).with_main_wrap(true), |ui| {
+                            for person in &filtered_persons {
                                 draw_person_card(
                                     ui,
                                     palette,
@@ -344,9 +334,6 @@ pub fn draw(
                                     thumb_textures,
                                     asset_paths,
                                 );
-                                if (idx + 1) % cols == 0 {
-                                    ui.end_row();
-                                }
                             }
                         });
                 });
@@ -398,13 +385,7 @@ fn draw_person_card(
                         CornerRadius::same(theme::RADIUS_SM),
                         palette.bg_card.color32(),
                     );
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "👤",
-                        egui::FontId::proportional(28.0),
-                        palette.text_secondary.color32(),
-                    );
+                    draw_silhouette(ui.painter(), rect, palette.text_hint.color32());
                 }
 
                 ui.add_space(theme::SPACE_SM);
@@ -569,4 +550,13 @@ fn draw_person_info(ui: &mut egui::Ui, palette: &Palette, person: &Person) {
             .size(theme::FONT_SMALL)
             .color(palette.text_secondary.color32()),
     );
+}
+
+/// Neutral head-and-shoulders mark for a person without a face crop.
+fn draw_silhouette(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let s = rect.width().min(rect.height());
+    let c = rect.center();
+    painter.circle_filled(Pos2::new(c.x, c.y - s * 0.12), s * 0.16, color);
+    let body = Rect::from_center_size(Pos2::new(c.x, c.y + s * 0.2), Vec2::new(s * 0.5, s * 0.22));
+    painter.rect_filled(body, CornerRadius::same((s * 0.11) as u8), color);
 }
