@@ -178,3 +178,65 @@ fn old_settings_without_background_review_fields_loads_with_safe_defaults() {
     assert!(!loaded.settings.stage_vision);
     assert!(!loaded.settings.stage_ocr);
 }
+
+#[test]
+fn save_does_not_truncate_existing_hard_linked_temp_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+
+    let original_photo = tmp.path().join("original_photo.jpg");
+    let original_bytes = b"datos irreemplazables de una foto original";
+    fs::write(&original_photo, original_bytes).unwrap();
+
+    let tmp_path = data.join("settings.json.tmp");
+    fs::hard_link(&original_photo, &tmp_path).unwrap();
+
+    let s = Settings {
+        theme: Theme::Light,
+        ..Default::default()
+    };
+
+    save(&data, &s).unwrap();
+
+    // The hard-linked file must NOT be truncated or overwritten.
+    assert_eq!(
+        fs::read(&original_photo).unwrap(),
+        original_bytes,
+        "el archivo original fue modificado o vaciado"
+    );
+    assert_eq!(
+        fs::read(&tmp_path).unwrap(),
+        original_bytes,
+        "el temporal con enlace duro fue modificado o vaciado"
+    );
+
+    // Settings must be saved correctly and roundtrip.
+    let loaded = load(&data);
+    assert!(loaded.warning.is_none());
+    assert_eq!(loaded.settings.theme, Theme::Light);
+}
+
+#[test]
+fn save_safely_replaces_single_link_leftover_temp_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+
+    let stale_tmp = data.join("settings.json.tmp");
+    fs::write(&stale_tmp, b"temporal incompleto de una ejecucion anterior").unwrap();
+
+    let s = Settings {
+        theme: Theme::System,
+        ..Default::default()
+    };
+
+    save(&data, &s).unwrap();
+
+    // Stale single-link temp file was cleaned up and replaced atomically.
+    assert!(!stale_tmp.exists(), "quedó un archivo temporal huérfano");
+
+    let loaded = load(&data);
+    assert!(loaded.warning.is_none());
+    assert_eq!(loaded.settings.theme, Theme::System);
+}

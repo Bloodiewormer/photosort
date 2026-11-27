@@ -257,20 +257,114 @@ impl Settings {
     }
 }
 
+/// Returns `true` only if `path` exists as a regular file (not a symlink or directory)
+/// and has exactly one hard link (it does not share data with another file).
+pub(crate) fn file_has_single_link(path: &Path) -> io::Result<bool> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Ok(false);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        let file = File::open(path)?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `file.as_raw_handle()` is a valid open handle and `info` is a valid pointer.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+        drop(file);
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info.nNumberOfLinks == 1)
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(meta.nlink() == 1)
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        Ok(false)
+    }
+}
+
 /// Creates a directory already proven to be outside every library root.
 #[allow(clippy::disallowed_methods)] // `dir` is a fsguard DestPath
 fn create_dir_dest(dir: &DestPath) -> io::Result<()> {
     fs::create_dir_all(dir.as_path())
 }
 
-/// Writes bytes to `tmp` and atomically renames to `target`. Both paths are `DestPath`.
-#[allow(clippy::disallowed_methods)] // both `tmp` and `target` are fsguard DestPaths
-fn write_atomic_dest(tmp: &DestPath, target: &DestPath, bytes: &[u8]) -> io::Result<()> {
-    let mut file = File::create(tmp.as_path())?;
+/// Creates or opens a safe temporary file in `dir` with `create_new(true)`. If `preferred_tmp`
+/// already exists, it is deleted only if it is a regular file with a single link; otherwise, an
+/// alternate name is chosen to prevent truncating any existing file or hard link.
+#[allow(clippy::disallowed_methods)] // `dir` and `preferred_tmp` are fsguard DestPaths
+fn create_temp_dest(dir: &DestPath, preferred_tmp: &DestPath) -> io::Result<(File, DestPath)> {
+    preferred_tmp.verify().map_err(io::Error::other)?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(preferred_tmp.as_path())
+    {
+        Ok(file) => return Ok((file, preferred_tmp.clone())),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let can_delete = file_has_single_link(preferred_tmp.as_path()).unwrap_or(false);
+            if can_delete && fs::remove_file(preferred_tmp.as_path()).is_ok() {
+                preferred_tmp.verify().map_err(io::Error::other)?;
+                if let Ok(file) = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(preferred_tmp.as_path())
+                {
+                    return Ok((file, preferred_tmp.clone()));
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
+    for i in 1..=1000 {
+        let alt_name = format!("{SETTINGS_TMP}.{i}");
+        let alt_dest = dir
+            .join_name(OsStr::new(&alt_name))
+            .map_err(io::Error::other)?;
+        alt_dest.verify().map_err(io::Error::other)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(alt_dest.as_path())
+        {
+            Ok(file) => return Ok((file, alt_dest)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no se pudo crear un archivo temporal único para guardar la configuración",
+    ))
+}
+
+/// Writes bytes to a safe temporary file and atomically renames it to `target`.
+#[allow(clippy::disallowed_methods)] // `dir`, `tmp` and `target` are fsguard DestPaths
+fn write_atomic_dest(
+    dir: &DestPath,
+    tmp: &DestPath,
+    target: &DestPath,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let (mut file, actual_tmp) = create_temp_dest(dir, tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(tmp.as_path(), target.as_path())
+    fs::rename(actual_tmp.as_path(), target.as_path())
 }
 
 /// Preserves a corrupt settings file as `backup` without ever overwriting an existing backup.
@@ -340,7 +434,7 @@ pub fn save(data_dir: &Path, settings: &Settings) -> Result<(), SettingsError> {
         .join_name(OsStr::new(SETTINGS_FILE))
         .map_err(io::Error::other)?;
     let bytes = serde_json::to_vec_pretty(settings)?;
-    write_atomic_dest(&tmp, &target, &bytes)?;
+    write_atomic_dest(&dir_dest, &tmp, &target, &bytes)?;
     Ok(())
 }
 
