@@ -62,7 +62,7 @@ La interfaz publica su árbol de accesibilidad con AccessKit, que en Windows lo 
 - el foco empieza dentro de la ventana de exportación;
 - el borde de foco se dibuja en los dos temas.
 
-Solo revisado en el código: Escape en las ventanas de etiquetas y de propuestas de obras, en el visor y en las listas desplegables. Mientras hay una ventana o un menú abiertos, los atajos de la galería no actúan. En la exportación, Intro solo vale como acción por defecto si ningún control tiene el foco, para que Intro sobre «Cerrar» no inicie una exportación.
+Solo revisado en el código: Escape en las ventanas de etiquetas y de propuestas de obras, en el visor y en las listas desplegables. Mientras hay una ventana o un menú abiertos, los atajos de la galería no actúan. En la exportación, Intro solo vale como acción por defecto si ningún control tiene el foco, para que Intro sobre «Cerrar» no inicie una exportación, y solo cuenta una pulsación nueva: Intro mantenido no la inicia al repetirse.
 
 Límites conocidos:
 
