@@ -18,7 +18,7 @@ Al crear un catálogo nuevo se generan una sola vez 16 reglas iniciales, control
 - **Tipo de página visual (independiente, categoría):** `Portada de manga`, restringida para sugerirse únicamente cuando el tipo ganador es `Manga` o `Ilustración`.
 - **Etiqueta independiente:** `persona` (con descripciones negativas para evitar personajes dibujados).
 
-Las descripciones iniciales están en inglés y **todos sus umbrales iniciales están sin calibrar**; el usuario puede editarlas o escribir nuevas en español o inglés.
+Las descripciones iniciales están en inglés; el usuario puede editarlas o escribir nuevas en español o inglés. Los umbrales de tipo, `Anime` y `Portada de manga` están calibrados con 335 imágenes reales, y `Manhwa`, `Webtoon` y `Videojuegos` vienen desactivadas (ver [vision-evaluacion.md](vision-evaluacion.md#calibración-con-imágenes-reales)). El resto sigue sin calibrar.
 
 ### Similitud coseno, no probabilidades
 
@@ -28,7 +28,7 @@ Los archivos ONNX divididos de SigLIP 2 no incluyen `logit_scale` ni `logit_bias
 - **Grupo Tipo (exclusivo):** solo se sugiere el tipo activado con mayor similitud coseno si alcanza su umbral. Su confianza de ordenación es `softmax(100 * cosenos)[ganador]`, para que las imágenes más ambiguas aparezcan primero en **Revisión**.
 - **Reglas independientes:** se sugieren si la similitud positiva alcanza el umbral y (si hay descripciones negativas) supera la mejor similitud negativa. Su confianza usa una heurística monótona creciente en `[0,50, 0,99]` respecto al margen sobre el umbral.
 - **Regla `persona` + YuNet:** `persona` también se sugiere cuando YuNet detecta un rostro con puntuación `≥ 0,80` **y** el tipo ganador es `Foto`, `Meme` o `Capturas de pantalla`. Un rostro dibujado en `Manga` o `Ilustración` no activa `persona`.
-- **Umbrales iniciales sin calibrar:** los umbrales predeterminados son valores provisionales tomados solo del conjunto sintético. Usa el botón **Probar** en la pestaña **Etiquetas** para ver las imágenes ordenadas por similitud y elegir el corte adecuado.
+- **Umbrales:** los calibrados se eligieron con una muestra real de 335 imágenes; los demás son provisionales. Usa el botón **Probar** en la pestaña **Etiquetas** para ver las imágenes ordenadas por similitud y elegir el corte adecuado.
 
 ## Flujo en la interfaz
 
