@@ -18,7 +18,7 @@ use crate::views::shell::{ActiveView, SidebarState};
 use crate::views::tags::{TagsApplyState, TagsViewState};
 use crate::views::works::{WorksRunState, WorksViewState};
 use crate::vision_worker::{TagsApplyEvent, TagsApplyWorker, VisionRankResult, VisionRankWorker};
-use crate::worker::{Notify, PreviewWorker, ThumbPool, ThumbnailProvider};
+use crate::worker::{Notify, PreviewWorker, ThumbPool, ThumbRequest, ThumbnailProvider};
 use crate::works_worker::{WorksEvent, WorksWorker};
 use catalog::{
     AssetId, Catalog, Counts, DuplicateGroup, Entry, LabelId, LabelNode, MetadataFacets,
@@ -491,6 +491,30 @@ impl PhotosortApp {
                 }
             }
         }
+    }
+
+    /// Face crops are cut from gallery thumbnails: asks for the ones a face view needs, even when
+    /// those photos are not on screen in the gallery.
+    fn face_thumbs(&self, assets: &[AssetId]) -> HashMap<AssetId, String> {
+        let mut map = HashMap::new();
+        let Some(cat) = &self.catalog else {
+            return map;
+        };
+        for &asset in assets {
+            let Ok(Some(entry)) = cat.entry_for(asset) else {
+                continue;
+            };
+            if !self.thumb_textures.contains_key(&entry.sha256)
+                && !self.thumb_failed.contains(&entry.sha256)
+            {
+                self.thumb_pool.request(ThumbRequest {
+                    source: entry.path.clone(),
+                    sha256: entry.sha256.clone(),
+                });
+            }
+            map.insert(asset, entry.sha256);
+        }
+        map
     }
 
     fn reload_inspector_details(&mut self) {
@@ -1584,11 +1608,8 @@ impl eframe::App for PhotosortApp {
                 } else {
                     Vec::new()
                 };
-                let asset_paths: HashMap<AssetId, String> = self
-                    .entries
-                    .iter()
-                    .map(|e| (e.asset, e.sha256.clone()))
-                    .collect();
+                let face_assets: Vec<AssetId> = sample_faces.iter().map(|f| f.asset_id).collect();
+                let asset_paths = self.face_thumbs(&face_assets);
 
                 let top_banner =
                     if let (Some(cat), Some(candidate)) = (&self.catalog, &naming_candidate) {
@@ -2024,12 +2045,13 @@ impl eframe::App for PhotosortApp {
                 }
             }
             ActiveView::Persons => {
+                let covers: Vec<AssetId> = self
+                    .persons
+                    .iter()
+                    .filter_map(|p| p.cover_asset_id)
+                    .collect();
+                let asset_paths = self.face_thumbs(&covers);
                 let (outcome, catalog_mutated) = if let Some(cat) = &mut self.catalog {
-                    let asset_paths: HashMap<AssetId, String> = self
-                        .entries
-                        .iter()
-                        .map(|e| (e.asset, e.sha256.clone()))
-                        .collect();
                     let outcome = views::persons::draw(
                         ui,
                         palette,
