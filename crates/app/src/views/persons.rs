@@ -168,12 +168,16 @@ fn draw_face_chip(
         let margin_x = fw * 0.15;
         let margin_y = fh * 0.15;
 
-        // Image coordinates in YuNet are in decoded px (max 640px)
-        let max_dim = 640.0f32;
-        let u0 = ((x1 - margin_x) / max_dim).clamp(0.0, 1.0);
-        let v0 = ((y1 - margin_y) / max_dim).clamp(0.0, 1.0);
-        let u1 = ((x2 + margin_x) / max_dim).clamp(0.0, 1.0);
-        let v1 = ((y2 + margin_y) / max_dim).clamp(0.0, 1.0);
+        // Image coordinates in YuNet are in decoded px (longest edge <= 640px)
+        let tex_size = tex.size_vec2();
+        let longest = tex_size.x.max(tex_size.y).max(1.0);
+        let scale = 640.0f32 / longest;
+        let dec_w = (tex_size.x * scale).max(1.0);
+        let dec_h = (tex_size.y * scale).max(1.0);
+        let u0 = ((x1 - margin_x) / dec_w).clamp(0.0, 1.0);
+        let v0 = ((y1 - margin_y) / dec_h).clamp(0.0, 1.0);
+        let u1 = ((x2 + margin_x) / dec_w).clamp(0.0, 1.0);
+        let v1 = ((y2 + margin_y) / dec_h).clamp(0.0, 1.0);
 
         let uv = Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1));
         ui.painter().rect_filled(

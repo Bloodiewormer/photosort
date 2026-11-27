@@ -33,7 +33,7 @@ Los archivos ONNX divididos de SigLIP 2 no incluyen `logit_scale` ni `logit_bias
   - `grupo de personas`: se sugiere si hay 3 o más rostros con puntuación `≥ 0,80`.
 - **Reconocimiento y agrupación de rostros (SFace):**
   - Modelo opcional en `sface/face_recognition_sface_2021dec.onnx` (OpenCV SFace, Apache-2.0). Si no está presente, la detección de rostros sigue funcionando normalmente.
-  - Conserva los 5 puntos de referencia faciales dados por YuNet y aplica una transformación de similitud hacia la plantilla estándar de ArcFace de 112×112 en BGR.
+  - Conserva los 5 puntos de referencia faciales dados por YuNet y aplica una transformación de similitud hacia la plantilla estándar de ArcFace de 112×112 en RGB (0..255 sin normalizar, equivalente a `blobFromImage` con `swapRB = true` en OpenCV).
   - Genera un vector normalizado L2 de 128 dimensiones. El umbral de similitud coseno de OpenCV para considerar la misma persona es `0,363`.
   - **Agrupación incremental:** cada rostro se asigna a la persona más parecida si supera el umbral; si no, crea un grupo nuevo sin nombre. La asignación manual de un rostro por el usuario (`user_assigned = 1`) queda fijada y nunca es sobrescrita por análisis posteriores.
   - **Propuesta de nombres:** cuando un grupo sin nombre aparece en 3 o más fotos, la aplicación muestra una tarjeta no intrusiva («Esta persona aparece en N fotos. ¿Cómo se llama?») con muestras de la cara. El usuario puede nombrarla, unirla si el nombre ya existe, posponer la pregunta («Más tarde») o marcarla como ignorada («No preguntar»).

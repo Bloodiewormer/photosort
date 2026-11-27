@@ -106,13 +106,21 @@ fn incremental_grouping_assigns_same_person_above_threshold_and_creates_new_belo
     assert_eq!(cosine_similarity_128(&e_base, &e_different), 0.0);
 
     // 1. Group face A -> creates person 1 (unnamed)
-    let p1 = s.cat.group_face(faces_a[0].id, &e_base, 0.363).unwrap();
+    let p1 = s
+        .cat
+        .group_face(faces_a[0].id, &e_base, 0.363)
+        .unwrap()
+        .unwrap();
     let person1 = s.cat.get_person(p1).unwrap().unwrap();
     assert_eq!(person1.name, None);
     assert_eq!(person1.photo_count, 1);
 
     // 2. Group face B (similar) -> assigns to person 1
-    let p2 = s.cat.group_face(faces_b[0].id, &e_similar, 0.363).unwrap();
+    let p2 = s
+        .cat
+        .group_face(faces_b[0].id, &e_similar, 0.363)
+        .unwrap()
+        .unwrap();
     assert_eq!(p1, p2);
     let person1_updated = s.cat.get_person(p1).unwrap().unwrap();
     assert_eq!(person1_updated.photo_count, 2);
@@ -121,6 +129,7 @@ fn incremental_grouping_assigns_same_person_above_threshold_and_creates_new_belo
     let p3 = s
         .cat
         .group_face(faces_c[0].id, &e_different, 0.363)
+        .unwrap()
         .unwrap();
     assert_ne!(p1, p3);
     let person2 = s.cat.get_person(p3).unwrap().unwrap();
@@ -167,7 +176,11 @@ fn user_assigned_face_is_never_overridden_by_incremental_grouping() {
     s.cat.group_face(faces_b[0].id, &e_alice, 0.363).unwrap();
 
     // Now try to run group_face on face A with Alice's embedding
-    let assigned = s.cat.group_face(faces_a[0].id, &e_alice, 0.363).unwrap();
+    let assigned = s
+        .cat
+        .group_face(faces_a[0].id, &e_alice, 0.363)
+        .unwrap()
+        .unwrap();
     assert_eq!(assigned, p2, "must keep user assigned person Bob");
 
     let face_a_after = s.cat.asset_face_details(a).unwrap();
@@ -250,10 +263,10 @@ fn remove_asset_from_person_unassigns_only_that_asset_faces() {
     // Remove asset `a` from Carlos
     s.cat.remove_asset_from_person(a, p).unwrap();
 
-    // Face in `a` is unassigned
+    // Face in `a` is unassigned and locked as a user decision
     let faces_a_after = s.cat.asset_face_details(a).unwrap();
     assert_eq!(faces_a_after[0].person_id, None);
-    assert!(!faces_a_after[0].user_assigned);
+    assert!(faces_a_after[0].user_assigned);
 
     // Face in `b` is still assigned to Carlos
     let faces_b_after = s.cat.asset_face_details(b).unwrap();
@@ -357,4 +370,191 @@ fn clear_face_grouping_data_resets_only_face_grouping_and_keeps_other_data() {
     let labels = s.cat.labels_of(a).unwrap();
     assert_eq!(labels.len(), 1);
     assert_eq!(labels[0].name, "vacaciones");
+}
+
+#[test]
+fn migrating_legacy_asset_face_table_without_person_columns_preserves_faces_and_opens_without_write()
+ {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("legacy_faces.sqlite");
+
+    // Old schema where asset_face existed without landmarks/person_id/user_assigned/similarity/embedding
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE asset (id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, size INTEGER NOT NULL);
+             CREATE TABLE asset_face (
+                 id       INTEGER PRIMARY KEY,
+                 asset_id INTEGER NOT NULL REFERENCES asset(id),
+                 face_idx INTEGER NOT NULL,
+                 x1       REAL NOT NULL,
+                 y1       REAL NOT NULL,
+                 x2       REAL NOT NULL,
+                 y2       REAL NOT NULL,
+                 score    REAL NOT NULL CHECK (score BETWEEN 0 AND 1),
+                 UNIQUE (asset_id, face_idx)
+             );
+             CREATE INDEX asset_face_asset ON asset_face(asset_id);
+             INSERT INTO asset (id, sha256, size) VALUES (1, 'deadbeef', 100);
+             INSERT INTO asset_face (asset_id, face_idx, x1, y1, x2, y2, score)
+                 VALUES (1, 0, 10.0, 20.0, 110.0, 120.0, 0.91);",
+        )
+        .unwrap();
+    }
+
+    let db = ensure_writable(&db_path, &[]).unwrap();
+    let cat = Catalog::open(&db).expect("opening legacy catalog with old asset_face must succeed");
+    let faces = cat.asset_faces(AssetId(1)).unwrap();
+    assert_eq!(faces.len(), 1);
+    assert!((faces[0].score - 0.91).abs() < 1e-5);
+    drop(cat);
+
+    // Up-to-date catalog must open without needing a write lock
+    let writer = rusqlite::Connection::open(db.as_path()).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let reopened = Catalog::open(&db);
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(reopened.is_ok(), "{:?}", reopened.err());
+}
+
+#[test]
+fn reanalyzing_asset_preserves_person_id_and_user_assignment() {
+    let mut s = setup(&[("a.jpg", b"1")]);
+    let a = s.asset("a.jpg");
+
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    let face = vec![DetectedFace::new([10.0, 10.0, 110.0, 110.0], 0.95)];
+    s.cat
+        .save_vision_result(a, SIGLIP2_MODEL_ID, &emb, &face)
+        .unwrap();
+
+    let face_id = s.cat.asset_face_details(a).unwrap()[0].id;
+    let p = s.cat.create_person(Some("Lucía")).unwrap();
+    s.cat.assign_face_to_person(face_id, p, true).unwrap();
+
+    // Re-analyze the same photo with slightly shifted bbox (high IoU)
+    let updated_face = vec![DetectedFace::new([12.0, 11.0, 111.0, 109.0], 0.96)];
+    s.cat
+        .save_vision_result(a, SIGLIP2_MODEL_ID, &emb, &updated_face)
+        .unwrap();
+
+    let after = s.cat.asset_face_details(a).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0].person_id,
+        Some(p),
+        "person_id must survive re-analysis"
+    );
+    assert!(
+        after[0].user_assigned,
+        "user_assigned must survive re-analysis"
+    );
+}
+
+#[test]
+fn removed_asset_is_not_readded_by_future_grouping_and_merged_faces_stay_locked() {
+    let mut s = setup(&[("a.jpg", b"1"), ("b.jpg", b"2")]);
+    let a = s.asset("a.jpg");
+    let b = s.asset("b.jpg");
+
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    let face = vec![DetectedFace::new([10.0, 10.0, 100.0, 100.0], 0.95)];
+    s.cat
+        .save_vision_result(a, SIGLIP2_MODEL_ID, &emb, &face)
+        .unwrap();
+    s.cat
+        .save_vision_result(b, SIGLIP2_MODEL_ID, &emb, &face)
+        .unwrap();
+
+    let fa = s.cat.asset_face_details(a).unwrap()[0].id;
+    let fb = s.cat.asset_face_details(b).unwrap()[0].id;
+
+    let e0 = unit_vector_128(0);
+    let e1 = unit_vector_128(5);
+    let pa = s.cat.group_face(fa, &e0, 0.363).unwrap().unwrap();
+    let pb = s.cat.group_face(fb, &e1, 0.363).unwrap().unwrap();
+    assert_ne!(pa, pb);
+
+    // User merges pb into pa -> face b must become user_assigned so re-grouping never splits it
+    s.cat.merge_persons(pb, pa).unwrap();
+    let fb_after_merge = s.cat.asset_face_details(b).unwrap()[0].clone();
+    assert_eq!(fb_after_merge.person_id, Some(pa));
+    assert!(
+        fb_after_merge.user_assigned,
+        "merged face must be locked as user_assigned"
+    );
+
+    // User removes asset `a` from `pa` -> must be marked user_assigned = 1 with person_id = None
+    s.cat.remove_asset_from_person(a, pa).unwrap();
+    let fa_after_remove = s.cat.asset_face_details(a).unwrap()[0].clone();
+    assert_eq!(fa_after_remove.person_id, None);
+    assert!(
+        fa_after_remove.user_assigned,
+        "removed face must stay user_assigned so grouping does not re-add it"
+    );
+
+    // Future grouping on removed face must NOT re-add it to any person
+    let grouped_again = s.cat.group_face(fa, &e0, 0.363).unwrap();
+    assert_eq!(grouped_again, None);
+    assert_eq!(s.cat.asset_face_details(a).unwrap()[0].person_id, None);
+}
+
+#[test]
+fn multiple_faces_of_same_person_in_one_photo_count_as_one_photo_and_hidden_not_proposed() {
+    let mut s = setup(&[("a.jpg", b"1"), ("b.jpg", b"2"), ("c.jpg", b"3")]);
+    let a = s.asset("a.jpg");
+    let b = s.asset("b.jpg");
+    let c = s.asset("c.jpg");
+
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    // Asset `a` has 3 faces of the same person
+    let three_faces = vec![
+        DetectedFace::new([10.0, 10.0, 60.0, 60.0], 0.95),
+        DetectedFace::new([70.0, 10.0, 120.0, 60.0], 0.94),
+        DetectedFace::new([130.0, 10.0, 180.0, 60.0], 0.93),
+    ];
+    s.cat
+        .save_vision_result(a, SIGLIP2_MODEL_ID, &emb, &three_faces)
+        .unwrap();
+    s.cat
+        .save_vision_result(b, SIGLIP2_MODEL_ID, &emb, &three_faces[..1])
+        .unwrap();
+    s.cat
+        .save_vision_result(c, SIGLIP2_MODEL_ID, &emb, &three_faces[..1])
+        .unwrap();
+
+    let e0 = unit_vector_128(0);
+    let faces_a = s.cat.asset_face_details(a).unwrap();
+    let p0 = s
+        .cat
+        .group_face(faces_a[0].id, &e0, 0.363)
+        .unwrap()
+        .unwrap();
+    let p1 = s
+        .cat
+        .group_face(faces_a[1].id, &e0, 0.363)
+        .unwrap()
+        .unwrap();
+    let p2 = s
+        .cat
+        .group_face(faces_a[2].id, &e0, 0.363)
+        .unwrap()
+        .unwrap();
+    assert_eq!(p0, p1);
+    assert_eq!(p0, p2);
+
+    // 3 faces in 1 photo = 1 distinct photo, NOT 3 -> must NOT propose naming
+    assert_eq!(s.cat.get_person(p0).unwrap().unwrap().photo_count, 1);
+    assert!(s.cat.unnamed_persons_with_min_photos(3).unwrap().is_empty());
+
+    // Add 2 more distinct photos -> now 3 distinct photos -> proposed
+    let fb = s.cat.asset_face_details(b).unwrap()[0].id;
+    let fc = s.cat.asset_face_details(c).unwrap()[0].id;
+    s.cat.group_face(fb, &e0, 0.363).unwrap();
+    s.cat.group_face(fc, &e0, 0.363).unwrap();
+    assert_eq!(s.cat.unnamed_persons_with_min_photos(3).unwrap().len(), 1);
+
+    // Hidden person must NOT be proposed
+    s.cat.set_person_hidden(p0, true).unwrap();
+    assert!(s.cat.unnamed_persons_with_min_photos(3).unwrap().is_empty());
 }

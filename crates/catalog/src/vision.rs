@@ -382,6 +382,21 @@ impl CompiledVisionRules {
     }
 }
 
+fn face_bbox_iou(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let ix1 = a[0].max(b[0]);
+    let iy1 = a[1].max(b[1]);
+    let ix2 = a[2].min(b[2]);
+    let iy2 = a[3].min(b[3]);
+    let inter = (ix2 - ix1).max(0.0) * (iy2 - iy1).max(0.0);
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let area_a = (a[2] - a[0]).max(0.0) * (a[3] - a[1]).max(0.0);
+    let area_b = (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
+    let union = area_a + area_b - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
 fn allows_face_person(rule: &CompiledRule) -> bool {
     if let Some(key) = rule.builtin_key.as_deref() {
         return matches!(
@@ -1021,14 +1036,72 @@ impl Catalog {
              ON CONFLICT(asset_id) DO UPDATE SET model = excluded.model, vector = excluded.vector",
             params![asset.0, model, blob],
         )?;
+
+        struct PrevFace {
+            bbox: [f32; 4],
+            person_id: Option<i64>,
+            user_assigned: i64,
+            similarity: Option<f64>,
+            embedding: Option<Vec<u8>>,
+            used: bool,
+        }
+        let mut prev_faces: Vec<PrevFace> = {
+            let mut prev_stmt = tx.prepare_cached(
+                "SELECT x1, y1, x2, y2, person_id, user_assigned, similarity, embedding
+                 FROM asset_face
+                 WHERE asset_id = ?1",
+            )?;
+            let rows = prev_stmt.query_map([asset.0], |r| {
+                Ok(PrevFace {
+                    bbox: [
+                        r.get::<_, f64>(0)? as f32,
+                        r.get::<_, f64>(1)? as f32,
+                        r.get::<_, f64>(2)? as f32,
+                        r.get::<_, f64>(3)? as f32,
+                    ],
+                    person_id: r.get(4)?,
+                    user_assigned: r.get(5)?,
+                    similarity: r.get(6)?,
+                    embedding: r.get(7)?,
+                    used: false,
+                })
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+
         tx.execute("DELETE FROM asset_face WHERE asset_id = ?1", [asset.0])?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO asset_face (asset_id, face_idx, x1, y1, x2, y2, score, landmarks)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO asset_face
+                     (asset_id, face_idx, x1, y1, x2, y2, score, landmarks,
+                      person_id, user_assigned, similarity, embedding)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             for (idx, face) in faces.iter().enumerate() {
                 let lm_str = encode_landmarks(&face.landmarks);
+                let matched_idx = prev_faces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| !p.used)
+                    .map(|(i, p)| (i, face_bbox_iou(p.bbox, face.bbox)))
+                    .filter(|(_, iou)| *iou >= 0.5)
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(i, _)| i);
+
+                let (person_id, user_assigned, similarity, face_emb) = if let Some(mi) = matched_idx
+                {
+                    let prev = &mut prev_faces[mi];
+                    prev.used = true;
+                    (
+                        prev.person_id,
+                        prev.user_assigned,
+                        prev.similarity,
+                        prev.embedding.as_deref(),
+                    )
+                } else {
+                    (None, 0, None, None)
+                };
+
                 stmt.execute(params![
                     asset.0,
                     idx as i64,
@@ -1038,6 +1111,10 @@ impl Catalog {
                     f64::from(face.bbox[3]),
                     f64::from(face.score.clamp(0.0, 1.0)),
                     lm_str,
+                    person_id,
+                    user_assigned,
+                    similarity,
+                    face_emb,
                 ])?;
             }
         }

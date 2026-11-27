@@ -1623,7 +1623,7 @@ impl eframe::App for PhotosortApp {
                             }
                         }
                         if let Some((src, target)) = out.merged {
-                            match cat.merge_persons(target, src) {
+                            match cat.merge_persons(src, target) {
                                 Ok(_) => catalog_mutated = true,
                                 Err(e) => {
                                     self.banner_error =
@@ -1998,7 +1998,7 @@ impl eframe::App for PhotosortApp {
                         }
                     }
                     if let Some((src, target)) = outcome.merged {
-                        match cat.merge_persons(target, src) {
+                        match cat.merge_persons(src, target) {
                             Ok(_) => catalog_mutated = true,
                             Err(e) => {
                                 self.banner_error =
@@ -2128,6 +2128,8 @@ impl eframe::App for PhotosortApp {
                 {
                     match cat.clear_face_grouping_data() {
                         Ok(()) => {
+                            self.filter.persons.clear();
+                            self.persons_view.postponed_persons.clear();
                             self.status_notice = Some(
                                 "Se han borrado los datos de rostros, grupos y nombres".into(),
                             );

@@ -1,6 +1,8 @@
 //! SFace face recognition (`face_recognition_sface_2021dec.onnx`).
 //!
-//! Input: aligned 112×112 BGR face crop without normalization (`0.0..=255.0`), shape `[1, 3, 112, 112]`.
+//! Input: aligned 112×112 RGB face crop without normalization (`0.0..=255.0`), shape `[1, 3, 112, 112]`
+//! (matching OpenCV `FaceRecognizerSF::feature`, which calls `blobFromImage` with `scalefactor = 1`
+//! and `swapRB = true` on BGR images).
 //! Output: 128-dimensional L2-normalized feature vector.
 //! Cosine similarity threshold for "same person": `0.363`.
 
@@ -79,8 +81,9 @@ pub fn estimate_similarity_transform(
     Some((a, b, tx, ty))
 }
 
-/// Aligns a detected face from `image` using its 5 facial landmarks and returns a 112×112 BGR NCHW
-/// buffer (`3 * 112 * 112` floats in `0.0..=255.0`), matching OpenCV `FaceRecognizerSF::alignCrop`.
+/// Aligns a detected face from `image` using its 5 facial landmarks and returns a 112×112 RGB NCHW
+/// buffer (`3 * 112 * 112` floats in `0.0..=255.0`), matching OpenCV `FaceRecognizerSF::alignCrop`
+/// followed by `FaceRecognizerSF::feature` (`blobFromImage` with `swapRB = true, scalefactor = 1`).
 pub fn align_face(image: &RgbImage, landmarks: &[[f32; 2]; 5]) -> Vec<f32> {
     let size = SFACE_INPUT_SIZE as usize;
     let plane = size * size;
@@ -101,8 +104,8 @@ pub fn align_face(image: &RgbImage, landmarks: &[[f32; 2]; 5]) -> Vec<f32> {
 
     let w = image.width() as f32;
     let h = image.height() as f32;
-    let (b_plane, rest) = out.split_at_mut(plane);
-    let (g_plane, r_plane) = rest.split_at_mut(plane);
+    let (r_plane, rest) = out.split_at_mut(plane);
+    let (g_plane, b_plane) = rest.split_at_mut(plane);
 
     for v in 0..size {
         let vf = v as f32;
@@ -117,10 +120,10 @@ pub fn align_face(image: &RgbImage, landmarks: &[[f32; 2]; 5]) -> Vec<f32> {
 
             let (r, g, b) = sample_bilinear(image, src_x, src_y, w, h);
             let idx = row_offset + u;
-            // SFace expects BGR order with raw 0..255 values
-            b_plane[idx] = b;
-            g_plane[idx] = g;
+            // SFace expects RGB order with raw 0..255 values (OpenCV blobFromImage swapRB=true)
             r_plane[idx] = r;
+            g_plane[idx] = g;
+            b_plane[idx] = b;
         }
     }
 
@@ -201,21 +204,21 @@ impl SFace {
         })
     }
 
-    /// Extracts a 128-dimensional L2-normalized face embedding from an aligned 112×112 BGR NCHW buffer.
+    /// Extracts a 128-dimensional L2-normalized face embedding from an aligned 112×112 RGB NCHW buffer.
     pub fn feature(
         &mut self,
-        aligned_bgr_nchw: &[f32],
+        aligned_rgb_nchw: &[f32],
     ) -> Result<[f32; SFACE_EMBEDDING_DIM], String> {
         let size = SFACE_INPUT_SIZE as usize;
         let expected = 3 * size * size;
-        if aligned_bgr_nchw.len() != expected {
+        if aligned_rgb_nchw.len() != expected {
             return Err(format!(
                 "aligned face length {}, expected {expected}",
-                aligned_bgr_nchw.len()
+                aligned_rgb_nchw.len()
             ));
         }
 
-        let input = TensorRef::from_array_view(([1, 3, size, size], aligned_bgr_nchw))
+        let input = TensorRef::from_array_view(([1, 3, size, size], aligned_rgb_nchw))
             .map_err(|e| e.to_string())?;
         let outputs = self
             .session
@@ -298,5 +301,24 @@ mod tests {
         let img = RgbImage::new(200, 200);
         let aligned = align_face(&img, &ARCFACE_DST_LANDMARKS);
         assert_eq!(aligned.len(), 3 * 112 * 112);
+    }
+
+    #[test]
+    fn align_face_preserves_rgb_channel_order_without_normalization() {
+        let img = RgbImage::from_pixel(112, 112, image::Rgb([10, 20, 30]));
+        let aligned = align_face(&img, &ARCFACE_DST_LANDMARKS);
+        let plane = (SFACE_INPUT_SIZE * SFACE_INPUT_SIZE) as usize;
+        let center = 56 * SFACE_INPUT_SIZE as usize + 56;
+        // OpenCV FaceRecognizerSF::feature calls blobFromImage(..., swapRB=true, scalefactor=1),
+        // so the ONNX tensor expects RGB in 0..255.
+        assert!((aligned[center] - 10.0).abs() < 1e-3, "R channel mismatch");
+        assert!(
+            (aligned[plane + center] - 20.0).abs() < 1e-3,
+            "G channel mismatch"
+        );
+        assert!(
+            (aligned[2 * plane + center] - 30.0).abs() < 1e-3,
+            "B channel mismatch"
+        );
     }
 }

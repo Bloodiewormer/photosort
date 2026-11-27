@@ -6,9 +6,10 @@
 
 use crate::{AssetId, Catalog, CatalogError};
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashMap;
 
 pub const SFACE_SIMILARITY_THRESHOLD: f32 = 0.363;
+/// Maximum number of highest-score face embeddings averaged to build a person's centroid.
+const MAX_CENTROID_FACES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PersonId(pub i64);
@@ -80,6 +81,48 @@ pub fn cosine_similarity_128(a: &[f32; 128], b: &[f32; 128]) -> f32 {
         dot += a[i] * b[i];
     }
     dot.clamp(-1.0, 1.0)
+}
+
+/// Recomputes and stores the L2-normalized centroid for a single person using up to
+/// [`MAX_CENTROID_FACES`] highest-score embeddings, keeping grouping O(persons) instead of O(faces).
+fn recompute_person_centroid(
+    conn: &rusqlite::Connection,
+    person_id: i64,
+) -> Result<(), CatalogError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT embedding FROM asset_face
+         WHERE person_id = ?1 AND embedding IS NOT NULL
+         ORDER BY score DESC, id ASC
+         LIMIT ?2",
+    )?;
+    let mut centroid = [0.0f32; 128];
+    let mut count = 0usize;
+    let rows = stmt.query_map(params![person_id, MAX_CENTROID_FACES as i64], |r| {
+        r.get::<_, Vec<u8>>(0)
+    })?;
+    for row in rows {
+        if let Some(arr) = decode_face_embedding(&row?) {
+            for (c, &v) in centroid.iter_mut().zip(&arr) {
+                *c += v;
+            }
+            count += 1;
+        }
+    }
+    drop(stmt);
+    if count == 0 {
+        conn.execute(
+            "UPDATE person SET centroid = NULL WHERE id = ?1",
+            [person_id],
+        )?;
+    } else {
+        l2_normalize_128(&mut centroid);
+        let blob = encode_face_embedding(&centroid);
+        conn.execute(
+            "UPDATE person SET centroid = ?1 WHERE id = ?2",
+            params![blob.as_slice(), person_id],
+        )?;
+    }
+    Ok(())
 }
 
 impl Catalog {
@@ -263,10 +306,11 @@ impl Catalog {
         }
 
         tx.execute(
-            "UPDATE asset_face SET person_id = ?1 WHERE person_id = ?2",
+            "UPDATE asset_face SET person_id = ?1, user_assigned = 1 WHERE person_id = ?2",
             params![target.0, source.0],
         )?;
         tx.execute("DELETE FROM person WHERE id = ?1", [source.0])?;
+        recompute_person_centroid(&tx, target.0)?;
         tx.commit()?;
         Ok(())
     }
@@ -278,11 +322,14 @@ impl Catalog {
         asset: AssetId,
         person: PersonId,
     ) -> Result<(), CatalogError> {
-        self.conn.execute(
-            "UPDATE asset_face SET person_id = NULL, user_assigned = 0, similarity = NULL
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE asset_face SET person_id = NULL, user_assigned = 1, similarity = NULL
              WHERE asset_id = ?1 AND person_id = ?2",
             params![asset.0, person.0],
         )?;
+        recompute_person_centroid(&tx, person.0)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -294,10 +341,26 @@ impl Catalog {
         person: PersonId,
         user_assigned: bool,
     ) -> Result<(), CatalogError> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let prev_pid: Option<i64> = tx
+            .query_row(
+                "SELECT person_id FROM asset_face WHERE id = ?1",
+                [face_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        tx.execute(
             "UPDATE asset_face SET person_id = ?1, user_assigned = ?2 WHERE id = ?3",
             params![person.0, if user_assigned { 1 } else { 0 }, face_id],
         )?;
+        if let Some(old_pid) = prev_pid
+            && old_pid != person.0
+        {
+            recompute_person_centroid(&tx, old_pid)?;
+        }
+        recompute_person_centroid(&tx, person.0)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -415,24 +478,26 @@ impl Catalog {
 
     /// Incrementally groups `face_id` using its 128-dimensional L2-normalized embedding.
     ///
-    /// - If `face_id` is user-assigned (`user_assigned == 1`), its person assignment is never changed.
-    /// - Otherwise, compares against all existing persons (by computing cosine similarity against
-    ///   the person's faces / centroid).
-    /// - If maximum similarity >= `threshold`: assigns the face to that person.
-    /// - If below threshold (or no existing persons): creates a new unnamed person and assigns the face.
+    /// - If `face_id` is user-assigned (`user_assigned == 1`), its person assignment (including an
+    ///   explicit removal where `person_id` is `None`) is never changed.
+    /// - Otherwise, compares against all existing persons' stored centroids (O(persons), not O(faces)).
+    /// - If maximum similarity >= `threshold`: assigns the face to that person and updates its centroid.
+    /// - If below threshold (or no existing persons): creates a new unnamed person with this embedding
+    ///   as its centroid and assigns the face.
     ///
-    /// Saves the embedding on `asset_face`. Returns the assigned `PersonId`.
+    /// Saves the embedding on `asset_face`. Returns the assigned `PersonId` (or `None` if the face
+    /// was explicitly removed by the user).
     pub fn group_face(
         &mut self,
         face_id: i64,
         embedding: &[f32; 128],
         threshold: f32,
-    ) -> Result<PersonId, CatalogError> {
+    ) -> Result<Option<PersonId>, CatalogError> {
         let blob = encode_face_embedding(embedding);
+        let tx = self.conn.transaction()?;
 
-        // 1. Check if user assigned
-        let current: Option<(Option<i64>, i64)> = self
-            .conn
+        // 1. Check if user assigned (either pinned to a person or explicitly removed)
+        let current: Option<(Option<i64>, i64)> = tx
             .query_row(
                 "SELECT person_id, user_assigned FROM asset_face WHERE id = ?1",
                 [face_id],
@@ -446,83 +511,78 @@ impl Catalog {
             )));
         };
 
-        if user_assigned == 1
-            && let Some(pid) = existing_pid
-        {
-            self.conn.execute(
+        if user_assigned == 1 {
+            tx.execute(
                 "UPDATE asset_face SET embedding = ?1 WHERE id = ?2",
                 params![blob.as_slice(), face_id],
             )?;
-            return Ok(PersonId(pid));
-        }
-
-        // 2. Fetch all existing persons and their face embeddings (excluding this face)
-        let mut stmt = self.conn.prepare(
-            "SELECT af.person_id, af.embedding
-             FROM asset_face af
-             JOIN person p ON p.id = af.person_id
-             WHERE af.embedding IS NOT NULL AND af.id != ?1",
-        )?;
-
-        let mut person_embs: HashMap<i64, Vec<[f32; 128]>> = HashMap::new();
-        let rows = stmt.query_map([face_id], |r| {
-            let pid: i64 = r.get(0)?;
-            let b: Vec<u8> = r.get(1)?;
-            Ok((pid, b))
-        })?;
-
-        for row in rows {
-            let (pid, bytes) = row?;
-            if let Some(arr) = decode_face_embedding(&bytes) {
-                person_embs.entry(pid).or_default().push(arr);
+            if let Some(pid) = existing_pid {
+                recompute_person_centroid(&tx, pid)?;
             }
+            tx.commit()?;
+            return Ok(existing_pid.map(PersonId));
         }
 
-        // 3. Find person with highest similarity
+        // 2. Compare against stored person centroids (O(persons))
         let mut best_person: Option<(i64, f32)> = None;
-        for (pid, embs) in &person_embs {
-            let mut centroid = [0.0f32; 128];
-            for e in embs {
-                for i in 0..128 {
-                    centroid[i] += e[i];
-                }
-            }
-            l2_normalize_128(&mut centroid);
-            let sim = cosine_similarity_128(embedding, &centroid);
-            if sim >= threshold {
-                match best_person {
-                    Some((_, best_sim)) if sim > best_sim => {
-                        best_person = Some((*pid, sim));
+        {
+            let mut stmt =
+                tx.prepare_cached("SELECT id, centroid FROM person WHERE centroid IS NOT NULL")?;
+            let rows = stmt.query_map([], |r| {
+                let pid: i64 = r.get(0)?;
+                let b: Vec<u8> = r.get(1)?;
+                Ok((pid, b))
+            })?;
+            for row in rows {
+                let (pid, bytes) = row?;
+                if let Some(centroid) = decode_face_embedding(&bytes) {
+                    let sim = cosine_similarity_128(embedding, &centroid);
+                    if sim >= threshold {
+                        match best_person {
+                            Some((_, best_sim)) if sim > best_sim => {
+                                best_person = Some((pid, sim));
+                            }
+                            None => {
+                                best_person = Some((pid, sim));
+                            }
+                            _ => {}
+                        }
                     }
-                    None => {
-                        best_person = Some((*pid, sim));
-                    }
-                    _ => {}
                 }
             }
         }
 
-        // 4. Assign or create
-        let (assigned_pid, sim_val) = match best_person {
-            Some((pid, sim)) => (pid, sim),
+        // 3. Assign to best person or create a new unnamed person
+        let (assigned_pid, sim_val, created_new) = match best_person {
+            Some((pid, sim)) => (pid, sim, false),
             None => {
-                self.conn.execute(
-                    "INSERT INTO person (name, hidden, ignored) VALUES (NULL, 0, 0)",
-                    [],
+                tx.execute(
+                    "INSERT INTO person (name, hidden, ignored, centroid) VALUES (NULL, 0, 0, ?1)",
+                    [blob.as_slice()],
                 )?;
-                let new_pid = self.conn.last_insert_rowid();
-                (new_pid, 1.0f32)
+                let new_pid = tx.last_insert_rowid();
+                (new_pid, 1.0f32, true)
             }
         };
 
-        self.conn.execute(
+        tx.execute(
             "UPDATE asset_face
              SET person_id = ?1, similarity = ?2, user_assigned = 0, embedding = ?3
              WHERE id = ?4",
             params![assigned_pid, f64::from(sim_val), blob.as_slice(), face_id],
         )?;
 
-        Ok(PersonId(assigned_pid))
+        if !created_new {
+            recompute_person_centroid(&tx, assigned_pid)?;
+        }
+        if let Some(old_pid) = existing_pid
+            && old_pid != assigned_pid
+        {
+            recompute_person_centroid(&tx, old_pid)?;
+        }
+
+        tx.commit()?;
+        Ok(Some(PersonId(assigned_pid)))
     }
 
     /// Clears all computed face grouping data: deletes all persons and clears person_id,

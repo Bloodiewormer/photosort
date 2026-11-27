@@ -164,10 +164,11 @@ CREATE TABLE IF NOT EXISTS asset_embedding (
 );
 CREATE INDEX IF NOT EXISTS asset_embedding_model ON asset_embedding(model, asset_id);
 CREATE TABLE IF NOT EXISTS person (
-    id      INTEGER PRIMARY KEY,
-    name    TEXT,
-    hidden  INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
-    ignored INTEGER NOT NULL DEFAULT 0 CHECK (ignored IN (0, 1))
+    id       INTEGER PRIMARY KEY,
+    name     TEXT,
+    hidden   INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+    ignored  INTEGER NOT NULL DEFAULT 0 CHECK (ignored IN (0, 1)),
+    centroid BLOB CHECK (centroid IS NULL OR length(centroid) = 512)
 );
 CREATE INDEX IF NOT EXISTS person_name ON person(name);
 CREATE TABLE IF NOT EXISTS asset_face (
@@ -187,7 +188,6 @@ CREATE TABLE IF NOT EXISTS asset_face (
     UNIQUE (asset_id, face_idx)
 );
 CREATE INDEX IF NOT EXISTS asset_face_asset ON asset_face(asset_id);
-CREATE INDEX IF NOT EXISTS asset_face_person ON asset_face(person_id);
 CREATE TABLE IF NOT EXISTS vision_rule (
     id          INTEGER PRIMARY KEY,
     label_id    INTEGER NOT NULL UNIQUE REFERENCES label(id),
@@ -424,11 +424,14 @@ impl Catalog {
         Ok(())
     }
 
-    /// Ensures the `person` table and all face grouping columns on `asset_face` exist, without writing when up to date.
+    /// Ensures the `person` table (including `centroid`), all face grouping columns on `asset_face`,
+    /// and the `asset_face_person` index exist, without writing when up to date.
     fn migrate_faces_and_people(&mut self) -> Result<(), CatalogError> {
         let has_person = self.has_person_table()?;
+        let has_centroid = has_person && self.person_has_centroid_column()?;
         let has_cols = self.asset_face_has_person_columns()?;
-        if has_person && has_cols {
+        let has_idx = self.has_asset_face_person_index()?;
+        if has_person && has_centroid && has_cols && has_idx {
             return Ok(());
         }
 
@@ -437,13 +440,28 @@ impl Catalog {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS person (
-                 id      INTEGER PRIMARY KEY,
-                 name    TEXT,
-                 hidden  INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
-                 ignored INTEGER NOT NULL DEFAULT 0 CHECK (ignored IN (0, 1))
+                 id       INTEGER PRIMARY KEY,
+                 name     TEXT,
+                 hidden   INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+                 ignored  INTEGER NOT NULL DEFAULT 0 CHECK (ignored IN (0, 1)),
+                 centroid BLOB CHECK (centroid IS NULL OR length(centroid) = 512)
              );
              CREATE INDEX IF NOT EXISTS person_name ON person(name);",
         )?;
+
+        let mut person_cols = std::collections::HashSet::new();
+        {
+            let mut check = tx.prepare("PRAGMA table_info(person)")?;
+            let cols = check.query_map([], |r| r.get::<_, String>(1))?;
+            for c in cols {
+                person_cols.insert(c?);
+            }
+        }
+        if !person_cols.contains("centroid") {
+            tx.execute_batch(
+                "ALTER TABLE person ADD COLUMN centroid BLOB CHECK (centroid IS NULL OR length(centroid) = 512);",
+            )?;
+        }
 
         let mut existing_cols = std::collections::HashSet::new();
         {
@@ -487,6 +505,29 @@ impl Catalog {
             |r| r.get(0),
         )?;
         Ok(exists)
+    }
+
+    fn person_has_centroid_column(&self) -> Result<bool, CatalogError> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(person)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for c in cols {
+            if c? == "centroid" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn has_asset_face_person_index(&self) -> Result<bool, CatalogError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'asset_face_person'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     fn asset_face_has_person_columns(&self) -> Result<bool, CatalogError> {
