@@ -39,13 +39,25 @@ fn tree() -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
-fn finds_images_recursively_and_ignores_other_files() {
+fn finds_images_and_videos_recursively_and_ignores_other_files() {
     let (_tmp, root) = tree();
     let report = scan(&root).unwrap();
     assert_eq!(
         names(&root, &report.files),
-        ["a.jpg", "sub/b.PNG", "sub/deep/c.webp"]
+        ["a.jpg", "sub/b.PNG", "sub/clip.mp4", "sub/deep/c.webp"]
     );
+    let clip = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("clip.mp4"))
+        .unwrap();
+    assert_eq!(clip.media_type, scanner::MediaType::Video);
+    let img = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("a.jpg"))
+        .unwrap();
+    assert_eq!(img.media_type, scanner::MediaType::Image);
     assert!(report.errors.is_empty());
 }
 
@@ -97,7 +109,7 @@ fn does_not_follow_a_junction_out_of_the_library() {
     let report = scan(&root).unwrap();
     assert_eq!(
         names(&root, &report.files),
-        ["a.jpg", "sub/b.PNG", "sub/deep/c.webp"]
+        ["a.jpg", "sub/b.PNG", "sub/clip.mp4", "sub/deep/c.webp"]
     );
 }
 

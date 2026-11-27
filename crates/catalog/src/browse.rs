@@ -1,5 +1,5 @@
 use crate::labels::{append_filter, unexpected};
-use crate::{AssetId, Catalog, CatalogError, Filter, LabelId, LabelKind, Orientation};
+use crate::{AssetId, Catalog, CatalogError, Filter, LabelId, LabelKind, MediaType, Orientation};
 use rusqlite::{OptionalExtension, Row, ToSql, params_from_iter};
 use std::path::PathBuf;
 
@@ -14,6 +14,8 @@ pub struct Entry {
     pub height: Option<u32>,
     pub format: Option<String>,
     pub captured_at_ns: Option<i64>,
+    pub media_type: MediaType,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +58,36 @@ pub struct YearCount {
     pub images: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaTypeCount {
+    pub media_type: MediaType,
+    pub count: i64,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MetadataFacets {
+    pub media_types: Vec<MediaTypeCount>,
     pub formats: Vec<FormatCount>,
     pub orientations: Vec<OrientationCount>,
     pub years: Vec<YearCount>,
+}
+
+impl MetadataFacets {
+    pub fn photos_count(&self) -> i64 {
+        self.media_types
+            .iter()
+            .find(|m| m.media_type == MediaType::Image)
+            .map(|m| m.count)
+            .unwrap_or(0)
+    }
+
+    pub fn videos_count(&self) -> i64 {
+        self.media_types
+            .iter()
+            .find(|m| m.media_type == MediaType::Video)
+            .map(|m| m.count)
+            .unwrap_or(0)
+    }
 }
 
 impl Sort {
@@ -92,6 +119,12 @@ pub(crate) fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
     let size: i64 = r.get(3)?;
     let width: Option<i64> = r.get(5)?;
     let height: Option<i64> = r.get(6)?;
+    let mtype_str: Option<String> = r.get(9)?;
+    let media_type = mtype_str
+        .as_deref()
+        .and_then(MediaType::from_str)
+        .unwrap_or(MediaType::Image);
+    let duration_ms: Option<i64> = r.get(10)?;
     Ok(Entry {
         asset: AssetId(r.get(0)?),
         path: PathBuf::from(r.get::<_, String>(1)?),
@@ -102,6 +135,8 @@ pub(crate) fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
         height: height.and_then(|v| u32::try_from(v).ok()),
         format: r.get(7)?,
         captured_at_ns: r.get(8)?,
+        media_type,
+        duration_ms: duration_ms.and_then(|v| u64::try_from(v).ok()),
     })
 }
 
@@ -122,7 +157,8 @@ const LABELS_IN_USE_SQL: &str = "SELECT lb.id, lb.kind, lb.name, c.images
 fn build_entries_sql(filter: &Filter, sort: Sort) -> (String, Vec<Box<dyn ToSql>>) {
     let mut sql = String::from(
         "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
-                a.width, a.height, a.format, a.captured_at_ns
+                a.width, a.height, a.format, a.captured_at_ns,
+                a.media_type, a.duration_ms
          FROM location l JOIN asset a ON a.id = l.asset_id
          WHERE l.missing = 0",
     );
@@ -214,7 +250,8 @@ impl Catalog {
             .conn
             .query_row(
                 "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
-                        a.width, a.height, a.format, a.captured_at_ns
+                        a.width, a.height, a.format, a.captured_at_ns,
+                        a.media_type, a.duration_ms
                  FROM location l JOIN asset a ON a.id = l.asset_id
                  WHERE l.asset_id = ?1 AND l.missing = 0
                  ORDER BY l.path ASC
@@ -237,7 +274,8 @@ impl Catalog {
         let marks = vec!["?"; roots.len()].join(",");
         let sql = format!(
             "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
-                    a.width, a.height, a.format, a.captured_at_ns
+                    a.width, a.height, a.format, a.captured_at_ns,
+                    a.media_type, a.duration_ms
              FROM location l JOIN asset a ON a.id = l.asset_id
              WHERE l.asset_id = ? AND l.missing = 0 AND l.root IN ({marks})
              ORDER BY l.path ASC
@@ -271,6 +309,25 @@ impl Catalog {
         let exists_clause = format!(
             "EXISTS (SELECT 1 FROM location l WHERE l.asset_id = a.id AND l.missing = 0 AND l.root IN ({marks}))"
         );
+
+        let media_sql = format!(
+            "SELECT COALESCE(a.media_type, 'image') AS mtype, COUNT(*)
+             FROM asset a
+             WHERE {exists_clause}
+             GROUP BY mtype
+             ORDER BY mtype ASC"
+        );
+        let mut stmt = self.conn.prepare(&media_sql)?;
+        let media_types = stmt
+            .query_map(params_from_iter(args.iter()), |r| {
+                let mtype_str: String = r.get(0)?;
+                let media_type = MediaType::from_str(&mtype_str).unwrap_or(MediaType::Image);
+                Ok(MediaTypeCount {
+                    media_type,
+                    count: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let fmt_sql = format!(
             "SELECT a.format, COUNT(*)
@@ -336,6 +393,7 @@ impl Catalog {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(MetadataFacets {
+            media_types,
             formats,
             orientations: raw_orients,
             years,

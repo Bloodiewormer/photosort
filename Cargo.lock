@@ -4237,6 +4237,7 @@ dependencies = [
  "kamadak-exif",
  "scanner",
  "tempfile",
+ "thumbs",
  "walkdir",
 ]
 
@@ -4858,6 +4859,7 @@ dependencies = [
  "scanner",
  "tempfile",
  "walkdir",
+ "windows",
 ]
 
 [[package]]

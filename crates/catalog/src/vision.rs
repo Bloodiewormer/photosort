@@ -1462,7 +1462,8 @@ impl Catalog {
         let mut entries_by_id: HashMap<i64, Entry> = HashMap::with_capacity(top.len());
         let mut entry_stmt = self.conn.prepare(
             "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
-                    a.width, a.height, a.format, a.captured_at_ns
+                    a.width, a.height, a.format, a.captured_at_ns,
+                    a.media_type, a.duration_ms
              FROM location l JOIN asset a ON a.id = l.asset_id
              WHERE l.asset_id = ?1 AND l.missing = 0
              ORDER BY l.path ASC
@@ -1574,7 +1575,8 @@ impl Catalog {
         let mut entries_by_id: HashMap<i64, Entry> = HashMap::with_capacity(top.len());
         let entry_sql = format!(
             "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
-                    a.width, a.height, a.format, a.captured_at_ns
+                    a.width, a.height, a.format, a.captured_at_ns,
+                    a.media_type, a.duration_ms
              FROM location l JOIN asset a ON a.id = l.asset_id
              WHERE l.asset_id = ? AND l.missing = 0 AND l.root IN ({marks})
              ORDER BY l.path ASC
@@ -1663,6 +1665,8 @@ fn apply_suggestions_in_tx(
             ins.execute(params![asset.0, s.label.0, s.confidence.clamp(0.0, 1.0)])?;
         }
     }
+
+    crate::works::reconcile_page_types_in_tx(tx, asset)?;
 
     Ok(())
 }

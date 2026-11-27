@@ -248,3 +248,21 @@ fn stage_errors_persist_sanitize_increment_clear_and_hide_removed_folders() {
     cat.reset_stages(&[b], &[OCR_STAGE]).unwrap();
     assert_eq!(cat.count_stage_error_assets_in_roots(&both).unwrap(), 0);
 }
+
+#[test]
+fn missing_video_codec_error_sanitizes_to_dedicated_reason() {
+    assert_eq!(
+        catalog::sanitize_stage_error_reason(
+            catalog::VISION_STAGE,
+            "no se pudieron extraer fotogramas del vídeo: unsupported image: códec no disponible o formato no compatible: 0xC00D36C4"
+        ),
+        "Códec de vídeo no disponible"
+    );
+    assert_eq!(
+        catalog::sanitize_stage_error_reason(
+            "rules",
+            "unsupported image: códec de vídeo no compatible"
+        ),
+        "Códec de vídeo no disponible"
+    );
+}

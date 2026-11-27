@@ -50,6 +50,8 @@ fn select_entries_uses_selection_or_all_filtered_entries_when_empty() {
             height: None,
             format: None,
             captured_at_ns: None,
+            media_type: catalog::MediaType::Image,
+            duration_ms: None,
         })
         .collect();
 

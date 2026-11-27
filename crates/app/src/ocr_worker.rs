@@ -246,6 +246,20 @@ impl OcrWorker {
                     break;
                 }
 
+                // OCR does not apply to videos; mark done with zero lines and continue.
+                if thumbs::is_video_path(&item.path) {
+                    let _ = cat.mark_done(item.asset, OCR_STAGE, OCR_VERSION);
+                    processed += 1;
+                    emit(OcrEvent::Progress {
+                        done: idx + 1,
+                        total,
+                        errors,
+                        elapsed_secs: started.elapsed().as_secs_f64(),
+                        saved_asset: Some(item.asset),
+                    });
+                    continue;
+                }
+
                 // A failing or panicking image is counted and stays pending without stopping the batch.
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     reader.read_image(&item.path)
