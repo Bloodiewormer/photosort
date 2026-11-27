@@ -901,6 +901,36 @@ fn saving_unchanged_settings_neither_interrupts_nor_reloads_the_models() {
 }
 
 #[test]
+fn an_automatic_folder_check_during_a_review_does_not_reload_the_model() {
+    let (_tmp, roots, cat, db) = indexed(&["lib"], &six_files());
+    let (loads, read): (Arc<AtomicUsize>, _) = (Arc::default(), Arc::default());
+    let cfg = ReviewConfig {
+        enabled: true,
+        rules: false,
+        vision: false,
+        ocr: true,
+        chunk_size: 2,
+        roots,
+        ..Default::default()
+    };
+    let engine = ReviewEngine::start_with_loaders(
+        db,
+        cfg,
+        Box::new(|_, _| Err("unused".into())),
+        recording_ocr(60, Arc::clone(&loads), read),
+        None,
+    );
+    assert!(wait_until(&engine, Duration::from_secs(5), is_progress));
+    engine.request_index();
+    assert!(wait_until(&engine, Duration::from_secs(5), |ev| matches!(
+        ev,
+        ReviewEngineEvent::IndexFinished { .. }
+    )));
+    assert!(eventually(|| all_ocr_done(&cat)));
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn photos_are_never_read_from_a_folder_that_was_removed() {
     // The same bytes in both folders: one asset, and the removed copy sorts first.
     let (_tmp, roots, cat, db) = indexed(
@@ -988,10 +1018,10 @@ fn a_result_the_catalog_rejects_is_not_analysed_over_and_over() {
 
 #[test]
 fn a_photo_that_cannot_be_opened_is_not_marked_as_broken_for_later_sessions() {
-    let (_tmp, roots, cat, db) = indexed(&["lib"], &[("lib/gone.png", [1, 2, 3, 255])]);
-    // Same effect as a drive unplugged while a chunk is running: the engine has already picked
-    // the photo when the model loads.
-    let gone = roots[0].join("gone.png");
+    let (tmp, roots, cat, db) = indexed(&["lib"], &[("lib/gone.png", [1, 2, 3, 255])]);
+    // A drive unplugged while a chunk is running: the engine has already picked the photo when
+    // the model loads. The whole library goes, so the photo is not flagged as missing.
+    let (library, away) = (roots[0].clone(), tmp.path().join("away"));
     let calls: Arc<AtomicUsize> = Arc::default();
     let counter = Arc::clone(&calls);
     let cfg = ReviewConfig {
@@ -1007,7 +1037,7 @@ fn a_photo_that_cannot_be_opened_is_not_marked_as_broken_for_later_sessions() {
         cfg,
         Box::new(|_, _| Err("unused".into())),
         Box::new(move |_, _| {
-            let _ = fs::remove_file(&gone);
+            let _ = fs::rename(&library, &away);
             Ok(Box::new(FakeOcr {
                 active_gpu: Arc::new(AtomicUsize::new(1)),
                 concurrent_violation: Arc::default(),
