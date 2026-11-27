@@ -1,22 +1,47 @@
+mod jpeg;
+mod xmp;
+
+pub use jpeg::{embed_xmp_in_jpeg, extract_xmp_from_jpeg, is_jpeg};
+pub use xmp::{XmpData, generate_xmp, xml_escape};
+
 use catalog::{AssetWork, Assignment, LabelKind, Status};
 use fsguard::DestPath;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_FOLDER_CHARS: usize = 80;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExportItem {
     pub source: PathBuf,
     /// What the catalog knows about the image; goes into the manifest.
     pub labels: Vec<Assignment>,
     /// Optional work ownership relation (`belongs_to`); goes into the manifest when not rejected.
     pub belongs_to: Option<AssetWork>,
+    /// Named persons identified in the photo.
+    pub persons: Vec<String>,
+    /// Hierarchical category paths, e.g. "Manga|Scanlation|Página promocional".
+    pub hierarchical_categories: Vec<String>,
+    /// Library root that contains `source`, used by [`Layout::PreserveFolders`].
+    pub root: Option<PathBuf>,
+}
+
+impl ExportItem {
+    pub fn new(source: PathBuf) -> Self {
+        Self {
+            source,
+            labels: Vec::new(),
+            belongs_to: None,
+            persons: Vec::new(),
+            hierarchical_categories: Vec::new(),
+            root: None,
+        }
+    }
 }
 
 /// How exported copies are arranged inside the destination folder.
@@ -27,6 +52,15 @@ pub enum Layout {
     ByCategory,
     ByEntity,
     ByYear,
+    PreserveFolders,
+}
+
+/// Configuration options for export operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExportOptions {
+    pub layout: Layout,
+    pub write_xmp_sidecars: bool,
+    pub embed_jpeg_tags: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,25 +210,79 @@ fn year_from_system_time(time: SystemTime) -> Option<String> {
     (0..=9999).contains(&year).then(|| format!("{year:04}"))
 }
 
-fn subfolder_for(item: &ExportItem, md: &fs::Metadata, layout: Layout) -> Option<String> {
+/// Strips `root` prefix from `source`, with case-insensitive fallback on Windows.
+fn relative_to_root(source: &Path, root: &Path) -> Option<PathBuf> {
+    if let Ok(rel) = source.strip_prefix(root) {
+        return Some(rel.to_path_buf());
+    }
+    let s_comps: Vec<_> = source.components().collect();
+    let r_comps: Vec<_> = root.components().collect();
+    if s_comps.len() >= r_comps.len() {
+        let matches = s_comps.iter().zip(r_comps.iter()).all(|(sc, rc)| {
+            sc.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&rc.as_os_str().to_string_lossy())
+        });
+        if matches {
+            let mut rel = PathBuf::new();
+            for c in &s_comps[r_comps.len()..] {
+                rel.push(c);
+            }
+            return Some(rel);
+        }
+    }
+    None
+}
+
+/// Computes the folder component names for an item according to layout.
+fn subfolder_components_for(
+    item: &ExportItem,
+    md: &fs::Metadata,
+    layout: Layout,
+    multiple_roots: bool,
+) -> Result<Vec<OsString>, String> {
     match layout {
-        Layout::Flat => None,
-        Layout::ByCategory => Some(first_label_folder(
+        Layout::Flat => Ok(Vec::new()),
+        Layout::ByCategory => Ok(vec![OsString::from(first_label_folder(
             &item.labels,
             LabelKind::Category,
             "Sin categoría",
-        )),
-        Layout::ByEntity => Some(first_label_folder(
+        ))]),
+        Layout::ByEntity => Ok(vec![OsString::from(first_label_folder(
             &item.labels,
             LabelKind::Entity,
             "Sin obra",
-        )),
-        Layout::ByYear => Some(
+        ))]),
+        Layout::ByYear => Ok(vec![OsString::from(
             md.modified()
                 .ok()
                 .and_then(year_from_system_time)
                 .unwrap_or_else(|| "Sin fecha".to_string()),
-        ),
+        )]),
+        Layout::PreserveFolders => {
+            let Some(root) = &item.root else {
+                return Err("item has no library root specified for PreserveFolders".to_string());
+            };
+            let Some(rel) = relative_to_root(&item.source, root) else {
+                return Err(format!(
+                    "source {} is not inside library root {}",
+                    item.source.display(),
+                    root.display()
+                ));
+            };
+            let rel_parent = rel.parent().unwrap_or_else(|| Path::new(""));
+            let mut comps = Vec::new();
+            if multiple_roots && let Some(rn) = root.file_name() {
+                comps.push(rn.to_os_string());
+            }
+            for c in rel_parent.components() {
+                match c {
+                    Component::Normal(p) => comps.push(p.to_os_string()),
+                    _ => return Err(format!("path contains invalid component: {c:?}")),
+                }
+            }
+            Ok(comps)
+        }
     }
 }
 
@@ -283,10 +371,30 @@ fn ensure_subfolder(dir: &DestPath) -> io::Result<()> {
     }
 }
 
+/// Ensures each subfolder component exists sequentially inside `dest`, returning the leaf `DestPath`.
+#[allow(clippy::disallowed_methods)]
+fn ensure_dir_chain(dest: &DestPath, comps: &[OsString]) -> io::Result<DestPath> {
+    let mut cur = dest.clone();
+    for comp in comps {
+        cur = cur
+            .join_name(comp.as_os_str())
+            .ok_or_else(|| io::Error::other(format!("invalid subfolder name {comp:?}")))?;
+        ensure_subfolder(&cur)?;
+    }
+    Ok(cur)
+}
+
+/// Resolves target directory by traversing subfolder components using `join_name`.
+fn resolve_target_dir(dest: &DestPath, comps: &[OsString]) -> Option<DestPath> {
+    let mut cur = dest.clone();
+    for comp in comps {
+        cur = cur.join_name(comp.as_os_str())?;
+    }
+    Some(cur)
+}
+
 /// Writes `part`, checks it against `sha`, gives it the original's dates and renames it to `target`.
 /// Both paths are in the destination. A failed copy leaves nothing behind.
-// shortcut: checking that `target` is free and renaming are two steps, so another program creating the same
-// name in between could be overwritten; fine for one user on one machine, use a link-based rename if not.
 #[allow(clippy::disallowed_methods)] // the only place that creates files: every path is a DestPath
 fn write_verified(
     source: &Path,
@@ -326,30 +434,75 @@ fn write_verified(
     result
 }
 
+/// Inserts or replaces XMP metadata in an already verified JPEG copy located at `target`.
+/// Restores the original timestamps and calculates the new SHA-256.
+#[allow(clippy::disallowed_methods)]
+fn embed_jpeg_copy(
+    target: &DestPath,
+    target_dir: &DestPath,
+    xmp_xml: &str,
+    md: &fs::Metadata,
+) -> Result<Option<String>, String> {
+    let bytes = fs::read(target.as_path()).map_err(|e| e.to_string())?;
+    if !jpeg::is_jpeg(&bytes) {
+        return Ok(None);
+    }
+    let tagged = jpeg::embed_xmp_in_jpeg(&bytes, xmp_xml.as_bytes())?;
+
+    let mut tagpart_name = target.as_path().file_name().unwrap().to_owned();
+    tagpart_name.push(".tagpart");
+    let tagpart = target_dir
+        .join_name(&tagpart_name)
+        .ok_or("the temporary tagging name is not valid")?;
+
+    let write_res = (|| -> io::Result<String> {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tagpart.as_path())?;
+        f.write_all(&tagged)?;
+        f.sync_all()?;
+        f.set_times(times_of(md)?)?;
+        drop(f);
+        let new_sha = scanner::sha256_file(tagpart.as_path())?;
+        fs::rename(tagpart.as_path(), target.as_path())?;
+        Ok(new_sha)
+    })();
+
+    match write_res {
+        Ok(new_sha) => Ok(Some(new_sha)),
+        Err(e) => {
+            let _ = fs::remove_file(tagpart.as_path());
+            Err(e.to_string())
+        }
+    }
+}
+
 struct Done {
     outcome: Outcome,
     sha: String,
+    tagged_sha: Option<String>,
     size: u64,
 }
 
-fn copy_one(item: &ExportItem, dest: &DestPath, layout: Layout) -> Result<Done, String> {
+fn copy_one(
+    item: &ExportItem,
+    dest: &DestPath,
+    options: ExportOptions,
+    multiple_roots: bool,
+) -> Result<Done, String> {
     let (md, sha) = read_source(&item.source)?;
     let name = item.source.file_name().ok_or("the path has no file name")?;
-    let sub = subfolder_for(item, &md, layout);
-    let target_dir = match &sub {
-        Some(folder) => dest
-            .join_name(OsStr::new(folder))
-            .ok_or_else(|| format!("invalid subfolder name {folder:?}"))?,
-        None => dest.clone(),
-    };
+    let comps = subfolder_components_for(item, &md, options.layout, multiple_roots)?;
+    let target_dir = ensure_dir_chain(dest, &comps).map_err(|e| e.to_string())?;
+
     let resolved = resolve(&target_dir, name, &sha, &HashMap::new())?;
     let path = resolved.target.as_path().to_path_buf();
+    let mut tagged_sha = None;
+
     let outcome = if resolved.same {
-        Outcome::AlreadyPresent(path)
+        Outcome::AlreadyPresent(path.clone())
     } else {
-        if sub.is_some() {
-            ensure_subfolder(&target_dir).map_err(|e| e.to_string())?;
-        }
         let mut part_name = resolved.target.as_path().file_name().unwrap().to_owned();
         part_name.push(".part");
         let part = target_dir
@@ -357,11 +510,86 @@ fn copy_one(item: &ExportItem, dest: &DestPath, layout: Layout) -> Result<Done, 
             .ok_or("the temporary name is not valid")?;
         write_verified(&item.source, &part, &resolved.target, &sha, &md)
             .map_err(|e| e.to_string())?;
-        Outcome::Copied(path)
+        Outcome::Copied(path.clone())
     };
+
+    // Prepare XMP metadata when sidecars or JPEG embedding is requested
+    if (options.write_xmp_sidecars || options.embed_jpeg_tags)
+        && matches!(outcome, Outcome::Copied(_) | Outcome::AlreadyPresent(_))
+    {
+        let categories: Vec<&str> = item
+            .labels
+            .iter()
+            .filter(|l| l.status != Status::Rejected && l.kind == LabelKind::Category)
+            .map(|l| l.name.as_str())
+            .collect();
+        let tags: Vec<&str> = item
+            .labels
+            .iter()
+            .filter(|l| l.status != Status::Rejected && l.kind == LabelKind::Tag)
+            .map(|l| l.name.as_str())
+            .collect();
+        let mut works: Vec<&str> = item
+            .labels
+            .iter()
+            .filter(|l| l.status != Status::Rejected && l.kind == LabelKind::Entity)
+            .map(|l| l.name.as_str())
+            .collect();
+        if let Some(w) = &item.belongs_to
+            && w.status != Status::Rejected
+            && !w.work_name.is_empty()
+            && !works.contains(&w.work_name.as_str())
+        {
+            works.push(&w.work_name);
+        }
+        let persons: Vec<&str> = item.persons.iter().map(|s| s.as_str()).collect();
+        let hierarchical: Vec<&str> = item
+            .hierarchical_categories
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        let xmp_data = xmp::XmpData {
+            categories: &categories,
+            tags: &tags,
+            works: &works,
+            persons: &persons,
+            hierarchical_categories: &hierarchical,
+        };
+        let xmp_xml = xmp::generate_xmp(&xmp_data);
+
+        // 1. Write XMP sidecar if enabled
+        if options.write_xmp_sidecars {
+            let base_name = resolved
+                .target
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy();
+            write_new(&target_dir, &base_name, "xmp", &xmp_xml).map_err(|e| e.to_string())?;
+        }
+
+        // 2. Embed XMP in JPEG copy if enabled
+        if options.embed_jpeg_tags && matches!(outcome, Outcome::Copied(_)) {
+            match embed_jpeg_copy(&resolved.target, &target_dir, &xmp_xml, &md) {
+                Ok(Some(new_sha)) => {
+                    tagged_sha = Some(new_sha);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!(
+                        "Aviso: no se pudieron incrustar etiquetas en {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
     Ok(Done {
         outcome,
         sha,
+        tagged_sha,
         size: md.len(),
     })
 }
@@ -374,34 +602,70 @@ pub fn export(items: &[ExportItem], dest: &DestPath) -> io::Result<ExportReport>
 
 /// Copies the originals byte for byte into `dest` using `layout`, verifies every copy against its
 /// SHA-256, calls `progress` after each item and writes a manifest for all items processed.
-#[allow(clippy::disallowed_methods)] // creating the destination folder: `dest` is a DestPath
 pub fn export_with(
     items: &[ExportItem],
     dest: &DestPath,
     layout: Layout,
     progress: &mut dyn FnMut(&ExportProgress) -> Control,
 ) -> io::Result<ExportReport> {
+    export_with_options(
+        items,
+        dest,
+        ExportOptions {
+            layout,
+            write_xmp_sidecars: false,
+            embed_jpeg_tags: false,
+        },
+        progress,
+    )
+}
+
+/// Copies the originals byte for byte into `dest` using `options`, verifies every copy against its
+/// SHA-256, optionally writes XMP sidecars and embeds tags in JPEG copies, and writes a manifest.
+#[allow(clippy::disallowed_methods)] // creating the destination folder: `dest` is a DestPath
+pub fn export_with_options(
+    items: &[ExportItem],
+    dest: &DestPath,
+    options: ExportOptions,
+    progress: &mut dyn FnMut(&ExportProgress) -> Control,
+) -> io::Result<ExportReport> {
     fs::create_dir_all(dest.as_path())?;
     let total = items.len();
     let mut outcomes = Vec::with_capacity(total);
     let mut files: Vec<Value> = Vec::with_capacity(total);
-    let mut csv = String::from(
-        "source_path,dest_path,sha256,size,status,labels,belongs_to_work,belongs_to_chapter,belongs_to_page\n",
-    );
+    let has_tagged_hashes = options.embed_jpeg_tags;
+    let mut csv = if has_tagged_hashes {
+        String::from(
+            "source_path,dest_path,sha256,size,status,labels,belongs_to_work,belongs_to_chapter,belongs_to_page,sha256_after_tagging\n",
+        )
+    } else {
+        String::from(
+            "source_path,dest_path,sha256,size,status,labels,belongs_to_work,belongs_to_chapter,belongs_to_page\n",
+        )
+    };
     let (mut copied, mut present, mut failed, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     let mut stopped = false;
 
+    let distinct_roots: HashSet<&Path> = items.iter().filter_map(|it| it.root.as_deref()).collect();
+    let multiple_roots = distinct_roots.len() > 1;
+
     for (idx, item) in items.iter().enumerate() {
-        let (outcome, dest_path, sha, size) = match copy_one(item, dest, layout) {
-            Ok(Done { outcome, sha, size }) => {
-                let path = match &outcome {
-                    Outcome::Copied(p) | Outcome::AlreadyPresent(p) => Some(p.clone()),
-                    Outcome::Failed(_) => None,
-                };
-                (outcome, path, Some(sha), Some(size))
-            }
-            Err(msg) => (Outcome::Failed(msg), None, None, None),
-        };
+        let (outcome, dest_path, sha, tagged_sha, size) =
+            match copy_one(item, dest, options, multiple_roots) {
+                Ok(Done {
+                    outcome,
+                    sha,
+                    tagged_sha,
+                    size,
+                }) => {
+                    let path = match &outcome {
+                        Outcome::Copied(p) | Outcome::AlreadyPresent(p) => Some(p.clone()),
+                        Outcome::Failed(_) => None,
+                    };
+                    (outcome, path, Some(sha), tagged_sha, Some(size))
+                }
+                Err(msg) => (Outcome::Failed(msg), None, None, None, None),
+            };
         let status = match &outcome {
             Outcome::Copied(_) => {
                 copied += 1;
@@ -440,7 +704,7 @@ pub fn export_with(
             })
         });
 
-        files.push(json!({
+        let mut file_obj = json!({
             "source_path": source,
             "dest_path": dest_text,
             "sha256": sha,
@@ -454,7 +718,13 @@ pub fn export_with(
                 "status": lower(l.status),
             })).collect::<Vec<_>>(),
             "belongs_to": belongs_to_json,
-        }));
+        });
+        if let Some(final_sha) = &tagged_sha {
+            file_obj["sha256_original"] = json!(sha);
+            file_obj["sha256_after_tagging"] = json!(final_sha);
+        }
+        files.push(file_obj);
+
         let label_text = applied
             .iter()
             .map(|l| format!("{}:{}", lower(l.kind), l.name))
@@ -468,7 +738,7 @@ pub fn export_with(
             ),
             None => (String::new(), String::new(), String::new()),
         };
-        let fields = [
+        let mut fields = vec![
             source.into_owned(),
             dest_text.unwrap_or_default(),
             sha.unwrap_or_default(),
@@ -479,7 +749,16 @@ pub fn export_with(
             chapter_col,
             page_col,
         ];
-        csv.push_str(&fields.map(|f| csv_field(&f)).join(","));
+        if has_tagged_hashes {
+            fields.push(tagged_sha.unwrap_or_default());
+        }
+        csv.push_str(
+            &fields
+                .iter()
+                .map(|f| csv_field(f))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         csv.push('\n');
         outcomes.push((item.source.clone(), outcome));
 
@@ -525,6 +804,23 @@ pub fn preview(items: &[ExportItem], dest: &DestPath) -> io::Result<Preview> {
 
 /// What [`export_with`] would do for `layout`, without writing anything.
 pub fn preview_with(items: &[ExportItem], dest: &DestPath, layout: Layout) -> io::Result<Preview> {
+    preview_with_options(
+        items,
+        dest,
+        ExportOptions {
+            layout,
+            write_xmp_sidecars: false,
+            embed_jpeg_tags: false,
+        },
+    )
+}
+
+/// What [`export_with_options`] would do for `options`, without writing anything.
+pub fn preview_with_options(
+    items: &[ExportItem],
+    dest: &DestPath,
+    options: ExportOptions,
+) -> io::Result<Preview> {
     let mut p = Preview {
         files: 0,
         bytes: 0,
@@ -534,6 +830,9 @@ pub fn preview_with(items: &[ExportItem], dest: &DestPath, layout: Layout) -> io
         free_bytes: available_space(dest.as_path()),
     };
     let mut reserved: HashMap<Option<String>, HashMap<String, String>> = HashMap::new();
+    let distinct_roots: HashSet<&Path> = items.iter().filter_map(|it| it.root.as_deref()).collect();
+    let multiple_roots = distinct_roots.len() > 1;
+
     for item in items {
         let Ok((md, sha)) = read_source(&item.source) else {
             p.unreadable += 1;
@@ -543,18 +842,31 @@ pub fn preview_with(items: &[ExportItem], dest: &DestPath, layout: Layout) -> io
             p.unreadable += 1;
             continue;
         };
-        let sub = subfolder_for(item, &md, layout);
-        let target_dir = match &sub {
-            Some(folder) => match dest.join_name(OsStr::new(folder)) {
-                Some(d) => d,
-                None => {
-                    p.unreadable += 1;
-                    continue;
-                }
-            },
-            None => dest.clone(),
+        let comps = match subfolder_components_for(item, &md, options.layout, multiple_roots) {
+            Ok(c) => c,
+            Err(_) => {
+                p.unreadable += 1;
+                continue;
+            }
         };
-        let folder_key = sub.as_deref().map(|s| s.to_lowercase());
+        let target_dir = match resolve_target_dir(dest, &comps) {
+            Some(d) => d,
+            None => {
+                p.unreadable += 1;
+                continue;
+            }
+        };
+        let folder_key = if comps.is_empty() {
+            None
+        } else {
+            Some(
+                comps
+                    .iter()
+                    .map(|c| c.to_string_lossy().to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            )
+        };
         let folder_reserved = reserved.entry(folder_key).or_default();
         let Ok(resolved) = resolve(&target_dir, name, &sha, folder_reserved) else {
             p.unreadable += 1;
@@ -631,7 +943,6 @@ fn csv_field(s: &str) -> String {
 }
 
 /// Writes a new file next to the copies, as `base.ext`, `base (1).ext`, ... Never overwrites.
-// shortcut: written in place, so a crash mid-write leaves a partial manifest; it is small and never overwrites.
 #[allow(clippy::disallowed_methods)] // creates a file in the destination: `dest` is a DestPath
 fn write_new(dest: &DestPath, base: &str, ext: &str, content: &str) -> io::Result<PathBuf> {
     for n in 0u32.. {

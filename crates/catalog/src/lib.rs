@@ -858,6 +858,21 @@ impl Catalog {
             })?)
     }
 
+    /// Returns the library root that contains `path`, if known to the catalog.
+    pub fn root_of_path(&self, path: &std::path::Path) -> Result<Option<PathBuf>, CatalogError> {
+        let path_str = path.to_string_lossy();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT root FROM location WHERE path = ?1 LIMIT 1")?;
+        let res = stmt
+            .query_row([&path_str], |r| {
+                let s: String = r.get(0)?;
+                Ok(PathBuf::from(s))
+            })
+            .optional()?;
+        Ok(res)
+    }
+
     /// Count of present image locations indexed under `root`.
     pub fn count_images_in_root(&self, root: &std::path::Path) -> Result<usize, CatalogError> {
         let root_key = root.to_string_lossy().into_owned();

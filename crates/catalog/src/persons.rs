@@ -451,6 +451,21 @@ impl Catalog {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Returns named persons detected or assigned in the asset, deduplicated and sorted.
+    pub fn named_persons_of(&self, asset: AssetId) -> Result<Vec<String>, CatalogError> {
+        let details = self.asset_face_details(asset)?;
+        let mut set = std::collections::BTreeSet::new();
+        for d in details {
+            if let Some(name) = d.person_name {
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    set.insert(trimmed.to_string());
+                }
+            }
+        }
+        Ok(set.into_iter().collect())
+    }
+
     /// Returns face details for all faces belonging to `person`.
     pub fn person_faces(&self, person: PersonId) -> Result<Vec<FaceDetail>, CatalogError> {
         let mut stmt = self.conn.prepare(

@@ -263,6 +263,7 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
             source: a,
             labels: vec![],
             belongs_to: None,
+            ..Default::default()
         }],
         true,
         Some(lib.join("inside")),
@@ -296,6 +297,24 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
     wait_until(&mut wizard, |p| {
         matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
     });
+    wizard.set_write_xmp(true);
+    assert_eq!(wizard.phase(), &ExportPhase::Choose);
+
+    wizard
+        .request_preview(std::slice::from_ref(&root), None)
+        .unwrap();
+    wait_until(&mut wizard, |p| {
+        matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
+    });
+    wizard.set_embed_jpeg_tags(true);
+    assert_eq!(wizard.phase(), &ExportPhase::Choose);
+
+    wizard
+        .request_preview(std::slice::from_ref(&root), None)
+        .unwrap();
+    wait_until(&mut wizard, |p| {
+        matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
+    });
     wizard.back_to_choose();
     assert_eq!(wizard.phase(), &ExportPhase::Choose);
 }
@@ -311,6 +330,7 @@ fn wizard_cancel_stops_background_export_and_writes_manifest() {
             source: p,
             labels: vec![],
             belongs_to: None,
+            ..Default::default()
         });
     }
     let root = LibraryRoot::new(&lib).unwrap();
