@@ -31,6 +31,7 @@ pub enum CaptureView {
     Suggestions,
     Duplicates,
     Works,
+    Persons,
     Tags,
     Errors,
     Export,
@@ -72,7 +73,7 @@ pub fn usage_text() -> &'static str {
     "Uso: photosort [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
      [--screenshot <salida.png>] [--screenshot-delay-frames <N>] \
      [--window-size <Ancho>x<Alto>] [--theme dark|light] \
-     [--view gallery|settings|welcome|suggestions|duplicates|works|tags|errors|export|menu]"
+     [--view gallery|settings|welcome|suggestions|duplicates|works|personas|tags|errors|export|menu]"
 }
 
 pub fn parse_window_size(raw: &str) -> Result<[u32; 2], String> {
@@ -126,6 +127,8 @@ pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
         Ok(CaptureView::Duplicates)
     } else if raw.eq_ignore_ascii_case("works") {
         Ok(CaptureView::Works)
+    } else if raw.eq_ignore_ascii_case("personas") || raw.eq_ignore_ascii_case("persons") {
+        Ok(CaptureView::Persons)
     } else if raw.eq_ignore_ascii_case("tags") {
         Ok(CaptureView::Tags)
     } else if raw.eq_ignore_ascii_case("errors") {
@@ -136,7 +139,7 @@ pub fn parse_view(raw: &str) -> Result<CaptureView, String> {
         Ok(CaptureView::Menu)
     } else {
         Err(format!(
-            "Vista inválida para --view: '{raw}' (usa 'gallery', 'settings', 'welcome', 'suggestions', 'duplicates', 'works', 'tags', 'errors', 'export' o 'menu')"
+            "Vista inválida para --view: '{raw}' (usa 'gallery', 'settings', 'welcome', 'suggestions', 'duplicates', 'works', 'personas', 'tags', 'errors', 'export' o 'menu')"
         ))
     }
 }
@@ -354,6 +357,7 @@ impl CaptureState {
                     CaptureView::Settings
                     | CaptureView::Welcome
                     | CaptureView::Works
+                    | CaptureView::Persons
                     | CaptureView::Tags => true,
                     CaptureView::Export => {
                         !signals.has_entries || (signals.thumbs_ready && signals.export_ready)
@@ -398,6 +402,9 @@ impl CaptureState {
                             }
                             CaptureView::Works => {
                                 "Tiempo de espera agotado esperando Obras.".into()
+                            }
+                            CaptureView::Persons => {
+                                "Tiempo de espera agotado esperando Personas.".into()
                             }
                             CaptureView::Tags => {
                                 "Tiempo de espera agotado esperando Etiquetas.".into()

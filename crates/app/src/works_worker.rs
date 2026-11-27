@@ -1,6 +1,7 @@
 use crate::worker::Notify;
 use catalog::Catalog;
 use fsguard::DestPath;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -33,6 +34,14 @@ pub struct WorksWorker {
 
 impl WorksWorker {
     pub fn start(db: DestPath, notify: Option<Notify>) -> Self {
+        Self::start_in_roots(db, None, notify)
+    }
+
+    pub fn start_in_roots(
+        db: DestPath,
+        roots: Option<Vec<PathBuf>>,
+        notify: Option<Notify>,
+    ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_bg = Arc::clone(&cancel);
         let (tx, rx) = mpsc::channel();
@@ -53,13 +62,23 @@ impl WorksWorker {
                 }
             };
 
-            let filename_matched = match cat.apply_filename_works(None) {
+            let filename_matched = match cat.apply_filename_works(roots.as_deref()) {
                 Ok((_, matched)) => matched,
                 Err(e) => {
                     emit(WorksEvent::Failed(e.to_string()));
                     return;
                 }
             };
+
+            let folder_matched = match cat.apply_folder_work_groups(roots.as_deref()) {
+                Ok(matched) => matched,
+                Err(e) => {
+                    emit(WorksEvent::Failed(e.to_string()));
+                    return;
+                }
+            };
+
+            let initial_matched = filename_matched + folder_matched;
 
             let matcher = match cat.load_work_matcher() {
                 Ok(m) => m,
@@ -82,15 +101,15 @@ impl WorksWorker {
                 emit(WorksEvent::Finished {
                     stopped: false,
                     processed: 0,
-                    matched_assets: filename_matched,
-                    suggestions: filename_matched,
+                    matched_assets: initial_matched,
+                    suggestions: initial_matched,
                 });
                 return;
             }
 
             let mut processed = 0usize;
-            let mut matched_assets = 0usize;
-            let mut suggestions = filename_matched;
+            let mut matched_assets = initial_matched;
+            let mut suggestions = initial_matched;
             let mut stopped = false;
 
             emit(WorksEvent::Progress {

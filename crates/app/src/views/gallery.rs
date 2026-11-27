@@ -42,6 +42,7 @@ pub fn draw(
     sort: &mut Sort,
     similarity_view: Option<&SimilarityView>,
     work_order_banner: Option<&str>,
+    top_banner: Option<impl FnOnce(&mut egui::Ui)>,
     reviewed_assets: &HashSet<AssetId>,
     pending_suggestions_assets: &HashSet<AssetId>,
     has_indexed_locations: bool,
@@ -127,6 +128,11 @@ pub fn draw(
                             });
                         });
                     });
+                ui.add_space(theme::SPACE_MD);
+            }
+
+            if let Some(banner) = top_banner {
+                banner(ui);
                 ui.add_space(theme::SPACE_MD);
             }
 

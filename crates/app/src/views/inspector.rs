@@ -21,6 +21,7 @@ pub struct InspectorState {
     pub ocr_lines: Vec<OcrLine>,
     pub ocr_done: bool,
     pub faces: Vec<DetectedFace>,
+    pub face_details: Vec<(catalog::FaceDetail, Option<String>)>,
     pub vision_done: bool,
     pub ocr_checked: BTreeSet<usize>,
     pub ocr_draft: String,
@@ -39,6 +40,7 @@ impl Default for InspectorState {
             ocr_lines: Vec::new(),
             ocr_done: false,
             faces: Vec::new(),
+            face_details: Vec::new(),
             vision_done: false,
             ocr_checked: BTreeSet::new(),
             ocr_draft: String::new(),
@@ -61,6 +63,8 @@ pub struct InspectorOutcome {
     pub add_user_label: Option<(AssetId, LabelKind, String)>,
     pub create_work_from_ocr: Option<(AssetId, String)>,
     pub add_alias_from_ocr: Option<(AssetId, LabelId, String)>,
+    pub remove_person_from_asset: Option<(catalog::PersonId, AssetId)>,
+    pub open_persons: bool,
 }
 
 /// Renders the right-side inspector ONLY when `selected_entry` is `Some`.
@@ -337,6 +341,39 @@ pub fn draw(
                                         }
                                     });
                                 });
+                        });
+                    ui.add_space(theme::SPACE_SM);
+                }
+
+                // Section 1c: Personas y rostros
+                if !state.face_details.is_empty() {
+                    egui::CollapsingHeader::new(RichText::new("Personas en esta foto").strong())
+                        .id_salt("inspector_sec_faces")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (face, person_name) in &state.face_details {
+                                Frame::new()
+                                    .fill(palette.bg_card.color32())
+                                    .stroke(Stroke::new(1.0, palette.border.color32()))
+                                    .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                    .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let label = person_name.as_deref().unwrap_or("Sin nombre");
+                                            ui.label(RichText::new(label).strong());
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                if let Some(pid) = face.person_id {
+                                                    if ui.button("Quitar").on_hover_text("Quitar esta foto de la persona").clicked() {
+                                                        outcome.remove_person_from_asset = Some((pid, entry.asset));
+                                                    }
+                                                } else if ui.button("Poner nombre").clicked() {
+                                                    outcome.open_persons = true;
+                                                }
+                                            });
+                                        });
+                                    });
+                                ui.add_space(theme::SPACE_XS);
+                            }
                         });
                     ui.add_space(theme::SPACE_SM);
                 }

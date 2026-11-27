@@ -95,6 +95,7 @@ fn parse_args_rejects_invalid_values_and_unknown_flags() {
     assert_eq!(parse_view("REVIEW").unwrap(), CaptureView::Suggestions);
     assert_eq!(parse_view("Duplicates").unwrap(), CaptureView::Duplicates);
     assert_eq!(parse_view("works").unwrap(), CaptureView::Works);
+    assert_eq!(parse_view("personas").unwrap(), CaptureView::Persons);
     assert_eq!(parse_view("tags").unwrap(), CaptureView::Tags);
     assert_eq!(parse_view("export").unwrap(), CaptureView::Export);
     assert_eq!(parse_view("menu").unwrap(), CaptureView::Menu);

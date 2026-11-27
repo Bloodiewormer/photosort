@@ -52,10 +52,7 @@ impl VisionReader for FakeVisionReader {
             emb[0] = 1.0;
             out.push(VisionImageOutput {
                 embedding: emb,
-                faces: vec![DetectedFace {
-                    bbox: [4.0, 4.0, 20.0, 20.0],
-                    score: 0.9,
-                }],
+                faces: vec![DetectedFace::new([4.0, 4.0, 20.0, 20.0], 0.9)],
             });
         }
         Ok(out)

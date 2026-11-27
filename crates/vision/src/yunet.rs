@@ -20,6 +20,9 @@ pub struct Face {
     /// `[x1, y1, x2, y2]` in original image pixel coordinates.
     pub bbox: [f32; 4],
     pub score: f32,
+    /// 5 facial landmarks in original image pixel coordinates:
+    /// `[right_eye, left_eye, nose_tip, right_mouth_corner, left_mouth_corner]`.
+    pub landmarks: [[f32; 2]; 5],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,9 +105,10 @@ pub struct StrideOutputs<'a> {
     pub cls: &'a [f32],
     pub obj: &'a [f32],
     pub bbox: &'a [f32],
+    pub kps: &'a [f32],
 }
 
-/// Decodes multi-stride YuNet tensors, maps boxes back to original coordinates, and applies NMS.
+/// Decodes multi-stride YuNet tensors, maps boxes and landmarks back to original coordinates, and applies NMS.
 pub fn decode_and_nms(
     strides: &[StrideOutputs<'_>],
     letterbox: Letterbox,
@@ -122,13 +126,18 @@ pub fn decode_and_nms(
     for head in strides {
         let grid = INPUT_SIZE as usize / head.stride;
         let cells = grid * grid;
-        if head.cls.len() != cells || head.obj.len() != cells || head.bbox.len() != cells * 4 {
+        if head.cls.len() != cells
+            || head.obj.len() != cells
+            || head.bbox.len() != cells * 4
+            || head.kps.len() != cells * 10
+        {
             return Err(format!(
-                "stride {} tensor sizes ({}, {}, {}) do not match {grid}x{grid}",
+                "stride {} tensor sizes ({}, {}, {}, {}) do not match {grid}x{grid}",
                 head.stride,
                 head.cls.len(),
                 head.obj.len(),
-                head.bbox.len()
+                head.bbox.len(),
+                head.kps.len()
             ));
         }
         let s = head.stride as f32;
@@ -150,10 +159,21 @@ pub fn decode_and_nms(
                 let y1 = ((cy - 0.5 * h) * inv_scale).clamp(0.0, max_y);
                 let x2 = ((cx + 0.5 * w) * inv_scale).clamp(0.0, max_x);
                 let y2 = ((cy + 0.5 * h) * inv_scale).clamp(0.0, max_y);
+
+                let mut landmarks = [[0.0f32; 2]; 5];
+                let kps = &head.kps[idx * 10..idx * 10 + 10];
+                for k in 0..5 {
+                    let kx = (c as f32 + kps[k * 2]) * s;
+                    let ky = (r as f32 + kps[k * 2 + 1]) * s;
+                    landmarks[k][0] = (kx * inv_scale).clamp(0.0, max_x);
+                    landmarks[k][1] = (ky * inv_scale).clamp(0.0, max_y);
+                }
+
                 if x2 > x1 && y2 > y1 {
                     candidates.push(Face {
                         bbox: [x1, y1, x2, y2],
                         score,
+                        landmarks,
                     });
                 }
             }
@@ -246,18 +266,21 @@ impl YuNet {
                 cls: extract("cls_8")?,
                 obj: extract("obj_8")?,
                 bbox: extract("bbox_8")?,
+                kps: extract("kps_8")?,
             },
             StrideOutputs {
                 stride: 16,
                 cls: extract("cls_16")?,
                 obj: extract("obj_16")?,
                 bbox: extract("bbox_16")?,
+                kps: extract("kps_16")?,
             },
             StrideOutputs {
                 stride: 32,
                 cls: extract("cls_32")?,
                 obj: extract("obj_32")?,
                 bbox: extract("bbox_32")?,
+                kps: extract("kps_32")?,
             },
         ];
         decode_and_nms(&heads, letterbox, config)
@@ -294,6 +317,7 @@ mod tests {
         let mut cls8 = vec![0.0f32; 80 * 80];
         let mut obj8 = vec![0.0f32; 80 * 80];
         let mut bbox8 = vec![0.0f32; 80 * 80 * 4];
+        let mut kps8 = vec![0.0f32; 80 * 80 * 10];
 
         // Cell (r=10, c=20) at stride 8:
         // cx = (20 + 0.5)*8 = 164, cy = (10 + 0.5)*8 = 84
@@ -306,6 +330,8 @@ mod tests {
         bbox8[idx_a * 4 + 1] = 0.5;
         bbox8[idx_a * 4 + 2] = 4.0f32.ln();
         bbox8[idx_a * 4 + 3] = 6.0f32.ln();
+        kps8[idx_a * 10] = 0.2; // Right eye offset x
+        kps8[idx_a * 10 + 1] = 0.3; // Right eye offset y
 
         // Overlapping lower-score box at (r=10, c=21): should be suppressed by NMS.
         let idx_b = 10 * 80 + 21;
@@ -322,6 +348,7 @@ mod tests {
         let mut cls32 = vec![0.0f32; 20 * 20];
         let mut obj32 = vec![0.0f32; 20 * 20];
         let bbox32 = vec![0.0f32; 20 * 20 * 4];
+        let kps32 = vec![0.0f32; 20 * 20 * 10];
         let idx_c = 15 * 20 + 15;
         cls32[idx_c] = 0.49;
         obj32[idx_c] = 1.0; // score = 0.7
@@ -332,18 +359,21 @@ mod tests {
                 cls: &cls8,
                 obj: &obj8,
                 bbox: &bbox8,
+                kps: &kps8,
             },
             StrideOutputs {
                 stride: 16,
                 cls: &vec![0.0; 40 * 40],
                 obj: &vec![0.0; 40 * 40],
                 bbox: &vec![0.0; 40 * 40 * 4],
+                kps: &vec![0.0; 40 * 40 * 10],
             },
             StrideOutputs {
                 stride: 32,
                 cls: &cls32,
                 obj: &obj32,
                 bbox: &bbox32,
+                kps: &kps32,
             },
         ];
         let lb = Letterbox {

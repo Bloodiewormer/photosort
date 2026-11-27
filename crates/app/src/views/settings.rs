@@ -15,6 +15,7 @@ const MAX_COLUMN_WIDTH: f32 = 720.0;
 #[derive(Default)]
 pub struct SettingsViewState {
     pub confirm_remove_root: Option<PathBuf>,
+    pub confirm_clear_face_data: bool,
     pub vision_dir_error: Option<String>,
     pub ocr_dir_error: Option<String>,
 }
@@ -27,6 +28,8 @@ pub struct SettingsOutcome {
     pub open_errors: bool,
     pub settings_changed: bool,
     pub theme_changed: bool,
+    pub clear_face_grouping: bool,
+    pub start_face_grouping: bool,
     pub error: Option<String>,
 }
 
@@ -307,6 +310,75 @@ pub fn draw(
                                     } else {
                                         outcome.settings_changed = true;
                                     }
+                                }
+                                ui.add_space(theme::SPACE_SM);
+
+                                let prev_grouping = settings.stage_face_grouping;
+                                let grouping_note = "Agrupa rostros similares con SFace local · al activar se calcula para rostros ya detectados";
+                                if switch_row(
+                                    ui,
+                                    palette,
+                                    "Agrupar rostros",
+                                    grouping_note,
+                                    &mut settings.stage_face_grouping,
+                                ) {
+                                    outcome.settings_changed = true;
+                                    if settings.stage_face_grouping && !prev_grouping {
+                                        outcome.start_face_grouping = true;
+                                    }
+                                }
+                                ui.add_space(theme::SPACE_MD);
+
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Borrar datos de rostros")
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(palette.status_rejected_fg.color32()),
+                                            )
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                palette.status_rejected_fg.color32(),
+                                            ))
+                                            .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
+                                        )
+                                        .on_hover_text("Borra grupos, nombres y embeddings de rostros calculados")
+                                        .clicked()
+                                    {
+                                        state.confirm_clear_face_data = true;
+                                    }
+                                });
+
+                                if state.confirm_clear_face_data {
+                                    ui.add_space(theme::SPACE_XS);
+                                    Frame::new()
+                                        .fill(palette.chip_exclude_bg.color32())
+                                        .stroke(Stroke::new(
+                                            1.0,
+                                            palette.status_rejected_fg.color32(),
+                                        ))
+                                        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
+                                        .inner_margin(Margin::same(theme::SPACE_SM as i8))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new(
+                                                    "¿Borrar todos los datos de rostros? Se eliminarán los grupos, nombres y embeddings de rostros calculados. Las etiquetas y los archivos originales no se verán afectados. Nada sale de tu PC."
+                                                )
+                                                .size(theme::FONT_SMALL)
+                                                .color(palette.chip_exclude_fg.color32()),
+                                            );
+                                            ui.add_space(theme::SPACE_XS);
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Sí, borrar datos de rostros").clicked() {
+                                                    outcome.clear_face_grouping = true;
+                                                    state.confirm_clear_face_data = false;
+                                                }
+                                                if ui.button("Cancelar").clicked() {
+                                                    state.confirm_clear_face_data = false;
+                                                }
+                                            });
+                                        });
                                 }
 
                                 for paused in &engine_snapshot.paused_stages {
