@@ -95,39 +95,65 @@ pub fn draw(
                 .stroke(Stroke::new(1.0, palette.border.color32())),
         )
         .show(ui, |ui| {
-            ScrollArea::vertical().show(ui, |ui| {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                 // Header: filename + actions
-                ui.horizontal(|ui| {
-                    if is_reviewed {
-                        let (mark_rect, mark_resp) =
-                            ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-                        theme::paint_reviewed_mark(ui.painter(), mark_rect, palette);
-                        mark_resp.on_hover_text("Revisada");
-                    }
-                    // The mark alone would say it by shape and colour only.
-                    ui.label(if is_reviewed {
-                        "Revisada"
-                    } else {
-                        "Sin revisar"
-                    });
-                    let review_lbl = if is_reviewed {
-                        "Volver a revisar"
-                    } else {
-                        "Revisar"
-                    };
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Visor").clicked() {
-                            outcome.open_viewer = true;
+                let review_lbl = if is_reviewed {
+                    "Volver a revisar"
+                } else {
+                    "Revisar"
+                };
+                if ui.available_width() < 270.0 {
+                    ui.horizontal(|ui| {
+                        if is_reviewed {
+                            let (mark_rect, mark_resp) =
+                                ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                            theme::paint_reviewed_mark(ui.painter(), mark_rect, palette);
+                            mark_resp.on_hover_text("Revisada");
                         }
+                        ui.label(if is_reviewed {
+                            "Revisada"
+                        } else {
+                            "Sin revisar"
+                        });
+                    });
+                    ui.horizontal(|ui| {
                         if ui.button(review_lbl).clicked() {
                             outcome.review_asset = Some(entry.asset);
                         }
+                        if ui.button("Visor").clicked() {
+                            outcome.open_viewer = true;
+                        }
                     });
-                });
+                } else {
+                    ui.horizontal(|ui| {
+                        if is_reviewed {
+                            let (mark_rect, mark_resp) =
+                                ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                            theme::paint_reviewed_mark(ui.painter(), mark_rect, palette);
+                            mark_resp.on_hover_text("Revisada");
+                        }
+                        // The mark alone would say it by shape and colour only.
+                        ui.label(if is_reviewed {
+                            "Revisada"
+                        } else {
+                            "Sin revisar"
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Visor").clicked() {
+                                outcome.open_viewer = true;
+                            }
+                            if ui.button(review_lbl).clicked() {
+                                outcome.review_asset = Some(entry.asset);
+                            }
+                        });
+                    });
+                }
                 ui.add_space(theme::SPACE_SM);
 
                 // Preview box
-                let preview_w = ui.available_width().max(120.0);
+                let preview_w = ui.available_width();
                 let preview_h = 200.0;
                 let (rect, _) =
                     ui.allocate_exact_size(Vec2::new(preview_w, preview_h), Sense::hover());
@@ -275,9 +301,14 @@ pub fn draw(
                                 .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                 .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                 .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(&aw.work_name).strong());
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&aw.work_name).strong(),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&aw.work_name);
                                         ui.with_layout(
                                             Layout::right_to_left(Align::Center),
                                             |ui| {
@@ -360,7 +391,8 @@ pub fn draw(
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             let label = person_name.as_deref().unwrap_or("Sin nombre");
-                                            ui.label(RichText::new(label).strong());
+                                            ui.add(egui::Label::new(RichText::new(label).strong()).truncate())
+                                                .on_hover_text(label);
                                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                                 if let Some(pid) = face.person_id {
                                                     if ui.button("Quitar").on_hover_text("Quitar esta foto de la persona").clicked() {
@@ -438,7 +470,6 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
-                                        ui.set_min_width(ui.available_width());
                                         for (idx, line) in main_ocr.iter().enumerate() {
                                             let mut checked = state.ocr_checked.contains(&idx);
                                             ui.horizontal_wrapped(|ui| {
@@ -468,6 +499,7 @@ pub fn draw(
                                                                 palette.text_secondary.color32(),
                                                             ),
                                                         )
+                                                        .wrap()
                                                         .selectable(true),
                                                     );
                                                     ui.label(
@@ -485,6 +517,7 @@ pub fn draw(
                                                                 palette.text_primary.color32(),
                                                             ),
                                                         )
+                                                        .wrap()
                                                         .selectable(true),
                                                     );
                                                 }
@@ -582,7 +615,6 @@ pub fn draw(
                                     .corner_radius(CornerRadius::same(theme::RADIUS_SM))
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
-                                        ui.set_min_width(ui.available_width());
                                         for line in &status_bar_ocr {
                                             ui.add(
                                                 egui::Label::new(
@@ -590,6 +622,7 @@ pub fn draw(
                                                         .size(theme::FONT_SMALL)
                                                         .color(palette.text_secondary.color32()),
                                                 )
+                                                .wrap()
                                                 .selectable(true),
                                             );
                                         }
@@ -626,14 +659,18 @@ pub fn draw(
                                     .inner_margin(Margin::same(theme::SPACE_SM as i8))
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{}: {}",
-                                                    kind_label(assign.kind),
-                                                    assign.name
-                                                ))
-                                                .strong(),
-                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!(
+                                                        "{}: {}",
+                                                        kind_label(assign.kind),
+                                                        assign.name
+                                                    ))
+                                                    .strong(),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&assign.name);
                                             ui.with_layout(
                                                 Layout::right_to_left(Align::Center),
                                                 |ui| {
@@ -703,7 +740,7 @@ pub fn draw(
                         }
 
                         ui.add_space(theme::SPACE_SM);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             egui::ComboBox::from_id_salt("new_label_kind")
                                 .selected_text(kind_label(state.new_label_kind))
                                 .width(92.0)
@@ -717,10 +754,11 @@ pub fn draw(
                                         );
                                     }
                                 });
+                            let edit_w = (ui.available_width() - 72.0).clamp(60.0, 160.0);
                             let edit = ui.add(
                                 egui::TextEdit::singleline(&mut state.new_label_text)
                                     .id(Id::unique(NEW_LABEL_INPUT_ID))
-                                    .desired_width((ui.available_width() - 72.0).max(80.0))
+                                    .desired_width(edit_w)
                                     .hint_text(theme::hint_text(palette, "Nueva etiqueta")),
                             );
                             if state.focus_new_label_next_frame {
@@ -752,7 +790,8 @@ fn meta_row(ui: &mut egui::Ui, palette: &Palette, key: &str, value: &str) {
                 .size(theme::FONT_SMALL)
                 .color(palette.text_secondary.color32()),
         );
-        ui.label(RichText::new(value).size(theme::FONT_SMALL));
+        ui.add(egui::Label::new(RichText::new(value).size(theme::FONT_SMALL)).truncate())
+            .on_hover_text(value);
     });
 }
 
@@ -770,5 +809,155 @@ fn source_label(source: Source) -> &'static str {
         Source::Ocr => "OCR",
         Source::Rules => "Reglas",
         Source::User => "Usuario",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catalog::{AssetId, Entry, MediaType, OcrLine, OcrRecognizer};
+    use eframe::egui::{Event, PointerButton, Pos2, RawInput, Rect, Vec2};
+    use std::path::PathBuf;
+
+    fn sample_entry() -> Entry {
+        Entry {
+            asset: AssetId(1),
+            path: PathBuf::from(
+                "C:/photos/very_long_folder_name_that_should_not_cause_panel_to_jump/test_photo.jpg",
+            ),
+            size: 1024 * 500,
+            modified_ns: Some(1_700_000_000_000_000_000),
+            sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+            width: Some(1920),
+            height: Some(1080),
+            format: Some("JPEG".to_string()),
+            media_type: MediaType::Image,
+            duration_ms: None,
+            captured_at_ns: None,
+        }
+    }
+
+    #[test]
+    fn inspector_panel_resizes_to_minimum_width_without_bouncing() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+        let entry = sample_entry();
+        let mut state = InspectorState {
+            ocr_done: true,
+            ocr_lines: vec![
+                OcrLine {
+                    text: "時計仕掛けのクロニクル — 第12話 とても長いOCRテキスト".to_string(),
+                    score: 0.95,
+                    recognizer: OcrRecognizer::V6,
+                    rect: [10.0, 10.0, 200.0, 30.0],
+                    top_strip: false,
+                },
+                OcrLine {
+                    text: "바람 공주 · 제3화 (한국어 OCR 테스트)".to_string(),
+                    score: 0.90,
+                    recognizer: OcrRecognizer::Korean,
+                    rect: [10.0, 40.0, 200.0, 60.0],
+                    top_strip: false,
+                },
+            ],
+            labels: vec![catalog::Assignment {
+                label: catalog::LabelId(1),
+                name: "Manga › Scanlation › Página promocional o índice de proyectos muy largo"
+                    .to_string(),
+                kind: catalog::LabelKind::Category,
+                source: catalog::Source::Ai,
+                confidence: 0.85,
+                status: catalog::Status::Accepted,
+            }],
+            ..Default::default()
+        };
+
+        // Frame 1: default inspector width
+        let input1 = RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut output1 = ctx.run_ui(input1, |ui| {
+            draw(
+                ui,
+                &theme::DARK_PALETTE,
+                Some(&entry),
+                true,
+                &mut state,
+                &[],
+                None,
+            );
+        });
+        output1.textures_delta.clear();
+
+        // Frame 2: drag panel resize handle from initial x (1000 - 328 = 672) to min width (1000 - 280 = 720)
+        let panel_border_x = 1000.0 - theme::INSPECTOR_WIDTH;
+        let target_border_x = 1000.0 - 280.0;
+        let events = vec![
+            Event::PointerMoved(Pos2::new(panel_border_x, 300.0)),
+            Event::PointerButton {
+                pos: Pos2::new(panel_border_x, 300.0),
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            Event::PointerMoved(Pos2::new(target_border_x, 300.0)),
+            Event::PointerButton {
+                pos: Pos2::new(target_border_x, 300.0),
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+
+        let input2 = RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let mut output2 = ctx.run_ui(input2, |ui| {
+            draw(
+                ui,
+                &theme::DARK_PALETTE,
+                Some(&entry),
+                true,
+                &mut state,
+                &[],
+                None,
+            );
+        });
+        output2.textures_delta.clear();
+
+        // Frame 3: verify it stays at 280.0 without jumping
+        let input3 = RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut actual_width = 0.0;
+        let mut output3 = ctx.run_ui(input3, |ui| {
+            let resp = draw(
+                ui,
+                &theme::DARK_PALETTE,
+                Some(&entry),
+                true,
+                &mut state,
+                &[],
+                None,
+            );
+            let _ = resp;
+        });
+        output3.textures_delta.clear();
+
+        #[allow(deprecated)]
+        let inspector_id = egui::Id::new("inspector");
+        if let Some(rect) = ctx.memory(|m| m.area_rect(inspector_id)) {
+            actual_width = rect.width();
+        }
+        if actual_width > 0.0 {
+            assert!(
+                (actual_width - 280.0).abs() <= 2.0,
+                "El ancho final debe mantenerse en el mínimo solicitado (280.0), obtenido: {actual_width}"
+            );
+        }
     }
 }
