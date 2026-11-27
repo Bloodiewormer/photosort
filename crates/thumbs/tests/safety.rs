@@ -182,3 +182,50 @@ fn reading_video_frames_leaves_the_original_untouched() {
     // 5. Assert library originals are 100% byte-for-byte untouched and no sidecars created
     assert_eq!(before, snapshot(&library));
 }
+
+#[test]
+fn decoding_with_wic_leaves_the_original_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("library");
+    fs::create_dir_all(&library).unwrap();
+
+    let png = library.join("wic_test.png");
+    let mut img = RgbImage::new(100, 80);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = Rgb([(x * 2) as u8, (y * 3) as u8, 120]);
+    }
+    img.save_with_format(&png, ImageFormat::Png).unwrap();
+
+    let bmp = library.join("wic_test.bmp");
+    let mut img_bmp = RgbImage::new(80, 60);
+    for (x, y, px) in img_bmp.enumerate_pixels_mut() {
+        *px = Rgb([(x * 3) as u8, (y * 4) as u8, 200]);
+    }
+    img_bmp.save_with_format(&bmp, ImageFormat::Bmp).unwrap();
+
+    let corrupt_heic = library.join("corrupt.heic");
+    fs::write(&corrupt_heic, b"corrupted heic file bytes").unwrap();
+
+    // Settle NTFS timestamps
+    snapshot(&library);
+    let before = snapshot(&library);
+
+    // Call WIC decoding
+    let decoded_png = thumbs::decode_wic(&png, 200).expect("decode wic png");
+    assert_eq!(decoded_png.width(), 100);
+    assert_eq!(decoded_png.height(), 80);
+
+    let decoded_bmp = thumbs::decode_wic(&bmp, 50).expect("decode wic bmp");
+    assert_eq!(decoded_bmp.width(), 50);
+    assert_eq!(decoded_bmp.height(), 38);
+
+    let _ = thumbs::decode_wic(&corrupt_heic, 100);
+    let _ = thumbs::decode(&corrupt_heic, 100);
+
+    // Verify metadata reading
+    let _ = thumbs::read_image_metadata(&png);
+    let _ = thumbs::read_image_metadata(&bmp);
+
+    // Verify original library remains 100% byte-for-byte untouched
+    assert_eq!(before, snapshot(&library));
+}

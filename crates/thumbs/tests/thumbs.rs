@@ -451,3 +451,88 @@ fn concurrent_calls_for_same_key_succeed_with_one_valid_file() {
     assert_eq!(entries.len(), 1, "expected only 1 file, found {entries:?}");
     assert_no_tmp_files(cache_dir.as_path());
 }
+
+#[test]
+fn wic_decodes_synthetic_png_and_bmp() {
+    let (_tmp, src_dir, _cache_dir) = setup_dirs();
+
+    // 1. Synthetic PNG
+    let png_path = src_dir.join("synthetic.png");
+    write_rgb_image(&png_path, 120, 80, ImageFormat::Png);
+    let decoded_png = thumbs::decode_wic(&png_path, 200).expect("WIC decode PNG full");
+    assert_eq!(decoded_png.width(), 120);
+    assert_eq!(decoded_png.height(), 80);
+
+    let resized_png = thumbs::decode_wic(&png_path, 60).expect("WIC decode PNG resized");
+    assert_eq!(resized_png.width(), 60);
+    assert_eq!(resized_png.height(), 40);
+
+    // 2. Synthetic BMP
+    let bmp_path = src_dir.join("synthetic.bmp");
+    write_rgb_image(&bmp_path, 100, 50, ImageFormat::Bmp);
+    let decoded_bmp = thumbs::decode_wic(&bmp_path, 200).expect("WIC decode BMP full");
+    assert_eq!(decoded_bmp.width(), 100);
+    assert_eq!(decoded_bmp.height(), 50);
+
+    let resized_bmp = thumbs::decode_wic(&bmp_path, 50).expect("WIC decode BMP resized");
+    assert_eq!(resized_bmp.width(), 50);
+    assert_eq!(resized_bmp.height(), 25);
+}
+
+#[test]
+fn heic_corrupt_or_missing_codec_returns_clean_error_without_panic() {
+    let (_tmp, src_dir, cache_dir) = setup_dirs();
+    let thumbs = Thumbs::new(&cache_dir, 100).unwrap();
+
+    let heic_path = src_dir.join("corrupt_test.heic");
+    fs::write(&heic_path, b"not a real heic header").unwrap();
+    let sha = "e".repeat(64);
+
+    // decode
+    let dec_err = thumbs::decode(&heic_path, 100).unwrap_err();
+    assert!(
+        matches!(dec_err, ThumbError::Unsupported(_) | ThumbError::Decode(_)),
+        "expected Unsupported or Decode error, got {dec_err:?}"
+    );
+
+    // decode_wic directly
+    let wic_err = thumbs::decode_wic(&heic_path, 100).unwrap_err();
+    assert!(
+        matches!(wic_err, ThumbError::Unsupported(_) | ThumbError::Decode(_)),
+        "expected Unsupported or Decode error, got {wic_err:?}"
+    );
+
+    // thumbs.get
+    let get_err = thumbs.get(&heic_path, &sha).unwrap_err();
+    assert!(
+        matches!(get_err, ThumbError::Unsupported(_) | ThumbError::Decode(_)),
+        "expected Unsupported or Decode error, got {get_err:?}"
+    );
+}
+
+#[test]
+fn jfif_is_indexed_and_decoded() {
+    let (_tmp, src_dir, cache_dir) = setup_dirs();
+    let thumbs = Thumbs::new(&cache_dir, 100).unwrap();
+
+    let jfif_path = src_dir.join("photo.jfif");
+    let sha = write_rgb_image(&jfif_path, 200, 100, ImageFormat::Jpeg);
+
+    // Scanner recognizes jfif as Image
+    let scan_report = scanner::scan(&src_dir).unwrap();
+    let found = scan_report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("photo.jfif"))
+        .expect("photo.jfif must be found by scanner");
+    assert_eq!(found.media_type, scanner::MediaType::Image);
+
+    // decode works
+    let img = thumbs::decode(&jfif_path, 100).expect("decode jfif");
+    assert_eq!(img.width(), 100);
+    assert_eq!(img.height(), 50);
+
+    // get thumbnail works
+    let thumb_path = thumbs.get(&jfif_path, &sha).expect("get jfif thumb");
+    assert!(thumb_path.is_file());
+}

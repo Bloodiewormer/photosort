@@ -61,6 +61,12 @@ pub fn sanitize_stage_error_reason(stage: &str, raw: &str) -> String {
         || lower.contains("catalogo")
     {
         "Error al guardar en el catálogo"
+    } else if lower.contains("códec de imagen")
+        || lower.contains("codec de imagen")
+        || lower.contains("image codec")
+        || (lower.contains("imagen") && (lower.contains("códec") || lower.contains("codec")))
+    {
+        "Códec de imagen no disponible"
     } else if lower.contains("códec") || lower.contains("codec") {
         "Códec de vídeo no disponible"
     } else if lower.contains("corrupt")

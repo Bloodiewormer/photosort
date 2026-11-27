@@ -266,3 +266,21 @@ fn missing_video_codec_error_sanitizes_to_dedicated_reason() {
         "Códec de vídeo no disponible"
     );
 }
+
+#[test]
+fn missing_image_codec_error_sanitizes_to_dedicated_reason() {
+    assert_eq!(
+        catalog::sanitize_stage_error_reason(
+            catalog::VISION_STAGE,
+            "unsupported image: códec de imagen no disponible: 0x88982F50"
+        ),
+        "Códec de imagen no disponible"
+    );
+    assert_eq!(
+        catalog::sanitize_stage_error_reason(
+            "rules",
+            "unsupported image: códec de imagen no disponible"
+        ),
+        "Códec de imagen no disponible"
+    );
+}
