@@ -29,9 +29,13 @@ Los detalles de versión y SHA-256 de cada archivo están en [ocr-evaluacion.md]
 
 ## Antes de publicar un instalador
 
-1. Generar un archivo `THIRD-PARTY-NOTICES.txt` con el texto de licencia de cada crate, de las fuentes de egui y de `webpki-root-certs`, y el `ThirdPartyNotices.txt` de ONNX Runtime 1.31.
+1. Regenerar el archivo `THIRD-PARTY-NOTICES.txt` en la raíz del repositorio con el generador:
+   ```powershell
+   cargo run -p app --example avisos_terceros
+   ```
+   Este comando lee las dependencias de ejecución de `Cargo.lock` para `x86_64-pc-windows-msvc`, agrupa los textos de licencia de las crates y añade los avisos de ONNX Runtime 1.31, DirectML.dll y los modelos. Hay que regenerarlo **cada vez que cambie `Cargo.lock`** (al añadir, actualizar o quitar dependencias). La integración continua (CI) comprueba que esté actualizado mediante `--check`.
 2. Mantener `DirectML.dll` junto al `.exe` como parte de la app, nunca como descarga aparte, y sin quitarle sus avisos.
-3. Si el instalador incluye modelos, añadir sus licencias.
+3. Si el instalador incluye modelos, comprobar que sus licencias y orígenes coincidan con los de este documento.
 4. Volver a revisar esta tabla si cambia la versión de ONNX Runtime, DirectML o de algún modelo.
 
 ## Fuentes

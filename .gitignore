@@ -3,6 +3,7 @@
 *.sqlite-journal
 *.log
 target/
+target-b/
 out/
 # local tooling, not part of the project
 .claude/settings.local.json
