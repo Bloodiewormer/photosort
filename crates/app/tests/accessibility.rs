@@ -381,3 +381,99 @@ fn keyboard_focus_ring_is_drawn_in_both_themes() {
         }
     }
 }
+
+fn enter_key(pressed: bool) -> Event {
+    Event::Key {
+        key: Key::Enter,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+impl Harness {
+    fn focus_on(&mut self, role: Role, name: &str) {
+        let target = self
+            .find(role, name)
+            .unwrap_or_else(|| panic!("no hay «{name}»"));
+        self.run(vec![Event::AccessKitActionRequest(ActionRequest {
+            action: Action::Focus,
+            target_tree: TreeId::ROOT,
+            target_node: target,
+            data: None,
+        })]);
+        assert_eq!(self.focused_name(), name);
+    }
+
+    /// Runs frames, while `held` with Enter down and repeating, until `done` or a timeout.
+    fn wait_for(&mut self, held: bool, done: impl Fn(&Self) -> bool) -> bool {
+        for _ in 0..500 {
+            if done(self) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            self.run(if held {
+                vec![enter_key(true)]
+            } else {
+                Vec::new()
+            });
+        }
+        false
+    }
+
+    /// Opens the export window for the selection, types `dest` and presses Enter to preview it.
+    /// With `hold`, Enter stays down and repeats once the preview is ready.
+    fn export_preview(&mut self, dest: &std::path::Path, hold: bool) {
+        self.click("Exportar…");
+        assert_eq!(self.focused_name(), "Carpeta de destino");
+        self.press(Key::A, Modifiers::COMMAND);
+        self.run(vec![Event::Text(dest.display().to_string())]);
+        self.run(vec![enter_key(true)]);
+        let ready = self.wait_for(hold, |h| h.find(Role::Button, "Exportar").is_some());
+        assert!(ready, "la vista previa no terminó");
+        if hold {
+            for _ in 0..10 {
+                self.run(vec![enter_key(true)]);
+            }
+        }
+        self.run(vec![enter_key(false)]);
+        self.settle();
+    }
+}
+
+fn is_empty_dir(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).expect("carpeta").next().is_none()
+}
+
+#[test]
+fn enter_on_close_or_back_never_starts_an_export() {
+    let out = tempfile::tempdir().expect("carpeta temporal");
+    let dest = out.path().join("copias");
+    let mut harness = Harness::new(CaptureView::Gallery, Theme::Dark);
+    harness.press(Key::ArrowRight, Modifiers::NONE);
+
+    for button in ["Cerrar", "Volver"] {
+        harness.export_preview(&dest, false);
+        harness.focus_on(Role::Button, button);
+        harness.press(Key::Enter, Modifiers::NONE);
+        assert!(harness.find(Role::Button, "Exportar").is_none(), "{button}");
+        assert!(is_empty_dir(out.path()), "Intro en «{button}» exportó");
+        // «Volver» leaves the window open on the first step.
+        let open = harness.has_name_containing("Calcular vista previa");
+        assert_eq!(open, button == "Volver", "{button}");
+        if open {
+            harness.press(Key::Escape, Modifiers::NONE);
+        }
+    }
+
+    // Enter held from the destination field repeats into the ready preview: no export.
+    harness.export_preview(&dest, true);
+    assert!(harness.find(Role::Button, "Exportar").is_some());
+    assert!(is_empty_dir(out.path()), "Intro mantenido exportó");
+
+    // A fresh Enter with no control focused is still the default action.
+    harness.press(Key::Enter, Modifiers::NONE);
+    let done = harness.wait_for(false, |h| h.has_name_containing("Abrir carpeta"));
+    assert!(done && !is_empty_dir(&dest), "Intro sin foco no exportó");
+}

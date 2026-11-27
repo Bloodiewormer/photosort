@@ -599,10 +599,22 @@ fn info_row_with_tooltip(
 }
 
 /// Enter as the default action: only with no control focused, so that Enter on «Cerrar» or
-/// «Volver» never starts an export.
+/// «Volver» never starts an export. A held Enter repeats, and its repeats could chain the steps
+/// into an export, so only a fresh press counts.
 fn enter_pressed(ctx: &egui::Context) -> bool {
     !ctx.egui_wants_keyboard_input()
-        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+        && ctx.input_mut(|i| {
+            let fresh = i.events.iter().any(is_fresh_enter);
+            i.consume_key(egui::Modifiers::NONE, Key::Enter) && fresh
+        })
+}
+
+fn is_fresh_enter(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, modifiers, .. }
+            if modifiers.is_none()
+    )
 }
 
 fn repaint_notify(ctx: &egui::Context) -> Notify {
