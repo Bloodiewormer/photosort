@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 /// A directory the user registered as a photo library. Everything below it is read-only.
 #[derive(Debug)]
@@ -117,10 +117,25 @@ fn resolve(path: &Path) -> Result<PathBuf, GuardError> {
     }
 }
 
-/// Component-wise and case-insensitive (NTFS): `D:\Lib2` is not inside `D:\Lib`.
+/// Component-wise and case-insensitive (NTFS): `D:\Lib2` is not inside `D:\Lib`. The `\\?\` prefix
+/// that `dunce` keeps on long paths is ignored, so they compare equal to short ones.
 fn key(path: &Path) -> Vec<String> {
     path.components()
-        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .map(|c| {
+            let text = match c {
+                Component::Prefix(p) => match p.kind() {
+                    Prefix::VerbatimDisk(disk) => format!("{}:", disk as char),
+                    Prefix::VerbatimUNC(server, share) => format!(
+                        r"\\{}\{}",
+                        server.to_string_lossy(),
+                        share.to_string_lossy()
+                    ),
+                    _ => c.as_os_str().to_string_lossy().into_owned(),
+                },
+                _ => c.as_os_str().to_string_lossy().into_owned(),
+            };
+            text.to_lowercase()
+        })
         .collect()
 }
 

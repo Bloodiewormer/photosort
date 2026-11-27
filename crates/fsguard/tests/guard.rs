@@ -128,3 +128,16 @@ fn rejects_a_path_reached_through_a_junction_into_the_library() {
         &f.roots
     )));
 }
+
+/// Past 260 characters the resolved path keeps the `\?\` prefix that the short library root lacks.
+#[cfg(windows)]
+#[test]
+fn rejects_a_path_inside_the_library_longer_than_max_path() {
+    let f = fixture();
+    let deep = f.library.join("a".repeat(150)).join("b".repeat(150));
+    fs::create_dir_all(&deep).unwrap();
+    assert!(is_inside_library(ensure_writable(
+        &deep.join("new.txt"),
+        &f.roots
+    )));
+}
