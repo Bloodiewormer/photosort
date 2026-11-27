@@ -77,12 +77,36 @@ pub trait VisionReader: Send + 'static {
             return Err("sin fotogramas para analizar".into());
         }
         let frame_refs: Vec<&RgbImage> = frames.iter().collect();
-        let outputs = self.analyze_images(&frame_refs)?;
-        if outputs.is_empty() {
-            return Err("resultado de visión vacío".into());
-        }
+        let outputs = match self.analyze_images(&frame_refs) {
+            Ok(out) if !out.is_empty() => out,
+            Err(batch_err) if frame_refs.len() > 1 => {
+                let mut ok = Vec::with_capacity(frame_refs.len());
+                let mut last_err = batch_err;
+                for frame in frame_refs {
+                    match self.analyze_images(&[frame]) {
+                        Ok(mut single) => {
+                            if let Some(item) = single.pop() {
+                                ok.push(item);
+                            }
+                        }
+                        Err(e) => last_err = e,
+                    }
+                }
+                if ok.is_empty() {
+                    return Err(last_err);
+                }
+                ok
+            }
+            Err(e) => return Err(e),
+            Ok(_) => return Err("resultado de visión vacío".into()),
+        };
+
         let embs: Vec<Vec<f32>> = outputs.iter().map(|o| o.embedding.clone()).collect();
         let combined_emb = combine_embeddings(&embs);
+        let norm: f32 = combined_emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= 0.0 {
+            return Err("embedding visual inválido".into());
+        }
         let mut all_faces = Vec::new();
         for out in outputs {
             all_faces.extend(out.faces);
@@ -95,20 +119,29 @@ pub trait VisionReader: Send + 'static {
 }
 
 pub fn combine_embeddings(embeddings: &[Vec<f32>]) -> Vec<f32> {
-    if embeddings.is_empty() {
+    let Some(first_valid) = embeddings
+        .iter()
+        .find(|e| !e.is_empty() && e.iter().all(|x| x.is_finite()))
+    else {
         return vec![0.0; catalog::EMBEDDING_DIM];
-    }
-    let mut avg = vec![0.0f32; embeddings[0].len()];
+    };
+    let dim = first_valid.len();
+    let mut avg = vec![0.0f32; dim];
     for emb in embeddings {
+        if emb.len() != dim || !emb.iter().all(|x| x.is_finite()) {
+            continue;
+        }
         for (a, &b) in avg.iter_mut().zip(emb) {
             *a += b;
         }
     }
     let norm: f32 = avg.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
+    if norm.is_finite() && norm > 0.0 {
         for x in &mut avg {
             *x /= norm;
         }
+    } else {
+        avg.fill(0.0);
     }
     avg
 }
@@ -860,5 +893,75 @@ mod tests {
         assert!((norm - 1.0).abs() < 1e-6);
         assert!((combined[0] - 0.6).abs() < 1e-6);
         assert!((combined[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn combine_embeddings_skips_non_finite_and_never_returns_nan() {
+        let valid = vec![3.0, 4.0, 0.0];
+        let bad_nan = vec![f32::NAN, 1.0, 0.0];
+        let bad_inf = vec![f32::INFINITY, 0.0, 0.0];
+        let combined = combine_embeddings(&[bad_nan.clone(), valid, bad_inf.clone()]);
+        assert!(combined.iter().all(|x| x.is_finite()));
+        let norm: f32 = combined.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        assert!((combined[0] - 0.6).abs() < 1e-6);
+        assert!((combined[1] - 0.8).abs() < 1e-6);
+
+        let all_bad = combine_embeddings(&[bad_nan, bad_inf]);
+        assert!(all_bad.iter().all(|&x| x == 0.0));
+    }
+
+    struct PartialFailReader;
+
+    impl VisionReader for PartialFailReader {
+        fn batch_size(&self) -> usize {
+            4
+        }
+
+        fn embed_texts(&mut self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(Vec::new())
+        }
+
+        fn analyze_images(
+            &mut self,
+            images: &[&RgbImage],
+        ) -> Result<Vec<VisionImageOutput>, String> {
+            if images.len() > 1 {
+                return Err("batch failed on one bad frame".into());
+            }
+            let img = images[0];
+            // Treat width == 1 as a failing frame, width == 2 as a NaN frame, others as valid.
+            if img.width() == 1 {
+                return Err("bad frame".into());
+            }
+            if img.width() == 2 {
+                return Ok(vec![VisionImageOutput {
+                    embedding: vec![f32::NAN; 3],
+                    faces: Vec::new(),
+                }]);
+            }
+            Ok(vec![VisionImageOutput {
+                embedding: vec![0.0, 3.0, 4.0],
+                faces: Vec::new(),
+            }])
+        }
+    }
+
+    #[test]
+    fn analyze_asset_media_survives_single_frame_failure_and_rejects_all_failed() {
+        let mut reader = PartialFailReader;
+        let bad = RgbImage::new(1, 1);
+        let nan = RgbImage::new(2, 2);
+        let good = RgbImage::new(4, 4);
+
+        let ok = reader
+            .analyze_asset_media(&[bad.clone(), nan.clone(), good])
+            .expect("should succeed with remaining valid frame");
+        assert!(ok.embedding.iter().all(|x| x.is_finite()));
+        let norm: f32 = ok.embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+
+        let err = reader.analyze_asset_media(&[bad, nan]);
+        assert!(err.is_err(), "all frames failing/NaN must return Err");
     }
 }

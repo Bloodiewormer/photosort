@@ -2,6 +2,7 @@
 #![allow(unsafe_code)]
 
 use crate::ThumbError;
+use fsguard::DestPath;
 use image::RgbImage;
 use std::path::Path;
 
@@ -72,6 +73,40 @@ pub mod imp {
             "Windows Media Foundation solo está disponible en Windows".into(),
         ))
     }
+
+    pub fn create_synthetic_video(
+        _dest: &DestPath,
+        _width: u32,
+        _height: u32,
+        _fps: u32,
+        _num_frames: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("Windows Media Foundation solo está disponible en Windows".into())
+    }
+}
+
+fn validate_frame_dimensions(width: u32, height: u32) -> Result<(), ThumbError> {
+    if width == 0 || height == 0 {
+        return Err(ThumbError::Decode(
+            "dimensiones de vídeo inválidas (0)".into(),
+        ));
+    }
+    if width > crate::MAX_DIMENSION || height > crate::MAX_DIMENSION {
+        return Err(ThumbError::Decode(format!(
+            "dimensiones de vídeo {width}x{height} superan el límite {}",
+            crate::MAX_DIMENSION
+        )));
+    }
+    let estimated_bytes = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4);
+    if estimated_bytes > crate::MAX_ALLOC_BYTES {
+        return Err(ThumbError::Decode(format!(
+            "búfer de fotograma ({estimated_bytes} bytes) supera el límite {}",
+            crate::MAX_ALLOC_BYTES
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -242,29 +277,74 @@ mod imp {
         }
     }
 
+    struct BufferLock<'a> {
+        buffer: &'a IMFMediaBuffer,
+        ptr: *mut u8,
+        current_len: usize,
+    }
+
+    impl<'a> BufferLock<'a> {
+        unsafe fn lock(buffer: &'a IMFMediaBuffer) -> WinResult<Self> {
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            let mut current_len = 0u32;
+            unsafe {
+                buffer.Lock(&mut ptr, None, Some(&mut current_len))?;
+            }
+            Ok(Self {
+                buffer,
+                ptr,
+                current_len: current_len as usize,
+            })
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            if self.ptr.is_null() || self.current_len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(self.ptr, self.current_len) }
+            }
+        }
+
+        fn as_mut_slice(&mut self, len: usize) -> Option<&mut [u8]> {
+            if self.ptr.is_null() {
+                None
+            } else {
+                Some(unsafe { std::slice::from_raw_parts_mut(self.ptr, len) })
+            }
+        }
+    }
+
+    impl Drop for BufferLock<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = self.buffer.Unlock();
+            }
+        }
+    }
+
+    fn read_stride(cur_type: &IMFMediaType, width: u32) -> (usize, bool) {
+        let default_stride = unsafe { cur_type.GetUINT32(&MF_MT_DEFAULT_STRIDE).ok() };
+        match default_stride {
+            Some(s) => {
+                let s_signed = s as i32;
+                (s_signed.unsigned_abs() as usize, s_signed < 0)
+            }
+            None => (width as usize * 4, false),
+        }
+    }
+
     fn read_single_frame(
         reader: &IMFSourceReader,
-        width: u32,
-        height: u32,
+        mut width: u32,
+        mut height: u32,
     ) -> Result<RgbImage, ThumbError> {
-        if width == 0 || height == 0 {
-            return Err(ThumbError::Decode(
-                "dimensiones de vídeo inválidas (0)".into(),
-            ));
-        }
+        validate_frame_dimensions(width, height)?;
 
         unsafe {
             let cur_type = reader
                 .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
                 .map_err(|e| ThumbError::Decode(format!("GetCurrentMediaType: {e}")))?;
-            let default_stride = cur_type.GetUINT32(&MF_MT_DEFAULT_STRIDE).ok();
-            let (stride, bottom_up) = match default_stride {
-                Some(s) => {
-                    let s_signed = s as i32;
-                    (s_signed.unsigned_abs() as usize, s_signed < 0)
-                }
-                None => (width as usize * 4, false),
-            };
+            let (mut stride, mut bottom_up) = read_stride(&cur_type, width);
 
             for _ in 0..100 {
                 let mut actual_stream_index = 0u32;
@@ -283,6 +363,20 @@ mod imp {
                     )
                     .map_err(|e| ThumbError::Decode(format!("ReadSample: {e}")))?;
 
+                if stream_flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
+                    let updated = reader
+                        .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
+                        .map_err(|e| ThumbError::Decode(format!("GetCurrentMediaType: {e}")))?;
+                    if let Ok(frame_size) = updated.GetUINT64(&MF_MT_FRAME_SIZE) {
+                        width = (frame_size >> 32) as u32;
+                        height = (frame_size & 0xFFFF_FFFF) as u32;
+                    }
+                    validate_frame_dimensions(width, height)?;
+                    let (s, bu) = read_stride(&updated, width);
+                    stride = s;
+                    bottom_up = bu;
+                }
+
                 if stream_flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                     break;
                 }
@@ -291,13 +385,9 @@ mod imp {
                     let buffer = sample.ConvertToContiguousBuffer().map_err(|e| {
                         ThumbError::Decode(format!("ConvertToContiguousBuffer: {e}"))
                     })?;
-                    let mut ptr: *mut u8 = std::ptr::null_mut();
-                    let mut current_len = 0u32;
-                    buffer
-                        .Lock(&mut ptr, None, Some(&mut current_len))
+                    let lock = BufferLock::lock(&buffer)
                         .map_err(|e| ThumbError::Decode(format!("buffer.Lock: {e}")))?;
-
-                    let buffer_slice = std::slice::from_raw_parts(ptr, current_len as usize);
+                    let buffer_slice = lock.as_slice();
                     let mut img = RgbImage::new(width, height);
 
                     for y in 0..height {
@@ -306,9 +396,13 @@ mod imp {
                         } else {
                             y as usize
                         };
-                        let row_offset = row_idx * stride;
+                        let Some(row_offset) = row_idx.checked_mul(stride) else {
+                            break;
+                        };
                         for x in 0..width {
-                            let px_offset = row_offset + (x as usize) * 4;
+                            let Some(px_offset) = row_offset.checked_add((x as usize) * 4) else {
+                                break;
+                            };
                             if px_offset + 3 <= buffer_slice.len() {
                                 let b = buffer_slice[px_offset];
                                 let g = buffer_slice[px_offset + 1];
@@ -318,7 +412,6 @@ mod imp {
                         }
                     }
 
-                    let _ = buffer.Unlock();
                     return Ok(img);
                 }
             }
@@ -374,7 +467,9 @@ mod imp {
         let media = open_reader(path)?;
 
         let mut frames = Vec::with_capacity(count);
-        let ratios: Vec<f32> = if count == 1 {
+        let ratios: Vec<f32> = if media.duration_hns == 0 {
+            vec![0.0]
+        } else if count == 1 {
             vec![0.1]
         } else {
             (0..count)
@@ -416,17 +511,26 @@ mod imp {
     }
 
     /// Creates a small synthetic MP4 video file using Windows Media Foundation IMFSinkWriter.
-    /// Used for testing that reading video frames leaves the file untouched.
+    /// Accepts only a `DestPath` validated outside every registered library root.
     pub fn create_synthetic_video(
-        path: &Path,
+        dest: &DestPath,
         width: u32,
         height: u32,
         fps: u32,
         num_frames: u32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        validate_frame_dimensions(width, height)?;
+        if fps == 0 {
+            return Err("fps debe ser mayor que 0".into());
+        }
+        let buffer_size = width
+            .checked_mul(height)
+            .and_then(|px| px.checked_mul(4))
+            .ok_or("desbordamiento de tamaño de fotograma")?;
         let _com = ComGuard::enter().map_err(|e| format!("ComGuard: {e}"))?;
         init_mf().map_err(|e| format!("init_mf: {e}"))?;
-        let path_wide: Vec<u16> = path
+        let path_wide: Vec<u16> = dest
+            .as_path()
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
@@ -458,26 +562,23 @@ mod imp {
             sink_writer.BeginWriting()?;
 
             let frame_duration_hns = (10_000_000 / fps as i64) as u64;
-            let buffer_size = width * height * 4;
 
             for i in 0..num_frames {
                 let media_buffer = MFCreateMemoryBuffer(buffer_size)?;
 
-                let mut ptr: *mut u8 = std::ptr::null_mut();
-                let mut max_len = 0u32;
-                let mut cur_len = 0u32;
-                media_buffer.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))?;
-
-                let slice = std::slice::from_raw_parts_mut(ptr, buffer_size as usize);
-                let color_val = ((i * 255 / num_frames.max(1)) % 256) as u8;
-                for px in slice.as_chunks_mut::<4>().0 {
-                    px[0] = color_val; // B
-                    px[1] = 128; // G
-                    px[2] = 255 - color_val; // R
-                    px[3] = 255; // X
+                {
+                    let mut lock = BufferLock::lock(&media_buffer)?;
+                    let slice = lock
+                        .as_mut_slice(buffer_size as usize)
+                        .ok_or("búfer nulo al bloquear memoria")?;
+                    let color_val = ((i * 255 / num_frames.max(1)) % 256) as u8;
+                    for px in slice.as_chunks_mut::<4>().0 {
+                        px[0] = color_val; // B
+                        px[1] = 128; // G
+                        px[2] = 255 - color_val; // R
+                        px[3] = 255; // X
+                    }
                 }
-
-                media_buffer.Unlock()?;
                 media_buffer.SetCurrentLength(buffer_size)?;
 
                 let sample = MFCreateSample()?;
@@ -491,5 +592,20 @@ mod imp {
             sink_writer.Finalize()?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_frame_dimensions_bounds() {
+        assert!(validate_frame_dimensions(3840, 2160).is_ok());
+        assert!(validate_frame_dimensions(0, 1080).is_err());
+        assert!(validate_frame_dimensions(1920, 0).is_err());
+        assert!(validate_frame_dimensions(crate::MAX_DIMENSION + 1, 100).is_err());
+        // 15_000 * 15_000 * 4 = 900 MB > 512 MB
+        assert!(validate_frame_dimensions(15_000, 15_000).is_err());
     }
 }

@@ -966,9 +966,8 @@ pub fn prepare_demo(
     {
         let _ = create_dir_dest(&video_dest);
         if let Some(file_dest) = video_dest.join_name(OsStr::new("clip_demo.mp4")) {
-            let path = file_dest.as_path().to_path_buf();
             let _ = std::thread::spawn(move || {
-                let _ = thumbs::create_synthetic_video(&path, 320, 240, 30, 5);
+                let _ = thumbs::create_synthetic_video(&file_dest, 320, 240, 30, 5);
             })
             .join();
         }

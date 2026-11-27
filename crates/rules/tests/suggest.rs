@@ -359,3 +359,24 @@ fn multiple_rules_can_fire_together() {
     );
     assert_eq!(out.len(), 4);
 }
+
+#[test]
+fn video_at_screen_resolution_is_not_classified_as_screenshot() {
+    let facts = Facts {
+        file_name: "clip.mp4".into(),
+        extension: "mp4".into(),
+        format: Some("MP4".into()),
+        width: 1920,
+        height: 1080,
+        has_camera_exif: false,
+        captured_at_ns: None,
+        captured_year: None,
+        media_type: catalog::MediaType::Video,
+        duration_ms: Some(12_000),
+    };
+    let out = suggest(&facts);
+    assert!(
+        find(&out, LabelKind::Category, "Capturas de pantalla").is_empty(),
+        "video 1920x1080 should not be suggested as screenshot: {out:?}"
+    );
+}

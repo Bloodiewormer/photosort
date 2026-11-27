@@ -1092,13 +1092,25 @@ fn run_engine_loop(
             let mut ocr_pending = Vec::new();
             for item in pending {
                 if thumbs::is_video_path(&item.path) {
-                    let _ = cat.mark_done(item.asset, OCR_STAGE, OCR_VERSION);
-                    if cat
-                        .is_asset_reviewed(item.asset, &enabled_specs)
-                        .unwrap_or(false)
-                    {
-                        session.session_done += 1;
-                        total_estimate = total_estimate.max(session.session_done);
+                    match cat.mark_done(item.asset, OCR_STAGE, OCR_VERSION) {
+                        Ok(()) => {
+                            let reviewed = cat
+                                .is_asset_reviewed(item.asset, &enabled_specs)
+                                .unwrap_or(false);
+                            if reviewed {
+                                session.session_done += 1;
+                                total_estimate = total_estimate.max(session.session_done);
+                            }
+                            emit(ReviewEngineEvent::AssetProgress {
+                                asset: item.asset,
+                                now_reviewed: reviewed,
+                            });
+                        }
+                        Err(e) => {
+                            session.failed.insert((item.asset, StageKind::Ocr));
+                            session.catalog_error(&e);
+                            break;
+                        }
                     }
                 } else {
                     ocr_pending.push(item);

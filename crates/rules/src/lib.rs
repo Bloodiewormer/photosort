@@ -457,7 +457,11 @@ fn has_screenshot_name(facts: &Facts) -> bool {
 }
 
 fn has_screen_dimensions_without_exif(facts: &Facts) -> bool {
-    if facts.has_camera_exif || facts.width == 0 || facts.height == 0 {
+    if facts.media_type == catalog::MediaType::Video
+        || facts.has_camera_exif
+        || facts.width == 0
+        || facts.height == 0
+    {
         return false;
     }
     let is_pc = PC_SCREEN_SIZES.iter().any(|&(w, h)| {

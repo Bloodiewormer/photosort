@@ -134,16 +134,27 @@ fn reading_video_frames_leaves_the_original_untouched() {
     fs::create_dir_all(&library).unwrap();
 
     let mp4 = library.join("clip.mp4");
-    if let Err(e) = thumbs::create_synthetic_video(&mp4, 320, 240, 30, 1) {
-        eprintln!("Media Foundation video creation skipped: {e}");
+    let mp4_dest = ensure_writable(&mp4, &[]).unwrap();
+    let create_res = thumbs::create_synthetic_video(&mp4_dest, 320, 240, 30, 5);
+    #[cfg(windows)]
+    create_res.expect("Media Foundation synthetic video creation must succeed on Windows");
+    #[cfg(not(windows))]
+    if create_res.is_err() {
         return;
     }
 
+    let corrupt_mp4 = library.join("corrupt.mp4");
+    fs::write(&corrupt_mp4, b"not a valid mp4 container").unwrap();
+
     let root = LibraryRoot::new(&library).unwrap();
+    // Guard must refuse creating a synthetic video inside a registered library root.
+    assert!(ensure_writable(&library.join("forbidden.mp4"), std::slice::from_ref(&root)).is_err());
+
     let cache = ensure_writable(&tmp.path().join("cache"), &[root]).unwrap();
     let thumbs = Thumbs::new(&cache, 100).unwrap();
 
     let sha = scanner::sha256_file(&mp4).unwrap();
+    let corrupt_sha = scanner::sha256_file(&corrupt_mp4).unwrap();
 
     // NTFS refreshes lazy directory attributes on first listing.
     snapshot(&library);
@@ -162,6 +173,12 @@ fn reading_video_frames_leaves_the_original_untouched() {
     let thumb_res2 = thumbs.get(&mp4, &sha).expect("thumb get 2");
     assert_eq!(thumb_res1, thumb_res2);
 
-    // 4. Assert library original is 100% byte-for-byte untouched and no sidecars created
+    // 4. Corrupt video fails cleanly without touching the file
+    assert!(thumbs::read_metadata(&corrupt_mp4).is_err());
+    assert!(thumbs::extract_frame(&corrupt_mp4, 0.1, 100).is_err());
+    assert!(thumbs::extract_frames(&corrupt_mp4, 4, 100).is_err());
+    assert!(thumbs.get(&corrupt_mp4, &corrupt_sha).is_err());
+
+    // 5. Assert library originals are 100% byte-for-byte untouched and no sidecars created
     assert_eq!(before, snapshot(&library));
 }

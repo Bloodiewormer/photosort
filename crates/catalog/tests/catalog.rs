@@ -161,6 +161,34 @@ fn indexing_recognizes_video_media_type_and_facets() {
         .find(|e| e.media_type == catalog::MediaType::Video)
         .expect("video entry");
     assert!(video_entry.path.ends_with("clip.mp4"));
+
+    // Combining media_type filter with another filter (label) narrows both.
+    let tag = cat.label(catalog::LabelKind::Tag, "favorito").unwrap();
+    cat.accept(video_entry.asset, tag).unwrap();
+    let only_fav_videos = cat
+        .entries(
+            &catalog::Filter {
+                media_types: vec![catalog::MediaType::Video],
+                require: vec![tag],
+                ..Default::default()
+            },
+            catalog::Sort::PathAsc,
+        )
+        .unwrap();
+    assert_eq!(only_fav_videos.len(), 1);
+    assert_eq!(only_fav_videos[0].asset, video_entry.asset);
+
+    let only_fav_photos = cat
+        .entries(
+            &catalog::Filter {
+                media_types: vec![catalog::MediaType::Image],
+                require: vec![tag],
+                ..Default::default()
+            },
+            catalog::Sort::PathAsc,
+        )
+        .unwrap();
+    assert!(only_fav_photos.is_empty());
 }
 
 #[test]
