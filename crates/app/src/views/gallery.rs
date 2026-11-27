@@ -243,7 +243,12 @@ pub fn draw(
             );
             outcome.last_columns = layout.columns;
 
-            let grid_rect = ui.available_rect_before_wrap();
+            // Registered before the cells so they sit on top of it and get their own clicks.
+            let bg_resp = ui.interact(
+                ui.available_rect_before_wrap(),
+                Id::unique("gallery_empty_area_menu"),
+                Sense::click(),
+            );
             let mut any_cell_secondary_clicked = false;
 
             ui.spacing_mut().item_spacing = Vec2::splat(theme::CELL_SPACING);
@@ -505,12 +510,6 @@ pub fn draw(
                 },
             );
 
-            // Empty gallery area context menu (when right-clicking background, not a cell)
-            let bg_resp = ui.interact(
-                grid_rect,
-                Id::unique("gallery_empty_area_menu"),
-                Sense::click(),
-            );
             if !any_cell_secondary_clicked {
                 bg_resp.context_menu(|ui| {
                     if ui.button("Seleccionar todo").clicked() {
