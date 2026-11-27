@@ -1,13 +1,23 @@
 //! People and incremental face grouping.
 //!
 //! Faces detected by YuNet are incrementally assigned to persons using SFace's 128-dimensional
-//! normalized embeddings and cosine similarity (threshold 0.363). Unassigned faces create new
+//! normalized embeddings and cosine similarity (threshold 0.5). Unassigned faces create new
 //! unnamed persons. User-assigned faces are permanent and never overridden by analysis.
 
 use crate::{AssetId, Catalog, CatalogError};
 use rusqlite::{OptionalExtension, params};
 
-pub const SFACE_SIMILARITY_THRESHOLD: f32 = 0.363;
+pub const SFACE_SIMILARITY_THRESHOLD: f32 = 0.5;
+
+/// Measured on 804 faces of a real sample (docs/vision.md): below this score or size, or in
+/// manga and illustrations, YuNet finds drawn or blurred faces that SFace cannot tell apart.
+pub const GROUP_MIN_SCORE: f32 = 0.9;
+pub const GROUP_MIN_SIDE_PX: f32 = 40.0;
+
+/// Whether a detected face is clear enough to recognise a person from it.
+pub fn is_groupable_face(score: f32, bbox: [f32; 4]) -> bool {
+    score >= GROUP_MIN_SCORE && (bbox[2] - bbox[0]).min(bbox[3] - bbox[1]) >= GROUP_MIN_SIDE_PX
+}
 /// Maximum number of highest-score face embeddings averaged to build a person's centroid.
 const MAX_CENTROID_FACES: usize = 64;
 
@@ -40,6 +50,9 @@ pub struct FaceDetail {
     pub user_assigned: bool,
     pub similarity: Option<f32>,
     pub has_embedding: bool,
+    /// Longest side of the original image, when known: faces are stored in the coordinates of
+    /// the image decoded to at most 640 px.
+    pub image_longest: Option<u32>,
 }
 
 /// Encodes a 128-dimensional f32 embedding into a 512-byte Little-Endian blob.
@@ -401,8 +414,9 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT af.id, af.asset_id, af.face_idx, af.x1, af.y1, af.x2, af.y2, af.score,
                     af.landmarks, af.person_id, p.name, af.user_assigned, af.similarity,
-                    af.embedding IS NOT NULL
+                    af.embedding IS NOT NULL, max(a.width, a.height)
              FROM asset_face af
+             JOIN asset a ON a.id = af.asset_id
              LEFT JOIN person p ON p.id = af.person_id
              WHERE af.asset_id = ?1
              ORDER BY af.face_idx ASC",
@@ -431,6 +445,7 @@ impl Catalog {
                 user_assigned: r.get::<_, i64>(11)? == 1,
                 similarity: r.get::<_, Option<f64>>(12)?.map(|s| s as f32),
                 has_embedding: r.get::<_, i64>(13)? == 1,
+                image_longest: r.get::<_, Option<i64>>(14)?.map(|v| v as u32),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -441,8 +456,9 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT af.id, af.asset_id, af.face_idx, af.x1, af.y1, af.x2, af.y2, af.score,
                     af.landmarks, af.person_id, p.name, af.user_assigned, af.similarity,
-                    af.embedding IS NOT NULL
+                    af.embedding IS NOT NULL, max(a.width, a.height)
              FROM asset_face af
+             JOIN asset a ON a.id = af.asset_id
              JOIN person p ON p.id = af.person_id
              WHERE af.person_id = ?1
              ORDER BY af.score DESC, af.id ASC",
@@ -471,6 +487,7 @@ impl Catalog {
                 user_assigned: r.get::<_, i64>(11)? == 1,
                 similarity: r.get::<_, Option<f64>>(12)?.map(|s| s as f32),
                 has_embedding: r.get::<_, i64>(13)? == 1,
+                image_longest: r.get::<_, Option<i64>>(14)?.map(|v| v as u32),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -606,7 +623,8 @@ impl Catalog {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT asset_id
              FROM asset_face
-             WHERE embedding IS NULL
+             WHERE embedding IS NULL AND score >= 0.9 AND min(x2 - x1, y2 - y1) >= 40
+               AND asset_id NOT IN (SELECT al.asset_id FROM asset_label al JOIN label l ON l.id = al.label_id WHERE l.kind = 'category' AND l.name IN ('Manga', 'Ilustración') AND al.status <> 'rejected')
              ORDER BY asset_id ASC",
         )?;
         let rows = stmt.query_map([], |r| Ok(AssetId(r.get(0)?)))?;

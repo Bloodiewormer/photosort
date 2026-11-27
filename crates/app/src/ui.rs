@@ -499,11 +499,18 @@ impl PhotosortApp {
                 self.inspector.asset_work = cat.asset_work(asset).unwrap_or(None);
                 self.inspector.ocr_lines = cat.ocr_lines(asset).unwrap_or_default();
                 self.inspector.ocr_done = cat.has_ocr_done(asset).unwrap_or(false);
+                let drawn = cat.labels_of(asset).unwrap_or_default().iter().any(|a| {
+                    a.kind == catalog::LabelKind::Category
+                        && a.status != Status::Rejected
+                        && (a.name == catalog::TYPE_MANGA || a.name == catalog::TYPE_ILLUSTRATION)
+                });
+                let clear = |score, bbox| !drawn && catalog::is_groupable_face(score, bbox);
                 self.inspector.faces = cat.asset_faces(asset).unwrap_or_default();
+                self.inspector.faces.retain(|f| clear(f.score, f.bbox));
                 self.inspector.vision_done = cat.has_vision_done(asset).unwrap_or(false);
                 let details = cat.asset_face_details(asset).unwrap_or_default();
                 let mut face_details = Vec::with_capacity(details.len());
-                for d in details {
+                for d in details.into_iter().filter(|d| clear(d.score, d.bbox)) {
                     let name = d.person_id.and_then(|pid| {
                         self.persons
                             .iter()
@@ -1023,7 +1030,10 @@ impl PhotosortApp {
                 Err(_) => continue,
             };
 
-            let pending_faces: Vec<_> = faces.into_iter().filter(|f| !f.has_embedding).collect();
+            let pending_faces: Vec<_> = faces
+                .into_iter()
+                .filter(|f| !f.has_embedding && catalog::is_groupable_face(f.score, f.bbox))
+                .collect();
             if pending_faces.is_empty() {
                 continue;
             }

@@ -171,7 +171,9 @@ fn draw_face_chip(
         // Image coordinates in YuNet are in decoded px (longest edge <= 640px)
         let tex_size = tex.size_vec2();
         let longest = tex_size.x.max(tex_size.y).max(1.0);
-        let scale = 640.0f32 / longest;
+        // Images smaller than 640 px were not enlarged for detection.
+        let decoded_longest = face.image_longest.map_or(640.0, |l| (l as f32).min(640.0));
+        let scale = decoded_longest / longest;
         let dec_w = (tex_size.x * scale).max(1.0);
         let dec_h = (tex_size.y * scale).max(1.0);
         let u0 = ((x1 - margin_x) / dec_w).clamp(0.0, 1.0);
@@ -319,10 +321,17 @@ pub fn draw(
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // Top-aligned wrap so cards of different heights line up.
-                    ui.spacing_mut().item_spacing = Vec2::splat(theme::SPACE_MD);
-                    ui.with_layout(Layout::left_to_right(Align::Min).with_main_wrap(true), |ui| {
-                            for person in &filtered_persons {
+                    // Rows of fixed-width cards, centered, top-aligned.
+                    let gap = theme::SPACE_MD;
+                    let card = 320.0 + 2.0 * theme::SPACE_MD + 2.0;
+                    let avail = ui.available_width();
+                    let cols = (((avail + gap) / (card + gap)).floor() as usize).max(1);
+                    let used = cols as f32 * card + (cols - 1) as f32 * gap;
+                    ui.spacing_mut().item_spacing = Vec2::splat(gap);
+                    for row in filtered_persons.chunks(cols) {
+                        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                            ui.add_space(((avail - used) / 2.0).max(0.0) - gap);
+                            for person in row {
                                 draw_person_card(
                                     ui,
                                     palette,
@@ -336,6 +345,7 @@ pub fn draw(
                                 );
                             }
                         });
+                    }
                 });
         });
 

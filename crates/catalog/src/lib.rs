@@ -24,8 +24,8 @@ pub use ocr::{
     ocr_search_key,
 };
 pub use persons::{
-    FaceDetail, Person, PersonId, SFACE_SIMILARITY_THRESHOLD, cosine_similarity_128,
-    decode_face_embedding, encode_face_embedding,
+    FaceDetail, GROUP_MIN_SCORE, GROUP_MIN_SIDE_PX, Person, PersonId, SFACE_SIMILARITY_THRESHOLD,
+    cosine_similarity_128, decode_face_embedding, encode_face_embedding, is_groupable_face,
 };
 pub use vision::{
     CAT_ANIMALS, CAT_ANIME, CAT_COMPUTERS_HARDWARE, CAT_MANHWA, CAT_NATURE_LANDSCAPES,
