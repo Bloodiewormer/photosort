@@ -122,7 +122,7 @@ pub fn validate_destination(path: &Path, roots: &[LibraryRoot]) -> Result<DestPa
         Err(GuardError::ParentDirComponent(_)) => {
             Err("La ruta de destino no puede contener «..». Elige una carpeta válida.".into())
         }
-        Err(GuardError::Io(e)) => Err(format!("No se pudo validar la carpeta de destino: {e}")),
+        Err(e) => Err(format!("No se pudo validar la carpeta de destino: {e}")),
     }
 }
 

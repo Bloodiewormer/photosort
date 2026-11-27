@@ -969,16 +969,14 @@ fn write_demo_file(library_dest: &DestPath, rel_path: &Path, bytes: &[u8]) -> Re
         for comp in parent.components() {
             current = current
                 .join_name(comp.as_os_str())
-                .ok_or_else(|| format!("nombre de subcarpeta inválido: {}", rel_path.display()))?;
+                .map_err(|e| e.to_string())?;
         }
         create_dir_dest(&current).map_err(|e| e.to_string())?;
     }
     let name = rel_path
         .file_name()
         .ok_or_else(|| format!("falta el nombre de archivo: {}", rel_path.display()))?;
-    let file_dest = current
-        .join_name(name)
-        .ok_or_else(|| format!("nombre de archivo inválido: {}", rel_path.display()))?;
+    let file_dest = current.join_name(name).map_err(|e| e.to_string())?;
     write_bytes_dest(&file_dest, bytes).map_err(|e| e.to_string())
 }
 
@@ -1005,10 +1003,10 @@ pub fn prepare_demo(
 
     let library_dest = base_dest
         .join_name(OsStr::new("library"))
-        .ok_or_else(|| "nombre inválido para library".to_string())?;
+        .map_err(|e| e.to_string())?;
     let data_dest = base_dest
         .join_name(OsStr::new("data"))
-        .ok_or_else(|| "nombre inválido para data".to_string())?;
+        .map_err(|e| e.to_string())?;
     create_dir_dest(&library_dest).map_err(|e| e.to_string())?;
     create_dir_dest(&data_dest).map_err(|e| e.to_string())?;
 
@@ -1033,10 +1031,10 @@ pub fn prepare_demo(
     }
 
     if count >= DEFAULT_DEMO_COUNT
-        && let Some(video_dest) = library_dest.join_name(OsStr::new("videos"))
+        && let Ok(video_dest) = library_dest.join_name(OsStr::new("videos"))
     {
         let _ = create_dir_dest(&video_dest);
-        if let Some(file_dest) = video_dest.join_name(OsStr::new("clip_demo.mp4")) {
+        if let Ok(file_dest) = video_dest.join_name(OsStr::new("clip_demo.mp4")) {
             let _ = std::thread::spawn(move || {
                 let _ = thumbs::create_synthetic_video(&file_dest, 320, 240, 30, 5);
             })

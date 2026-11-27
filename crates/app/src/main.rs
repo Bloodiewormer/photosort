@@ -241,12 +241,12 @@ fn run_self_test() -> bool {
         ] {
             let p = lib_dest
                 .join_name(OsStr::new(name))
-                .ok_or_else(|| "invalid png name".to_string())?;
+                .map_err(|e| e.to_string())?;
             write_synthetic_png(&p, 32, 24, color)?;
         }
         let thumb_p = thumbs_dest
             .join_name(OsStr::new("fake_thumb.png"))
-            .ok_or_else(|| "invalid thumb name".to_string())?;
+            .map_err(|e| e.to_string())?;
         write_synthetic_png(&thumb_p, 16, 12, [200, 200, 50, 255])?;
         Ok(thumb_p.as_path().to_path_buf())
     })();

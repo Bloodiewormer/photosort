@@ -129,7 +129,46 @@ fn rejects_a_path_reached_through_a_junction_into_the_library() {
     )));
 }
 
-/// Past 260 characters the resolved path keeps the `\?\` prefix that the short library root lacks.
+#[cfg(windows)]
+#[test]
+fn links_that_appear_under_a_validated_folder_are_refused() {
+    let f = fixture();
+    let export = f.tmp.path().join("export");
+    let elsewhere = f.tmp.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(export.join("real")).unwrap();
+    let dest = ensure_writable(&export, &f.roots).unwrap();
+    let later = dest.join_name("later".as_ref()).unwrap();
+    for (name, target) in [
+        ("later", f.library.clone()),
+        ("outside", elsewhere),
+        ("inside", export.join("real")),
+        // Its target does not exist, so nothing proves where it leads.
+        ("broken", f.library.join("gone")),
+    ] {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(export.join(name))
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "could not create junction: {out:?}");
+    }
+
+    assert!(is_inside_library(later.verify()));
+    assert!(is_inside_library(dest.join_name("later".as_ref())));
+    assert!(matches!(
+        dest.join_name("outside".as_ref()),
+        Err(GuardError::LeavesDestination { .. })
+    ));
+    assert!(dest.join_name("inside".as_ref()).is_ok());
+    assert!(matches!(
+        dest.join_name("broken".as_ref()),
+        Err(GuardError::BrokenLink(_))
+    ));
+}
+
+/// Past 260 characters the resolved path keeps the `\\?\` prefix that the short library root lacks.
 #[cfg(windows)]
 #[test]
 fn rejects_a_path_inside_the_library_longer_than_max_path() {

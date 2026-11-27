@@ -311,7 +311,7 @@ pub fn load(data_dir: &Path) -> LoadOutcome {
         },
         Err(e) => {
             if let Ok(dir_dest) = ensure_writable(data_dir, &[])
-                && let (Some(src), Some(bak)) = (
+                && let (Ok(src), Ok(bak)) = (
                     dir_dest.join_name(OsStr::new(SETTINGS_FILE)),
                     dir_dest.join_name(OsStr::new(SETTINGS_BAD)),
                 )
@@ -335,10 +335,10 @@ pub fn save(data_dir: &Path, settings: &Settings) -> Result<(), SettingsError> {
     create_dir_dest(&dir_dest)?;
     let tmp = dir_dest
         .join_name(OsStr::new(SETTINGS_TMP))
-        .ok_or_else(|| io::Error::other("invalid settings temp name"))?;
+        .map_err(io::Error::other)?;
     let target = dir_dest
         .join_name(OsStr::new(SETTINGS_FILE))
-        .ok_or_else(|| io::Error::other("invalid settings file name"))?;
+        .map_err(io::Error::other)?;
     let bytes = serde_json::to_vec_pretty(settings)?;
     write_atomic_dest(&tmp, &target, &bytes)?;
     Ok(())
@@ -350,5 +350,5 @@ pub fn db_dest_path(data_dir: &Path, roots: &[LibraryRoot]) -> Result<DestPath, 
     create_dir_dest(&dir_dest)?;
     dir_dest
         .join_name(OsStr::new(CATALOG_DB))
-        .ok_or_else(|| SettingsError::Io(io::Error::other("invalid catalog file name")))
+        .map_err(|e| SettingsError::Io(io::Error::other(e)))
 }

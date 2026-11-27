@@ -86,3 +86,7 @@ Formato: fecha · decisión · alternativas · porqué.
   - La integración se realiza directamente en `thumbs::decode`: esto habilita miniaturas, OCR y modelos de visión sin alterar sus llamadas en el resto de la aplicación.
   - Si el sistema carece de códec (p. ej. falta de extensiones HEIF o AV1 de Windows), la imagen se indexa normalmente en el catálogo sin miniatura y el fallo se registra en `stage_error` bajo el motivo saneado «Códec de imagen no disponible», análogo al manejo de vídeos sin códec.
   - Las imágenes con extensión `.jfif` se reconocen e indexan como imágenes en el escáner y se decodifican como JPEG en `thumbs` y `rules`.
+- **2026-11-27 · El guardián de rutas vuelve a resolver cada ruta derivada** (issue #63).
+  - `DestPath` guarda las raíces y la carpeta con las que se validó. `join_name` y `verify` resuelven la ruta real y rechazan la que cae en una biblioteca, sale de esa carpeta por un enlace o pasa por un enlace roto. La exportación lo comprueba también después de crear cada carpeta y antes de escribir; si falla, falla ese elemento y sigue con los demás.
+  - La comparación ignora el prefijo `\\?\` que `dunce` conserva en rutas largas: sin esto, una ruta de más de 260 caracteres dentro de una biblioteca no se reconocía como tal.
+  - Límite conocido: comprobar y escribir son dos pasos. Un enlace que otro programa cree justo entre ambos no se detecta; cerrarlo exigiría abrir cada componente por manejador.
