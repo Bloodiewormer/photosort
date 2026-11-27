@@ -1,4 +1,5 @@
 use fsguard::DestPath;
+pub mod video;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
@@ -14,6 +15,10 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+pub use video::{
+    VideoMetadata, create_synthetic_video, extract_frame, extract_frames, is_video_extension,
+    is_video_path, read_metadata,
+};
 
 const JPEG_QUALITY: u8 = 85;
 const MAX_DIMENSION: u32 = 20_000;
@@ -97,10 +102,16 @@ impl Thumbs {
             return Ok(png_target.as_path().to_path_buf());
         }
 
-        let ext_format = format_for_extension(source)?;
-        let resized = decode_and_resize(source, ext_format, self.max_px)?;
+        let (resized, is_png) = if is_video_path(source) {
+            let frame = extract_frame(source, 0.1, self.max_px)?;
+            (DynamicImage::ImageRgb8(frame), false)
+        } else {
+            let ext_format = format_for_extension(source)?;
+            let img = decode_and_resize(source, ext_format, self.max_px)?;
+            let is_png = img.color().has_alpha();
+            (img, is_png)
+        };
 
-        let is_png = resized.color().has_alpha();
         let target = if is_png { png_target } else { jpg_target };
 
         let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -158,8 +169,14 @@ fn map_image_error(err: ImageError) -> ThumbError {
 
 /// Decodes `source` read-only, upright per its EXIF orientation, with the thumbnail size limits.
 /// Images larger than `max_px` on a side are scaled down in memory.
+/// For video files, extracts a frame near 10% of the video duration.
 pub fn decode(source: &Path, max_px: u32) -> Result<DynamicImage, ThumbError> {
-    decode_and_resize(source, format_for_extension(source)?, max_px)
+    if is_video_path(source) {
+        let frame = extract_frame(source, 0.1, max_px)?;
+        Ok(DynamicImage::ImageRgb8(frame))
+    } else {
+        decode_and_resize(source, format_for_extension(source)?, max_px)
+    }
 }
 
 fn decode_and_resize(

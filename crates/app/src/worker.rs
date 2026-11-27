@@ -34,6 +34,15 @@ impl ThumbnailProvider for NoThumbnails {
 
 /// Decodes an image file opened strictly read-only, optionally downscaling its longest edge.
 pub fn decode_image_file(path: &Path, max_edge: Option<u32>) -> Result<ColorImage, String> {
+    if thumbs::is_video_path(path) {
+        let frame = thumbs::extract_frame(path, 0.1, max_edge.unwrap_or(u32::MAX))
+            .map_err(|e| e.to_string())?;
+        let rgba = image::DynamicImage::ImageRgb8(frame).to_rgba8();
+        return Ok(ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            rgba.as_raw(),
+        ));
+    }
     let file = File::open(path).map_err(|e| e.to_string())?;
     let reader = ImageReader::new(BufReader::new(file))
         .with_guessed_format()

@@ -14,6 +14,8 @@ fn sample_entries(n: usize) -> Vec<Entry> {
             height: None,
             format: None,
             captured_at_ns: None,
+            media_type: catalog::MediaType::Image,
+            duration_ms: None,
         })
         .collect()
 }

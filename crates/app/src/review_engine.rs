@@ -973,7 +973,7 @@ fn run_engine_loop(
                                     true,
                                 )));
 
-                                let mut decoded: Vec<(AssetId, RgbImage)> =
+                                let mut decoded: Vec<(AssetId, Vec<RgbImage>)> =
                                     Vec::with_capacity(sub.len());
                                 for item in sub {
                                     if should_interrupt(&shared, cfg_gen) {
@@ -981,14 +981,14 @@ fn run_engine_loop(
                                     }
                                     let dec = std::panic::catch_unwind(
                                         std::panic::AssertUnwindSafe(|| {
-                                            reader.decode_image(&item.path)
+                                            reader.decode_media(&item.path)
                                         }),
                                     )
                                     .unwrap_or_else(|_| {
-                                        Err("error interno al decodificar la imagen".into())
+                                        Err("error interno al decodificar el archivo".into())
                                     });
                                     match dec {
-                                        Ok(img) => decoded.push((item.asset, img)),
+                                        Ok(frames) => decoded.push((item.asset, frames)),
                                         Err(reason) => {
                                             session.record_failure(
                                                 &cat,
@@ -1087,6 +1087,36 @@ fn run_engine_loop(
                     Vec::new()
                 }
             };
+
+            // Videos do not undergo OCR: mark them done for OCR immediately.
+            let mut ocr_pending = Vec::new();
+            for item in pending {
+                if thumbs::is_video_path(&item.path) {
+                    match cat.mark_done(item.asset, OCR_STAGE, OCR_VERSION) {
+                        Ok(()) => {
+                            let reviewed = cat
+                                .is_asset_reviewed(item.asset, &enabled_specs)
+                                .unwrap_or(false);
+                            if reviewed {
+                                session.session_done += 1;
+                                total_estimate = total_estimate.max(session.session_done);
+                            }
+                            emit(ReviewEngineEvent::AssetProgress {
+                                asset: item.asset,
+                                now_reviewed: reviewed,
+                            });
+                        }
+                        Err(e) => {
+                            session.failed.insert((item.asset, StageKind::Ocr));
+                            session.catalog_error(&e);
+                            break;
+                        }
+                    }
+                } else {
+                    ocr_pending.push(item);
+                }
+            }
+            let pending = ocr_pending;
 
             if !pending.is_empty() {
                 // Never hold Vision and OCR in GPU memory simultaneously.
@@ -1301,39 +1331,44 @@ fn count_remaining_work(
 
 fn run_vision_batch(
     reader: &mut dyn VisionReader,
-    decoded: &[(AssetId, RgbImage)],
+    decoded: &[(AssetId, Vec<RgbImage>)],
 ) -> Vec<(AssetId, Result<VisionImageOutput, String>)> {
-    let img_refs: Vec<&RgbImage> = decoded.iter().map(|(_, img)| img).collect();
-    let batch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        reader.analyze_images(&img_refs)
-    }))
-    .unwrap_or_else(|_| Err("error interno en inferencia de visión".into()));
+    let all_single = decoded.iter().all(|(_, f)| f.len() == 1);
+    if all_single {
+        let img_refs: Vec<&RgbImage> = decoded.iter().map(|(_, f)| &f[0]).collect();
+        let batch_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reader.analyze_images(&img_refs)
+        }))
+        .unwrap_or_else(|_| Err("error interno en inferencia de visión".into()));
 
-    match batch_res {
-        Ok(outputs) if outputs.len() == decoded.len() => decoded
+        match batch_res {
+            Ok(outputs) if outputs.len() == decoded.len() => decoded
+                .iter()
+                .zip(outputs)
+                .map(|((asset, _), out)| (*asset, Ok(out)))
+                .collect(),
+            _ => decoded
+                .iter()
+                .map(|(asset, frames)| {
+                    let single = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        reader.analyze_asset_media(frames)
+                    }))
+                    .unwrap_or_else(|_| Err("error interno en inferencia de visión".into()));
+                    (*asset, single)
+                })
+                .collect(),
+        }
+    } else {
+        decoded
             .iter()
-            .zip(outputs)
-            .map(|((asset, _), out)| (*asset, Ok(out)))
-            .collect(),
-        _ if decoded.len() > 1 => decoded
-            .iter()
-            .map(|(asset, img)| {
-                let single = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    reader.analyze_images(&[img])
+            .map(|(asset, frames)| {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reader.analyze_asset_media(frames)
                 }))
-                .unwrap_or_else(|_| Err("error interno en inferencia de visión".into()))
-                .and_then(|mut v| v.pop().ok_or_else(|| "resultado vacío".to_string()));
-                (*asset, single)
+                .unwrap_or_else(|_| Err("error interno en inferencia de visión".into()));
+                (*asset, res)
             })
-            .collect(),
-        Err(e) => decoded
-            .iter()
-            .map(|(asset, _)| (*asset, Err(e.clone())))
-            .collect(),
-        Ok(_) => decoded
-            .iter()
-            .map(|(asset, _)| (*asset, Err("cantidad de resultados inesperada".into())))
-            .collect(),
+            .collect()
     }
 }
 

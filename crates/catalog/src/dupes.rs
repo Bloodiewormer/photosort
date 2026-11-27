@@ -50,7 +50,8 @@ impl DuplicateGroup {
 
 const DUPLICATE_GROUPS_SQL: &str =
     "SELECT l.asset_id, l.path, a.sha256, a.size, l.size, l.mtime_ns,
-            a.width, a.height, a.format, a.captured_at_ns
+            a.width, a.height, a.format, a.captured_at_ns,
+            a.media_type, a.duration_ms
      FROM location l
      JOIN asset a ON a.id = l.asset_id
      WHERE l.missing = 0 AND l.asset_id IN (
@@ -70,6 +71,12 @@ fn dup_row_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, u64, Entry)
     let height: Option<i64> = r.get(7)?;
     let format: Option<String> = r.get(8)?;
     let captured_at_ns: Option<i64> = r.get(9)?;
+    let mtype_str: Option<String> = r.get(10)?;
+    let media_type = mtype_str
+        .as_deref()
+        .and_then(crate::MediaType::from_str)
+        .unwrap_or(crate::MediaType::Image);
+    let duration_ms: Option<i64> = r.get(11)?;
     Ok((
         asset_id,
         asset_size,
@@ -83,6 +90,8 @@ fn dup_row_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, u64, Entry)
             height: height.and_then(|v| u32::try_from(v).ok()),
             format,
             captured_at_ns,
+            media_type,
+            duration_ms: duration_ms.and_then(|v| u64::try_from(v).ok()),
         },
     ))
 }
@@ -111,7 +120,8 @@ impl Catalog {
         let marks = vec!["?"; roots.len()].join(",");
         let sql = format!(
             "SELECT l.asset_id, l.path, a.sha256, a.size, l.size, l.mtime_ns,
-                    a.width, a.height, a.format, a.captured_at_ns
+                    a.width, a.height, a.format, a.captured_at_ns,
+                    a.media_type, a.duration_ms
              FROM location l
              JOIN asset a ON a.id = l.asset_id
              WHERE l.missing = 0 AND l.root IN ({marks}) AND l.asset_id IN (
@@ -303,7 +313,8 @@ impl Catalog {
         // Hydrate one representative Entry per asset_id within roots.
         let entry_sql = format!(
             "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
-                    a.width, a.height, a.format, a.captured_at_ns
+                    a.width, a.height, a.format, a.captured_at_ns,
+                    a.media_type, a.duration_ms
              FROM location l JOIN asset a ON a.id = l.asset_id
              WHERE l.asset_id = ? AND l.missing = 0 AND l.root IN ({marks})
              ORDER BY l.path ASC

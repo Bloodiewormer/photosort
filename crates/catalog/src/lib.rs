@@ -41,6 +41,7 @@ pub use works::{
 
 use fsguard::{DestPath, LibraryRoot};
 use rusqlite::{Connection, OptionalExtension, params};
+pub use scanner::MediaType;
 use std::fmt;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
@@ -55,6 +56,8 @@ CREATE TABLE IF NOT EXISTS asset (
     id             INTEGER PRIMARY KEY,
     sha256         TEXT NOT NULL UNIQUE,
     size           INTEGER NOT NULL,
+    media_type     TEXT NOT NULL DEFAULT 'image',
+    duration_ms    INTEGER,
     width          INTEGER,
     height         INTEGER,
     format         TEXT,
@@ -366,6 +369,8 @@ impl Catalog {
         drop(stmt);
 
         let required: &[(&str, &str)] = &[
+            ("media_type", "TEXT NOT NULL DEFAULT 'image'"),
+            ("duration_ms", "INTEGER"),
             ("width", "INTEGER"),
             ("height", "INTEGER"),
             ("format", "TEXT"),
@@ -401,6 +406,7 @@ impl Catalog {
 
     /// Stores read-only image metadata (dimensions, normalized format, EXIF capture timestamp and
     /// year) on an asset. Never touches labels or user decisions.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_asset_metadata(
         &self,
         asset: AssetId,
@@ -409,10 +415,17 @@ impl Catalog {
         format: Option<&str>,
         captured_at_ns: Option<i64>,
         captured_year: Option<i32>,
+        duration_ms: Option<u64>,
     ) -> Result<(), CatalogError> {
+        let mtype = if duration_ms.is_some() {
+            Some("video")
+        } else {
+            None
+        };
         self.conn.execute(
             "UPDATE asset
-             SET width = ?2, height = ?3, format = ?4, captured_at_ns = ?5, captured_year = ?6
+             SET width = ?2, height = ?3, format = ?4, captured_at_ns = ?5, captured_year = ?6,
+                 duration_ms = ?7, media_type = COALESCE(?8, media_type)
              WHERE id = ?1",
             params![
                 asset.0,
@@ -421,6 +434,8 @@ impl Catalog {
                 format,
                 captured_at_ns,
                 captured_year.map(i64::from),
+                duration_ms.map(|d| d as i64),
+                mtype,
             ],
         )?;
         Ok(())
@@ -506,9 +521,15 @@ impl Catalog {
                             report.hashed += 1;
                             {
                                 let mut stmt = tx.prepare_cached(
-                                    "INSERT OR IGNORE INTO asset (sha256, size) VALUES (?1, ?2)",
+                                    "INSERT INTO asset (sha256, size, media_type) VALUES (?1, ?2, ?3)
+                                     ON CONFLICT(sha256) DO UPDATE SET media_type = ?3
+                                     WHERE ?3 = 'video' AND media_type = 'image'",
                                 )?;
-                                stmt.execute(params![sha, file.size as i64])?;
+                                stmt.execute(params![
+                                    sha,
+                                    file.size as i64,
+                                    file.media_type.as_str()
+                                ])?;
                             }
                             let asset_id: i64 = {
                                 let mut stmt =
