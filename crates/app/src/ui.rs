@@ -984,7 +984,11 @@ impl PhotosortApp {
                     matched_assets: 0,
                     suggestions: 0,
                 };
-                self.works_worker = Some(WorksWorker::start(db, Some(notify)));
+                self.works_worker = Some(WorksWorker::start_in_roots(
+                    db,
+                    Some(self.settings.library_roots.clone()),
+                    Some(notify),
+                ));
                 self.sync_engine_yield();
             }
             Err(e) => self.banner_error = Some(e.to_string()),

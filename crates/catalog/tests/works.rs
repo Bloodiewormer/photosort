@@ -1830,3 +1830,243 @@ fn ordering_of_pages_without_chapter_grouped_by_folder_and_not_mixed_with_chapte
         "pages without chapter must follow numbered chapters and be grouped by folder then page"
     );
 }
+
+#[test]
+fn folder_proposals_do_not_overwrite_suggested_belonging_to_another_work() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("manga/Mi Obra/Capítulo 1/001.png", b"p1"),
+        ("manga/Mi Obra/Capítulo 1/002.png", b"p2"),
+        (
+            "manga/Mi Obra/Capítulo 1/Otra Obra - Cap 5 - 01.png",
+            b"other",
+        ),
+        ("manga/Otra Carpeta/Mi Obra - Cap 2 - 01.png", b"other_dir"),
+    ]);
+
+    let mi_obra = cat.create_work("Mi Obra").unwrap();
+    let otra_obra = cat.create_work("Otra Obra").unwrap();
+
+    cat.apply_filename_works(None).unwrap();
+    let proposed = cat.apply_folder_work_groups(None).unwrap();
+    assert_eq!(proposed, 2, "only the 2 unowned pages should be proposed");
+
+    // The file already suggested for Otra Obra by filename must keep Otra Obra.
+    let aw_other = cat
+        .asset_work(ids["manga/Mi Obra/Capítulo 1/Otra Obra - Cap 5 - 01.png"])
+        .unwrap()
+        .expect("Otra Obra filename suggestion must not be lost");
+    assert_eq!(
+        (aw_other.work, aw_other.status),
+        (otra_obra, Status::Suggested)
+    );
+
+    // Accepting the group must only confirm Mi Obra in that folder, not Otra Obra or other folders.
+    let groups = cat.list_proposed_work_groups(None).unwrap();
+    assert_eq!(groups.len(), 1);
+    let accepted = cat
+        .accept_proposed_work_group(&groups[0].folder, mi_obra)
+        .unwrap();
+    assert_eq!(accepted, 2);
+
+    let aw_other_after = cat
+        .asset_work(ids["manga/Mi Obra/Capítulo 1/Otra Obra - Cap 5 - 01.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (aw_other_after.work, aw_other_after.status),
+        (otra_obra, Status::Suggested)
+    );
+
+    let aw_other_dir = cat
+        .asset_work(ids["manga/Otra Carpeta/Mi Obra - Cap 2 - 01.png"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (aw_other_dir.work, aw_other_dir.status),
+        (mi_obra, Status::Suggested),
+        "accepting a group must not touch suggestions in another folder"
+    );
+}
+
+#[test]
+fn dismiss_group_only_removes_folder_suggestions_and_keeps_filename_and_other_folders() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        (
+            "manga/relojero_cap1/Crónicas del Relojero - Cap 1 - 01.png",
+            b"p1",
+        ),
+        (
+            "manga/relojero_cap1/Crónicas del Relojero - Cap 1 - 02.png",
+            b"p2",
+        ),
+        ("manga/relojero_cap1/003.png", b"p3"),
+        ("manga/relojero_cap1/004.png", b"p4"),
+        (
+            "manga/relojero_cap2/Crónicas del Relojero - Cap 2 - 01.png",
+            b"c2p1",
+        ),
+        (
+            "manga/relojero_cap2/Crónicas del Relojero - Cap 2 - 02.png",
+            b"c2p2",
+        ),
+        ("manga/relojero_cap2/003.png", b"c2p3"),
+    ]);
+
+    let work = cat.create_work("Crónicas del Relojero").unwrap();
+    cat.apply_filename_works(None).unwrap();
+    cat.apply_folder_work_groups(None).unwrap();
+
+    let groups = cat.list_proposed_work_groups(None).unwrap();
+    let cap1_group = groups
+        .iter()
+        .find(|g| g.folder.ends_with("relojero_cap1"))
+        .expect("cap1 group proposed");
+
+    let dismissed = cat
+        .dismiss_proposed_work_group(&cap1_group.folder, work)
+        .unwrap();
+    assert_eq!(
+        dismissed, 2,
+        "only the 2 folder-proposed pages in cap1 should be removed"
+    );
+
+    // Filename-suggested pages in cap1 must remain suggested.
+    for rel in [
+        "manga/relojero_cap1/Crónicas del Relojero - Cap 1 - 01.png",
+        "manga/relojero_cap1/Crónicas del Relojero - Cap 1 - 02.png",
+    ] {
+        let aw = cat
+            .asset_work(ids[rel])
+            .unwrap()
+            .expect("filename-based suggestion must survive group dismissal");
+        assert_eq!((aw.work, aw.status), (work, Status::Suggested));
+    }
+
+    // Folder-proposed pages in cap1 must be gone.
+    for rel in ["manga/relojero_cap1/003.png", "manga/relojero_cap1/004.png"] {
+        assert!(cat.asset_work(ids[rel]).unwrap().is_none());
+    }
+
+    // Folder-proposed page in cap2 must be untouched.
+    let cap2_p3 = cat
+        .asset_work(ids["manga/relojero_cap2/003.png"])
+        .unwrap()
+        .expect("other folder's suggestion must be untouched");
+    assert_eq!((cap2_p3.work, cap2_p3.status), (work, Status::Suggested));
+}
+
+#[test]
+fn generic_folder_or_single_page_among_photos_does_not_propose_group() {
+    let (_tmp, mut cat, _ids) = setup_catalog(&[
+        // Generic folder with 1 page among photos
+        ("Descargas/Mi Obra - Cap 1 - 01.png", b"d1"),
+        ("Descargas/IMG_2033.jpg", b"d2"),
+        ("Descargas/Screenshot_20240102.png", b"d3"),
+        ("Descargas/vacaciones.jpg", b"d4"),
+        ("Descargas/IMG_0042.jpg", b"d5"),
+        // Non-generic folder with only 1 owned page (< 2 minimum)
+        ("sueltas/Mi Obra - Cap 1 - 01.png", b"s1"),
+        ("sueltas/002.png", b"s2"),
+        ("sueltas/003.png", b"s3"),
+        // Non-generic folder with 2 owned pages but majority unnumbered photos
+        ("mezcla/Mi Obra - Cap 1 - 01.png", b"m1"),
+        ("mezcla/Mi Obra - Cap 1 - 02.png", b"m2"),
+        ("mezcla/IMG_2033.jpg", b"m3"),
+        ("mezcla/Screenshot_20240102.png", b"m4"),
+        ("mezcla/foto_a.jpg", b"m5"),
+        ("mezcla/foto_b.jpg", b"m6"),
+        ("mezcla/foto_c.jpg", b"m7"),
+    ]);
+
+    cat.create_work("Mi Obra").unwrap();
+    cat.apply_filename_works(None).unwrap();
+
+    let proposed = cat.apply_folder_work_groups(None).unwrap();
+    assert_eq!(
+        proposed, 0,
+        "generic folders, single-page folders, and mostly unnumbered folders must not propose groups"
+    );
+    assert!(cat.list_proposed_work_groups(None).unwrap().is_empty());
+}
+
+#[test]
+fn extract_page_from_stem_ignores_camera_and_screenshot_numbers() {
+    assert_eq!(catalog::extract_page_from_stem("001"), Some(1));
+    assert_eq!(catalog::extract_page_from_stem("p_12"), Some(12));
+    assert_eq!(catalog::extract_page_from_stem("page 3"), Some(3));
+    assert_eq!(catalog::extract_page_from_stem("scan_004"), Some(4));
+
+    assert_eq!(catalog::extract_page_from_stem("IMG_2033"), None);
+    assert_eq!(catalog::extract_page_from_stem("IMG_0033"), None);
+    assert_eq!(catalog::extract_page_from_stem("DSC_0042"), None);
+    assert_eq!(catalog::extract_page_from_stem("Screenshot_20240102"), None);
+    assert_eq!(
+        catalog::extract_page_from_stem("Screenshot_20240102_153045"),
+        None
+    );
+    assert_eq!(catalog::extract_page_from_stem("IMG-20240102-WA0005"), None);
+    assert_eq!(catalog::extract_page_from_stem("20240102"), None);
+    assert_eq!(catalog::extract_page_from_stem("1080p"), None);
+}
+
+#[test]
+fn root_folder_name_does_not_trigger_proposals_for_root_or_direct_subfolders() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Library root itself is named after a work!
+    let lib = tmp.path().join("Mi Obra");
+    for (rel, bytes) in [
+        ("001.png", b"r1".as_slice()),
+        ("002.png", b"r2"),
+        ("sueltas/001.png", b"s1"),
+        ("sueltas/002.png", b"s2"),
+        ("Otra Obra/001.png", b"o1"),
+        ("Otra Obra/002.png", b"o2"),
+    ] {
+        let p = lib.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+    let root = LibraryRoot::new(&lib).unwrap();
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let db = ensure_writable(&data.join("catalog.sqlite"), std::slice::from_ref(&root)).unwrap();
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.index(&root).unwrap();
+
+    let _mi_obra = cat.create_work("Mi Obra").unwrap();
+    let otra_obra = cat.create_work("Otra Obra").unwrap();
+
+    let proposed = cat.apply_folder_work_groups(None).unwrap();
+    assert_eq!(
+        proposed, 2,
+        "only the subfolder inside root named Otra Obra should be proposed, never the root or its direct child via root's name"
+    );
+    let groups = cat.list_proposed_work_groups(None).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].work, otra_obra);
+}
+
+#[test]
+fn delete_work_cleans_proposed_work_groups_and_list_respects_roots() {
+    let (_tmp, mut cat, _ids) = setup_catalog(&[
+        ("manga/Obra_Especial/001.png", b"p1"),
+        ("manga/Obra_Especial/002.png", b"p2"),
+    ]);
+
+    let work = cat.create_work("Obra Especial").unwrap();
+    cat.apply_folder_work_groups(None).unwrap();
+    let groups = cat.list_proposed_work_groups(None).unwrap();
+    assert_eq!(groups.len(), 1);
+
+    // Listing with an unrelated root must return empty.
+    let other_root = std::path::PathBuf::from("Z:/no_existe");
+    assert!(
+        cat.list_proposed_work_groups(Some(&[other_root]))
+            .unwrap()
+            .is_empty()
+    );
+
+    // Deleting the work must succeed and clean up proposed_work_group.
+    assert!(cat.delete_work(work).unwrap());
+    assert!(cat.list_proposed_work_groups(None).unwrap().is_empty());
+}

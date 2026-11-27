@@ -2,7 +2,7 @@ use crate::labels::unexpected;
 use crate::ocr::{OCR_STAGE, OCR_VERSION, OcrLine, SCREENSHOT_CATEGORY, ocr_search_key};
 use crate::{AssetId, Catalog, CatalogError, Entry, LabelId, LabelKind, Source, Status};
 use rusqlite::{OptionalExtension, ToSql, params, params_from_iter};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
@@ -24,6 +24,52 @@ pub const SCANLATION_PAGE_CATEGORIES: &[&str] = &[
 ];
 
 const FILENAME_WORK_CONFIDENCE: f64 = 0.85;
+const FOLDER_WORK_CONFIDENCE: f64 = 0.75;
+const MAX_BARE_PAGE_NUMBER: u32 = 999;
+const MAX_EXPLICIT_PAGE_NUMBER: u32 = 2000;
+
+const GENERIC_FOLDER_KEYS: &[&str] = &[
+    "descargas",
+    "downloads",
+    "whatsappimages",
+    "imagenes",
+    "pictures",
+    "dcim",
+    "camera",
+    "camara",
+    "screenshots",
+    "capturas",
+    "capturasdepantalla",
+];
+
+const NON_PAGE_PREFIXES: &[&str] = &[
+    "img",
+    "dsc",
+    "dsci",
+    "dscf",
+    "dscn",
+    "pxl",
+    "mvimg",
+    "vid",
+    "mov",
+    "screenshot",
+    "captura",
+    "screen",
+    "photo",
+    "foto",
+    "wa",
+    "whatsapp",
+    "signal",
+    "telegram",
+    "fb",
+    "ig",
+    "snap",
+    "camera",
+    "cam",
+    "dcim",
+    "received",
+    "saved",
+];
 
 const PROMO_HEADER_KEYS: &[&str] = &[
     "proyectosactivos",
@@ -1685,7 +1731,9 @@ pub fn extract_chapter_from_folder_name(folder_name: &str) -> Option<String> {
     None
 }
 
-/// Extracts a page number from a filename stem (e.g. `001.jpg` -> 1, `p_12.png` -> 12, `IMG_2033.png` -> 2033).
+/// Extracts a page number from a filename stem (e.g. `001.jpg` -> 1, `p_12.png` -> 12,
+/// `scan_004.png` -> 4), while ignoring camera/screenshot identifiers and dates
+/// (e.g. `IMG_2033`, `Screenshot_20240102`, `IMG-20240102-WA0005`, `1080p`).
 pub fn extract_page_from_stem(stem: &str) -> Option<u32> {
     if let Some(parsed) = parse_work_from_stem(stem)
         && let Some(p) = parsed.page
@@ -1693,7 +1741,12 @@ pub fn extract_page_from_stem(stem: &str) -> Option<u32> {
         return Some(p);
     }
 
-    let chars: Vec<(usize, char)> = stem.char_indices().collect();
+    let trimmed = stem.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let chars: Vec<(usize, char)> = trimmed.char_indices().collect();
     let n = chars.len();
 
     // 1. Check for explicit page markers: p, pg, pag, pagina, page followed by digits.
@@ -1706,8 +1759,8 @@ pub fn extract_page_from_stem(stem: &str) -> Option<u32> {
             while j < n && chars[j].1.is_alphabetic() {
                 j += 1;
             }
-            let end_byte = if j < n { chars[j].0 } else { stem.len() };
-            let word = fold_ascii_word(&stem[start_byte..end_byte]);
+            let end_byte = if j < n { chars[j].0 } else { trimmed.len() };
+            let word = fold_ascii_word(&trimmed[start_byte..end_byte]);
             if matches!(word.as_str(), "p" | "pg" | "pag" | "pagina" | "page") {
                 let mut k = j;
                 while k < n
@@ -1722,13 +1775,19 @@ pub fn extract_page_from_stem(stem: &str) -> Option<u32> {
                     while d_end < n && chars[d_end].1.is_ascii_digit() {
                         d_end += 1;
                     }
-                    let d_end_byte = if d_end < n {
-                        chars[d_end].0
-                    } else {
-                        stem.len()
-                    };
-                    if let Ok(num) = stem[d_start..d_end_byte].parse::<u32>() {
-                        return Some(num);
+                    let glued =
+                        d_end < n && (chars[d_end].1.is_alphabetic() || chars[d_end].1 == '.');
+                    if !glued {
+                        let d_end_byte = if d_end < n {
+                            chars[d_end].0
+                        } else {
+                            trimmed.len()
+                        };
+                        if let Ok(num) = trimmed[d_start..d_end_byte].parse::<u32>()
+                            && num <= MAX_EXPLICIT_PAGE_NUMBER
+                        {
+                            return Some(num);
+                        }
                     }
                 }
             }
@@ -1738,30 +1797,87 @@ pub fn extract_page_from_stem(stem: &str) -> Option<u32> {
         i += 1;
     }
 
-    // 2. If the entire trimmed stem is digits (e.g. "001"), parse it.
-    let trimmed = stem.trim();
-    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return trimmed.parse::<u32>().ok();
+    // Reject camera/screenshot/messaging identifiers and date-stamped stems before bare-number checks.
+    if has_non_page_prefix(trimmed) || contains_date_pattern(trimmed) {
+        return None;
     }
 
-    // 3. Find trailing sequence of digits (e.g. "IMG_2033", "scan_004", "05").
-    let mut end = n;
-    while end > 0 && !chars[end - 1].1.is_ascii_digit() {
-        end -= 1;
+    // 2. If the entire trimmed stem is digits (e.g. "001"), parse it within a sane page range.
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        if trimmed.len() > 5 {
+            return None;
+        }
+        return trimmed
+            .parse::<u32>()
+            .ok()
+            .filter(|&num| num <= MAX_BARE_PAGE_NUMBER);
     }
-    if end > 0 {
-        let mut start = end;
+
+    // 3. Trailing sequence of digits at the very end of the stem (e.g. "scan_004", "ch01_05").
+    if chars[n - 1].1.is_ascii_digit() {
+        let mut start = n;
         while start > 0 && chars[start - 1].1.is_ascii_digit() {
             start -= 1;
         }
-        let start_byte = chars[start].0;
-        let end_byte = if end < n { chars[end].0 } else { stem.len() };
-        if let Ok(num) = stem[start_byte..end_byte].parse::<u32>() {
-            return Some(num);
+        // Reject decimal fragments like `v1.2`.
+        if start > 0 && chars[start - 1].1 == '.' {
+            return None;
+        }
+        let digit_len = n - start;
+        if digit_len <= 5 {
+            let start_byte = chars[start].0;
+            if let Ok(num) = trimmed[start_byte..].parse::<u32>()
+                && num <= MAX_BARE_PAGE_NUMBER
+            {
+                return Some(num);
+            }
         }
     }
 
     None
+}
+
+fn has_non_page_prefix(stem: &str) -> bool {
+    let mut words = stem
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty());
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let first_folded = fold_ascii_word(first);
+    if NON_PAGE_PREFIXES.contains(&first_folded.as_str()) {
+        return true;
+    }
+    words.any(|w| {
+        let f = fold_ascii_word(w);
+        matches!(f.as_str(), "wa" | "whatsapp" | "screenshot" | "captura")
+    })
+}
+
+fn contains_date_pattern(stem: &str) -> bool {
+    let bytes = stem.as_bytes();
+    // 8 consecutive digits starting with 19 or 20 (YYYYMMDD)
+    let mut run = 0usize;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_digit() {
+            run += 1;
+            if run == 8 {
+                let start = idx + 1 - 8;
+                let prefix = &bytes[start..start + 2];
+                if prefix == b"19" || prefix == b"20" {
+                    return true;
+                }
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+fn is_generic_folder_name(folder_name: &str) -> bool {
+    let key = work_match_key(folder_name);
+    GENERIC_FOLDER_KEYS.contains(&key.as_str())
 }
 
 impl Catalog {
@@ -2521,11 +2637,12 @@ impl Catalog {
         Ok(proposals)
     }
 
-    /// Scans library folders and proposes work ownership for images in folders where:
-    /// - the majority of images with pertenencia point to the same work, or
-    /// - the folder or parent folder name matches a work or alias.
+    /// Scans library folders and proposes work ownership for images without belonging in folders where:
+    /// - the majority of images with belonging (at least 2 and > 50%) point to the same work, or
+    /// - the folder or parent folder name (inside the library root) matches a work or alias.
     ///
-    /// Never creates works, skips dismissed/accepted groups, and never touches accepted or rejected belongings.
+    /// Never creates works, skips generic or mostly unnumbered folders, skips dismissed/accepted
+    /// groups, and never touches accepted, rejected, or already-suggested belongings.
     /// Returns the number of assets newly proposed.
     pub fn apply_folder_work_groups(
         &mut self,
@@ -2542,7 +2659,7 @@ impl Catalog {
         }
 
         let mut sql = String::from(
-            "SELECT l.asset_id, l.path
+            "SELECT l.asset_id, l.path, l.root
              FROM location l
              WHERE l.missing = 0",
         );
@@ -2556,26 +2673,53 @@ impl Catalog {
         }
         sql.push_str(" ORDER BY l.path ASC");
 
-        let locations: Vec<(AssetId, PathBuf)> = {
+        let locations: Vec<(AssetId, PathBuf, PathBuf)> = {
             let mut stmt = self.conn.prepare(&sql)?;
             let mapped = stmt.query_map(params_from_iter(args.iter()), |r| {
-                Ok((AssetId(r.get(0)?), PathBuf::from(r.get::<_, String>(1)?)))
+                Ok((
+                    AssetId(r.get(0)?),
+                    PathBuf::from(r.get::<_, String>(1)?),
+                    PathBuf::from(r.get::<_, String>(2)?),
+                ))
             })?;
             mapped.collect::<Result<_, _>>()?
         };
 
-        // Group by folder
-        let mut folders: HashMap<PathBuf, Vec<(AssetId, PathBuf)>> = HashMap::new();
-        for (asset_id, path) in locations {
+        // Group deterministically by folder, keeping its library root.
+        let mut folders: BTreeMap<PathBuf, (PathBuf, Vec<(AssetId, PathBuf)>)> = BTreeMap::new();
+        for (asset_id, path, root) in locations {
             if let Some(parent) = path.parent() {
                 folders
                     .entry(parent.to_path_buf())
-                    .or_default()
+                    .or_insert_with(|| (root, Vec::new()))
+                    .1
                     .push((asset_id, path));
             }
         }
 
-        // Load existing proposed_work_group
+        // Load all existing asset_work rows in a single query instead of querying per folder.
+        let mut asset_works: HashMap<AssetId, Vec<(LabelId, String, Status)>> = HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT asset_id, work_id, chapter, status FROM asset_work")?;
+            let rows = stmt.query_map([], |r| {
+                let status_s: String = r.get(3)?;
+                let status = Status::parse(&status_s).unwrap_or(Status::Suggested);
+                Ok((
+                    AssetId(r.get(0)?),
+                    LabelId(r.get(1)?),
+                    r.get::<_, String>(2)?,
+                    status,
+                ))
+            })?;
+            for row in rows {
+                let (aid, wid, ch, st) = row?;
+                asset_works.entry(aid).or_default().push((wid, ch, st));
+            }
+        }
+
+        // Load existing proposed_work_group statuses.
         let mut group_statuses: HashMap<(String, LabelId), String> = HashMap::new();
         {
             let mut stmt = self
@@ -2596,39 +2740,35 @@ impl Catalog {
         let tx = self.conn.transaction()?;
         let mut total_proposed_assets = 0usize;
 
-        for (folder, files) in &folders {
-            let folder_str = folder.to_string_lossy().into_owned();
-
-            // Load existing asset_work for assets in this folder
-            let mut asset_works: HashMap<AssetId, Vec<(LabelId, String, Status)>> = HashMap::new();
-            {
-                let asset_ids: Vec<i64> = files.iter().map(|(id, _)| id.0).collect();
-                for chunk in asset_ids.chunks(500) {
-                    let marks = vec!["?"; chunk.len()].join(",");
-                    let q = format!(
-                        "SELECT asset_id, work_id, chapter, status FROM asset_work WHERE asset_id IN ({marks})"
-                    );
-                    let mut stmt = tx.prepare(&q)?;
-                    let chunk_args: Vec<&dyn ToSql> =
-                        chunk.iter().map(|id| id as &dyn ToSql).collect();
-                    let rows = stmt.query_map(params_from_iter(chunk_args.iter()), |r| {
-                        let status_s: String = r.get(3)?;
-                        let status = Status::parse(&status_s).unwrap_or(Status::Suggested);
-                        Ok((
-                            AssetId(r.get(0)?),
-                            LabelId(r.get(1)?),
-                            r.get::<_, String>(2)?,
-                            status,
-                        ))
-                    })?;
-                    for row in rows {
-                        let (aid, wid, ch, st) = row?;
-                        asset_works.entry(aid).or_default().push((wid, ch, st));
-                    }
-                }
+        for (folder, (root, files)) in &folders {
+            // Never propose a group for a library root itself.
+            let folder_inside_root = folder != root && folder.starts_with(root);
+            if !folder_inside_root {
+                continue;
             }
 
-            // Count existing non-rejected pertenencias in this folder per work
+            let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if is_generic_folder_name(folder_name) {
+                continue;
+            }
+
+            // Avoid proposing in folders where the majority of images have no page number.
+            let numbered_count = files
+                .iter()
+                .filter(|(_, path)| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(extract_page_from_stem)
+                        .is_some()
+                })
+                .count();
+            if numbered_count * 2 <= files.len() {
+                continue;
+            }
+
+            let folder_str = folder.to_string_lossy().into_owned();
+
+            // Count existing non-rejected belongings in this folder per work.
             let mut work_counts: HashMap<LabelId, usize> = HashMap::new();
             let mut total_with_belonging = 0usize;
 
@@ -2644,22 +2784,28 @@ impl Catalog {
             }
 
             // Determine candidate work:
-            // 1. Majority of images with pertenencia
+            // 1. Real majority of images with belonging (at least 2 and strictly > 50%).
             let mut candidate_work: Option<LabelId> = None;
-            if total_with_belonging > 0
-                && let Some((&majority_work, &count)) = work_counts.iter().max_by_key(|(_, c)| *c)
+            if let Some((&majority_work, &count)) = work_counts.iter().max_by_key(|(_, c)| *c)
+                && count >= 2
                 && count * 2 > total_with_belonging
             {
                 candidate_work = Some(majority_work);
             }
 
-            // 2. Folder name or parent folder name match
-            let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let parent_name = folder
+            // 2. Folder name or parent folder name match (only strictly inside the library root).
+            let parent_inside_root = folder
                 .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+                .is_some_and(|p| p != root && p.starts_with(root));
+            let parent_name = if parent_inside_root {
+                folder
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+            } else {
+                ""
+            };
 
             if candidate_work.is_none() {
                 let k = work_match_key(folder_name);
@@ -2673,7 +2819,7 @@ impl Catalog {
                 }
             }
 
-            if candidate_work.is_none() {
+            if candidate_work.is_none() && parent_inside_root {
                 let pk = work_match_key(parent_name);
                 if let Some(&wid) = keys.get(&pk) {
                     candidate_work = Some(wid);
@@ -2689,26 +2835,45 @@ impl Catalog {
                 continue;
             };
 
-            // Check if group is already dismissed or accepted
+            // Skip groups already dismissed or accepted by the user.
             if let Some(status) = group_statuses.get(&(folder_str.clone(), work_id))
                 && (status == "dismissed" || status == "accepted")
             {
                 continue;
             }
 
-            // Extract chapter: from folder name, then parent folder name
+            // Extract chapter from folder name, or from parent folder name (only inside root).
             let chapter = extract_chapter_from_folder_name(folder_name)
-                .or_else(|| extract_chapter_from_folder_name(parent_name))
+                .or_else(|| {
+                    if parent_inside_root {
+                        extract_chapter_from_folder_name(parent_name)
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_default();
 
-            // Find assets without pertenencia or with suggested pertenencia
+            let existing_for_work = files
+                .iter()
+                .filter(|(aid, _)| {
+                    asset_works.get(aid).is_some_and(|l| {
+                        l.iter().any(|(w, _, st)| {
+                            *w == work_id && (*st == Status::Suggested || *st == Status::Accepted)
+                        })
+                    })
+                })
+                .count();
+
+            // Propose only for images without active belonging (never overwrite accepted,
+            // rejected for this work, or suggested belonging to any work).
             let mut proposed_for_group = 0usize;
             for (asset_id, path) in files {
                 let existing = asset_works.get(asset_id);
-                // "Nunca crees obras por tu cuenta. Las propuestas solo tocan imágenes sin pertenencia o con pertenencia sugerida, nunca las aceptadas o rechazadas."
-                let has_accepted =
-                    existing.is_some_and(|l| l.iter().any(|(_, _, st)| *st == Status::Accepted));
-                if has_accepted {
+                let has_active_belonging = existing.is_some_and(|l| {
+                    l.iter()
+                        .any(|(_, _, st)| matches!(st, Status::Accepted | Status::Suggested))
+                });
+                if has_active_belonging {
                     continue;
                 }
                 let is_rejected_for_work = existing.is_some_and(|l| {
@@ -2719,23 +2884,8 @@ impl Catalog {
                     continue;
                 }
 
-                // Assets that already belong to this work (suggested or accepted) are not touched
-                let already_belongs = existing.is_some_and(|l| {
-                    l.iter().any(|(w, _, st)| {
-                        *w == work_id && (*st == Status::Suggested || *st == Status::Accepted)
-                    })
-                });
-                if already_belongs {
-                    continue;
-                }
-
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let page = extract_page_from_stem(stem);
-
-                tx.prepare_cached(
-                    "DELETE FROM asset_work WHERE asset_id = ?1 AND work_id <> ?2 AND status = 'suggested'",
-                )?
-                .execute(params![asset_id.0, work_id.0])?;
 
                 tx.prepare_cached(
                     "INSERT INTO asset_work (asset_id, work_id, chapter, page, source, confidence, status)
@@ -2752,27 +2902,22 @@ impl Catalog {
                     work_id.0,
                     chapter,
                     page.map(i64::from),
-                    FILENAME_WORK_CONFIDENCE
+                    FOLDER_WORK_CONFIDENCE
                 ])?;
 
-                suggest_chapter_page_in_tx(&tx, *asset_id, !chapter.is_empty())?;
+                if !chapter.is_empty() {
+                    suggest_chapter_page_in_tx(&tx, *asset_id, true)?;
+                }
+                asset_works.entry(*asset_id).or_default().push((
+                    work_id,
+                    chapter.clone(),
+                    Status::Suggested,
+                ));
                 total_proposed_assets += 1;
-
                 proposed_for_group += 1;
             }
 
             if proposed_for_group > 0 {
-                let existing_for_work = files
-                    .iter()
-                    .filter(|(aid, _)| {
-                        asset_works.get(aid).is_some_and(|l| {
-                            l.iter().any(|(w, _, st)| {
-                                *w == work_id
-                                    && (*st == Status::Suggested || *st == Status::Accepted)
-                            })
-                        })
-                    })
-                    .count();
                 let total_group_pages = existing_for_work + proposed_for_group;
 
                 tx.prepare_cached(
@@ -2801,82 +2946,116 @@ impl Catalog {
         &self,
         roots: Option<&[PathBuf]>,
     ) -> Result<Vec<ProposedWorkGroup>, CatalogError> {
-        let mut sql = String::from(
-            "SELECT pwg.id, pwg.folder, pwg.work_id, lb.name, pwg.chapter, pwg.page_count
-             FROM proposed_work_group pwg
-             JOIN label lb ON lb.id = pwg.work_id
-             WHERE pwg.status = 'suggested'",
-        );
-        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
-        if let Some(r) = roots {
-            if r.is_empty() {
-                return Ok(Vec::new());
+        if let Some(r) = roots
+            && r.is_empty()
+        {
+            return Ok(Vec::new());
+        }
+
+        let raw_groups: Vec<(i64, PathBuf, LabelId, String, String, usize)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT pwg.id, pwg.folder, pwg.work_id, lb.name, pwg.chapter, pwg.page_count
+                 FROM proposed_work_group pwg
+                 JOIN label lb ON lb.id = pwg.work_id
+                 WHERE pwg.status = 'suggested'
+                 ORDER BY pwg.folder COLLATE NOCASE ASC",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let id: i64 = r.get(0)?;
+                let folder = PathBuf::from(r.get::<_, String>(1)?);
+                let work_id = LabelId(r.get(2)?);
+                let work_name: String = r.get(3)?;
+                let chapter: String = r.get(4)?;
+                let page_count: i64 = r.get(5)?;
+                Ok((
+                    id,
+                    folder,
+                    work_id,
+                    work_name,
+                    chapter,
+                    page_count.max(0) as usize,
+                ))
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+
+        if raw_groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fetch suggested entries for all involved works in batched queries (never N+1).
+        let distinct_works: Vec<i64> = {
+            let mut seen = HashSet::new();
+            raw_groups
+                .iter()
+                .filter_map(|(_, _, w, _, _, _)| seen.insert(w.0).then_some(w.0))
+                .collect()
+        };
+
+        struct GroupSample {
+            page: Option<u32>,
+            entry: Entry,
+        }
+
+        let mut samples_by_group: HashMap<(PathBuf, LabelId), Vec<GroupSample>> = HashMap::new();
+        for chunk in distinct_works.chunks(500) {
+            let work_marks = vec!["?"; chunk.len()].join(",");
+            let mut sql = format!(
+                "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
+                        a.width, a.height, a.format, a.captured_at_ns,
+                        a.media_type, a.duration_ms, aw.work_id, aw.page
+                 FROM asset_work aw
+                 JOIN asset a ON a.id = aw.asset_id
+                 JOIN location l ON l.asset_id = aw.asset_id
+                 WHERE aw.status = 'suggested'
+                   AND l.missing = 0
+                   AND aw.work_id IN ({work_marks})"
+            );
+            let mut args: Vec<Box<dyn ToSql>> = chunk
+                .iter()
+                .map(|&id| Box::new(id) as Box<dyn ToSql>)
+                .collect();
+            if let Some(r) = roots {
+                let root_marks = vec!["?"; r.len()].join(",");
+                sql.push_str(&format!(" AND l.root IN ({root_marks})"));
+                for root in r {
+                    args.push(Box::new(root.to_string_lossy().into_owned()));
+                }
             }
-            let marks = vec!["?"; r.len()].join(",");
-            sql.push_str(&format!(
-                " AND EXISTS (
-                     SELECT 1 FROM location l
-                     WHERE l.missing = 0
-                       AND l.root IN ({marks})
-                       AND (l.path LIKE pwg.folder || '/%' OR l.path LIKE pwg.folder || '\\%')
-                 )"
-            ));
-            for root in r {
-                args.push(Box::new(root.to_string_lossy().into_owned()));
+
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+                let entry = crate::browse::entry_from_row(r)?;
+                let work_id = LabelId(r.get(11)?);
+                let page: Option<i64> = r.get(12)?;
+                Ok((work_id, page.and_then(|p| u32::try_from(p).ok()), entry))
+            })?;
+            for row in rows {
+                let (work_id, page, entry) = row?;
+                if let Some(parent) = entry.path.parent() {
+                    samples_by_group
+                        .entry((parent.to_path_buf(), work_id))
+                        .or_default()
+                        .push(GroupSample { page, entry });
+                }
             }
         }
-        sql.push_str(" ORDER BY pwg.folder COLLATE NOCASE ASC");
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
-            let id: i64 = r.get(0)?;
-            let folder_str: String = r.get(1)?;
-            let work_id = LabelId(r.get(2)?);
-            let work_name: String = r.get(3)?;
-            let chapter: String = r.get(4)?;
-            let page_count: i64 = r.get(5)?;
-            Ok((
-                id,
-                folder_str,
-                work_id,
-                work_name,
-                chapter,
-                page_count.max(0) as usize,
-            ))
-        })?;
 
         let mut groups = Vec::new();
-        for item in rows {
-            let (id, folder_str, work, work_name, chapter, page_count) = item?;
-            let folder = PathBuf::from(&folder_str);
-
-            let sample_entries = {
-                let mut sample_stmt = self.conn.prepare(
-                    "SELECT l.asset_id, l.path, a.sha256, l.size, l.mtime_ns,
-                            a.width, a.height, a.format, a.captured_at_ns,
-                            a.media_type, a.duration_ms
-                     FROM asset_work aw
-                     JOIN asset a ON a.id = aw.asset_id
-                     JOIN location l ON l.asset_id = aw.asset_id
-                     WHERE aw.work_id = ?1
-                       AND aw.status = 'suggested'
-                       AND l.missing = 0
-                     ORDER BY aw.page ASC, l.path ASC",
-                )?;
-                let sample_rows =
-                    sample_stmt.query_map(params![work.0], crate::browse::entry_from_row)?;
-                let mut samples = Vec::new();
-                for entry_res in sample_rows {
-                    let entry = entry_res?;
-                    if entry.path.parent() == Some(&folder) {
-                        samples.push(entry);
-                        if samples.len() >= 6 {
-                            break;
-                        }
-                    }
-                }
-                samples
+        for (id, folder, work, work_name, chapter, page_count) in raw_groups {
+            let Some(mut bucket) = samples_by_group.remove(&(folder.clone(), work)) else {
+                continue;
             };
+            bucket.sort_by(|a, b| {
+                match (a.page, b.page) {
+                    (Some(pa), Some(pb)) => pa.cmp(&pb),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+                .then_with(|| a.entry.path.cmp(&b.entry.path))
+            });
+            let sample_entries: Vec<Entry> = bucket.into_iter().take(6).map(|s| s.entry).collect();
 
             groups.push(ProposedWorkGroup {
                 id,
@@ -2892,7 +3071,8 @@ impl Catalog {
         Ok(groups)
     }
 
-    /// Accepts a proposed work group, confirming the ownership rows for all images in that folder.
+    /// Accepts a proposed work group, confirming only the suggested ownership rows for that work
+    /// in that folder. Accepted, rejected, other works, and other folders are never touched.
     pub fn accept_proposed_work_group(
         &self,
         folder: &Path,
@@ -2908,16 +3088,26 @@ impl Catalog {
         )?
         .execute(params![folder_str, work.0])?;
 
-        let matching_assets = {
-            let mut stmt =
-                tx.prepare("SELECT l.asset_id, l.path FROM location l WHERE l.missing = 0")?;
-            let mapped =
-                stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-            mapped
-                .filter_map(|r| r.ok())
-                .filter(|(_, p)| Path::new(p).parent() == Some(folder))
-                .map(|(aid, _)| aid)
-                .collect::<Vec<i64>>()
+        let matching_assets: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT l.asset_id, l.path
+                 FROM asset_work aw
+                 JOIN location l ON l.asset_id = aw.asset_id
+                 WHERE aw.work_id = ?1
+                   AND aw.status = 'suggested'
+                   AND l.missing = 0",
+            )?;
+            let mapped = stmt.query_map([work.0], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut ids = Vec::new();
+            for row in mapped {
+                let (aid, path) = row?;
+                if Path::new(&path).parent() == Some(folder) {
+                    ids.push(aid);
+                }
+            }
+            ids
         };
 
         let mut changed = 0usize;
@@ -2943,14 +3133,16 @@ impl Catalog {
         Ok(changed)
     }
 
-    /// Discards a proposed work group, removing suggested belongings for that group and remembering
-    /// the dismissal so it will never be proposed again.
+    /// Discards a proposed work group, removing only the folder-proposed suggested belongings for
+    /// that group and remembering the dismissal so it will never be proposed again.
+    /// Filename-based suggestions, accepted/rejected rows, and other folders are never touched.
     pub fn dismiss_proposed_work_group(
         &self,
         folder: &Path,
         work: LabelId,
     ) -> Result<usize, CatalogError> {
         let folder_str = folder.to_string_lossy().into_owned();
+        let max_folder_conf = FOLDER_WORK_CONFIDENCE + 1e-6;
         let tx = self.conn.unchecked_transaction()?;
 
         tx.prepare_cached(
@@ -2960,16 +3152,28 @@ impl Catalog {
         )?
         .execute(params![folder_str, work.0])?;
 
-        let matching_assets = {
-            let mut stmt =
-                tx.prepare("SELECT l.asset_id, l.path FROM location l WHERE l.missing = 0")?;
-            let mapped =
-                stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-            mapped
-                .filter_map(|r| r.ok())
-                .filter(|(_, p)| Path::new(p).parent() == Some(folder))
-                .map(|(aid, _)| aid)
-                .collect::<Vec<i64>>()
+        let matching_assets: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT l.asset_id, l.path
+                 FROM asset_work aw
+                 JOIN location l ON l.asset_id = aw.asset_id
+                 WHERE aw.work_id = ?1
+                   AND aw.status = 'suggested'
+                   AND aw.source = 'rules'
+                   AND aw.confidence <= ?2
+                   AND l.missing = 0",
+            )?;
+            let mapped = stmt.query_map(params![work.0, max_folder_conf], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut ids = Vec::new();
+            for row in mapped {
+                let (aid, path) = row?;
+                if Path::new(&path).parent() == Some(folder) {
+                    ids.push(aid);
+                }
+            }
+            ids
         };
 
         let mut changed = 0usize;
@@ -2979,11 +3183,14 @@ impl Catalog {
                 "DELETE FROM asset_work
                  WHERE work_id = ?1
                    AND status = 'suggested'
+                   AND source = 'rules'
+                   AND confidence <= ?2
                    AND asset_id IN ({marks})"
             );
             let mut stmt = tx.prepare(&sql)?;
-            let mut args: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 1);
+            let mut args: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 2);
             args.push(&work.0);
+            args.push(&max_folder_conf);
             for id in chunk {
                 args.push(id);
             }
