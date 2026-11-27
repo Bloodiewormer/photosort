@@ -1955,6 +1955,10 @@ impl Catalog {
             &format!("DELETE FROM proposed_work_group WHERE work_id IN ({IS_WORK})"),
             [work.0],
         )?;
+        tx.execute(
+            &format!("DELETE FROM asset_cover WHERE work_id IN ({IS_WORK})"),
+            [work.0],
+        )?;
         for table in ["asset_label", "work_alias"] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE label_id IN ({IS_WORK})"),
@@ -3306,81 +3310,54 @@ impl Catalog {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Saves cover regions for `asset`. User decisions (`accepted` or `rejected`) are NEVER
-    /// overwritten upon recalculating.
+    /// Replaces the suggested cover regions of `asset` with `covers`. Accepted and rejected rows
+    /// are never touched, region included; a new region overlapping one of them (IoU > 0.35) is
+    /// dropped, because the user already decided about that card. New rows take the lowest free
+    /// `cover_idx`, so they never collide with a decided one.
     pub fn save_asset_covers(
         &mut self,
         asset: AssetId,
         covers: &[AssetCover],
     ) -> Result<(), CatalogError> {
-        let existing = self.asset_covers(asset)?;
-        let user_decisions: Vec<AssetCover> = existing
+        let decided: Vec<AssetCover> = self
+            .asset_covers(asset)?
             .into_iter()
             .filter(|c| c.status != Status::Suggested)
             .collect();
+        let mut used: HashSet<usize> = decided.iter().map(|d| d.cover_idx).collect();
+        let mut next_idx = 0usize;
 
         let tx = self.conn.transaction()?;
-
-        // Delete previous suggested covers for this asset
         tx.execute(
             "DELETE FROM asset_cover WHERE asset_id = ?1 AND status = 'suggested'",
             [asset.0],
         )?;
-
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO asset_cover
                      (asset_id, cover_idx, x0, y0, x1, y1, work_id, confidence, status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(asset_id, cover_idx) DO UPDATE SET
-                     x0 = excluded.x0,
-                     y0 = excluded.y0,
-                     x1 = excluded.x1,
-                     y1 = excluded.y1,
-                     work_id = CASE WHEN asset_cover.status = 'suggested' THEN excluded.work_id ELSE asset_cover.work_id END,
-                     confidence = CASE WHEN asset_cover.status = 'suggested' THEN excluded.confidence ELSE asset_cover.confidence END,
-                     status = asset_cover.status",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'suggested')",
             )?;
-
-            for (idx, cover) in covers.iter().enumerate() {
-                let cover_idx = if cover.cover_idx != 0 {
-                    cover.cover_idx
-                } else {
-                    idx
-                };
-                let matching_decision = user_decisions
-                    .iter()
-                    .find(|d| d.cover_idx == cover_idx || rect_iou(d.rect, cover.rect) > 0.35);
-
-                let (work_id, conf, status) = match matching_decision {
-                    Some(d) if d.status == Status::Accepted => {
-                        (d.work, d.confidence, Status::Accepted)
-                    }
-                    Some(d) if d.status == Status::Rejected => {
-                        if d.work == cover.work {
-                            (d.work, d.confidence, Status::Rejected)
-                        } else {
-                            (cover.work, cover.confidence, Status::Suggested)
-                        }
-                    }
-                    _ => (cover.work, cover.confidence, Status::Suggested),
-                };
-
-                let work_param = work_id.map(|w| w.0);
+            for cover in covers {
+                if decided.iter().any(|d| rect_iou(d.rect, cover.rect) > 0.35) {
+                    continue;
+                }
+                while used.contains(&next_idx) {
+                    next_idx += 1;
+                }
+                used.insert(next_idx);
                 stmt.execute(params![
                     asset.0,
-                    cover_idx as i64,
+                    next_idx as i64,
                     f64::from(cover.rect[0]),
                     f64::from(cover.rect[1]),
                     f64::from(cover.rect[2]),
                     f64::from(cover.rect[3]),
-                    work_param,
-                    conf.clamp(0.0, 1.0),
-                    status.as_str(),
+                    cover.work.map(|w| w.0),
+                    cover.confidence.clamp(0.0, 1.0),
                 ])?;
             }
         }
-
         tx.commit()?;
         Ok(())
     }

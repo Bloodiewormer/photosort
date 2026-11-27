@@ -2087,3 +2087,86 @@ fn a_folder_that_mixes_works_gets_no_majority_proposal() {
     assert_eq!(cat.apply_folder_work_groups(None).unwrap(), 0);
     assert!(cat.asset_work(ids["manga/007.png"]).unwrap().is_none());
 }
+
+fn cover(asset: AssetId, idx: usize, rect: [f32; 4], work: Option<LabelId>) -> catalog::AssetCover {
+    catalog::AssetCover {
+        id: None,
+        asset,
+        cover_idx: idx,
+        rect,
+        work,
+        work_name: None,
+        confidence: 0.9,
+        status: Status::Suggested,
+    }
+}
+
+#[test]
+fn cover_decisions_keep_their_region_when_detection_changes() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[("p.png", b"promo")]);
+    let p = ids["p.png"];
+    let wa = cat.create_work("Isla de Cristal").unwrap();
+    let wb = cat.create_work("Academia Nebulosa").unwrap();
+    let left = [0.0, 0.0, 100.0, 150.0];
+    let right = [120.0, 0.0, 220.0, 150.0];
+    let far = [0.0, 300.0, 100.0, 450.0];
+    cat.save_asset_covers(
+        p,
+        &[cover(p, 0, left, Some(wa)), cover(p, 1, right, Some(wb))],
+    )
+    .unwrap();
+    cat.accept_asset_cover(p, 0).unwrap();
+    cat.reject_asset_cover(p, 1).unwrap();
+
+    // Detection changes order and count: the right card comes first and a new one appears at
+    // index 0's slot. Decisions must stay attached to their own region, not to the index.
+    cat.save_asset_covers(
+        p,
+        &[
+            cover(p, 0, far, Some(wb)),
+            cover(p, 1, right, Some(wa)),
+            cover(p, 2, left, None),
+        ],
+    )
+    .unwrap();
+    let after = cat.asset_covers(p).unwrap();
+    let accepted: Vec<_> = after
+        .iter()
+        .filter(|c| c.status == Status::Accepted)
+        .collect();
+    let rejected: Vec<_> = after
+        .iter()
+        .filter(|c| c.status == Status::Rejected)
+        .collect();
+    assert_eq!(accepted.len(), 1, "{after:?}");
+    assert_eq!((accepted[0].rect, accepted[0].work), (left, Some(wa)));
+    assert_eq!(rejected.len(), 1, "{after:?}");
+    assert_eq!((rejected[0].rect, rejected[0].work), (right, Some(wb)));
+    let suggested: Vec<_> = after
+        .iter()
+        .filter(|c| c.status == Status::Suggested)
+        .collect();
+    assert_eq!(suggested.len(), 1, "{after:?}");
+    assert_eq!((suggested[0].rect, suggested[0].work), (far, Some(wb)));
+}
+
+#[test]
+fn deleting_a_work_removes_its_cover_regions() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[("p.png", b"promo")]);
+    let p = ids["p.png"];
+    let doomed = cat.create_work("Isla de Cristal").unwrap();
+    let kept = cat.create_work("Academia Nebulosa").unwrap();
+    cat.save_asset_covers(
+        p,
+        &[
+            cover(p, 0, [0.0, 0.0, 100.0, 150.0], Some(doomed)),
+            cover(p, 1, [120.0, 0.0, 220.0, 150.0], Some(kept)),
+        ],
+    )
+    .unwrap();
+    cat.accept_asset_cover(p, 0).unwrap();
+    assert!(cat.delete_work(doomed).unwrap());
+    let after = cat.asset_covers(p).unwrap();
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].work, Some(kept));
+}
