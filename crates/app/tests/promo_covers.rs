@@ -415,3 +415,123 @@ fn works_worker_decodes_each_promo_page_once_and_stays_in_roots() {
     assert_eq!(covers.len(), 6);
     assert!(covers.iter().filter(|c| c.work.is_some()).count() >= 3);
 }
+
+#[test]
+fn a_title_equally_close_to_two_covers_is_left_unassigned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = ensure_writable(&tmp.path().join("catalog.sqlite"), &[]).unwrap();
+    let cat = Catalog::open(&db).unwrap();
+    let work = cat.create_work("Isla de Cristal").unwrap();
+    let other = cat.create_work("Academia Nebulosa").unwrap();
+    let covers = [
+        [0.0, 0.0, 100.0, 150.0],
+        [0.0, 170.0, 100.0, 320.0],
+        [200.0, 0.0, 300.0, 150.0],
+    ];
+    let works = [
+        // Right in the gap between the two stacked covers.
+        catalog::WorkLineMatch {
+            label: work,
+            confidence: 0.9,
+            rect: [10.0, 155.0, 90.0, 165.0],
+        },
+        // Clearly below the third cover.
+        catalog::WorkLineMatch {
+            label: other,
+            confidence: 0.9,
+            rect: [210.0, 155.0, 290.0, 165.0],
+        },
+    ];
+    let out = app::promo_covers::associate_covers(catalog::AssetId(1), &covers, &works, &cat);
+    assert_eq!(out[0].work, None, "{out:?}");
+    assert_eq!(out[1].work, None, "{out:?}");
+    assert_eq!(out[2].work, Some(other), "{out:?}");
+}
+
+/// Textured cards (`cols` × `rows`) with an optional striped title under each, over `bg`.
+fn card_grid(
+    (w, h): (u32, u32),
+    bg: impl Fn(u32, u32) -> [u8; 3],
+    (cols, rows): (u32, u32),
+    gutter: u32,
+    title: bool,
+) -> image::RgbImage {
+    let margin = 40;
+    let mut img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb(bg(x, y)));
+    let cw = (w - 2 * margin - gutter * (cols - 1)) / cols;
+    let ch = (h - 2 * margin - gutter * (rows - 1)) / rows;
+    for r in 0..rows {
+        for c in 0..cols {
+            let (x0, y0) = (margin + c * (cw + gutter), margin + r * (ch + gutter));
+            let card_h = if title { ch * 3 / 4 } else { ch };
+            for y in y0..y0 + card_h {
+                for x in x0..x0 + cw {
+                    let v = ((x * 7 + y * 13 + (r * cols + c) * 50) % 200) as u8;
+                    img.put_pixel(x, y, image::Rgb([v, 255 - v, v / 2 + 40]));
+                }
+            }
+            if title {
+                for y in y0 + card_h + 4..y0 + card_h + 14 {
+                    for x in (x0 + 4..x0 + cw - 4).filter(|x| (x / 3) % 2 == 0) {
+                        img.put_pixel(x, y, image::Rgb([20, 20, 20]));
+                    }
+                }
+            }
+        }
+    }
+    img
+}
+
+#[test]
+fn harder_layouts_give_plausible_regions_or_none() {
+    let detect = |img: image::RgbImage| {
+        let (w, h) = img.dimensions();
+        let regions = detect_cover_regions(&DynamicImage::ImageRgb8(img));
+        // Never the whole page and never thin strips.
+        for r in &regions {
+            let (rw, rh) = ((r[2] - r[0]) / w as f32, (r[3] - r[1]) / h as f32);
+            assert!(rw < 0.61 && rh < 0.71 && rw > 0.07 && rh > 0.07, "{r:?}");
+        }
+        regions.len()
+    };
+    let white = |_: u32, _: u32| [250, 250, 250];
+    assert_eq!(detect(card_grid((900, 1300), white, (3, 3), 30, true)), 9);
+    assert_eq!(detect(card_grid((800, 1000), white, (2, 2), 40, true)), 4);
+    // Strong gradient background, cards that touch, one big panel per half: nothing.
+    let dark_to_light = |_: u32, y: u32| {
+        let v = (40 + y * 180 / 1300) as u8;
+        [v, v, v + 20]
+    };
+    assert_eq!(
+        detect(card_grid((900, 1300), dark_to_light, (3, 3), 30, true)),
+        0
+    );
+    assert_eq!(detect(card_grid((900, 1300), white, (3, 3), 0, false)), 0);
+    assert_eq!(detect(card_grid((800, 1200), white, (2, 1), 40, false)), 0);
+    // A soft gradient may lose some cards, but what it finds is still card-sized (checked above).
+    let soft = |_: u32, y: u32| {
+        let v = (200 + y * 50 / 1300) as u8;
+        [v, v, v]
+    };
+    assert!(detect(card_grid((900, 1300), soft, (3, 3), 30, true)) <= 9);
+    // A decorative frame around the grid hides the page background: nothing.
+    let mut framed = card_grid((900, 1300), white, (3, 3), 30, true);
+    for (x, y, p) in framed.enumerate_pixels_mut() {
+        if x < 20 || y < 20 || x >= 880 || y >= 1280 {
+            *p = image::Rgb([120, 30, 30]);
+        }
+    }
+    assert_eq!(detect(framed), 0);
+    // Two columns of plain text.
+    let mut text = image::RgbImage::from_pixel(900, 1300, image::Rgb([250, 250, 250]));
+    for col in 0..2u32 {
+        for line in (0..60u32).filter(|l| l % 12 != 11) {
+            for y in 60 + line * 20..70 + line * 20 {
+                for x in (60 + col * 420..420 + col * 420).filter(|x| (x / 4 + line) % 3 != 0) {
+                    text.put_pixel(x, y, image::Rgb([30, 30, 30]));
+                }
+            }
+        }
+    }
+    assert_eq!(detect(text), 0);
+}

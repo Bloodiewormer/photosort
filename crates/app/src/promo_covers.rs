@@ -15,6 +15,9 @@ const MAX_COVERS: usize = 24;
 /// Detects rectangular cover regions forming a grid on a promotional page.
 /// Returns bounding boxes `[x0, y0, x1, y1]` in original image pixels.
 /// Returns an empty Vec if the image does not contain a typical card grid.
+// shortcut: the page background is the mean colour of the outer border, so strong gradients,
+// decorative frames and cards that touch without a gutter give no regions (soft gradients may
+// lose some cards); upgrade to a local-contrast or learned detector if real pages need it.
 pub fn detect_cover_regions(img: &DynamicImage) -> Vec<[f32; 4]> {
     let (orig_w, orig_h) = img.dimensions();
     if orig_w < 100 || orig_h < 100 {
@@ -462,10 +465,13 @@ pub fn associate_covers(
                 && l_ymid <= cover[3] + 15.0;
 
             if inside {
+                // Zero only when truly inside; within the slack, how far outside it is.
+                let out_x = (cover[0] - l_xmid).max(l_xmid - cover[2]).max(0.0);
+                let out_y = (cover[1] - l_ymid).max(l_ymid - cover[3]).max(0.0);
                 pair_candidates.push(PairCandidate {
                     cover_idx: c_idx,
                     work_idx: w_idx,
-                    dist: 0.0,
+                    dist: out_x + out_y,
                 });
                 continue;
             }
@@ -505,6 +511,23 @@ pub fn associate_covers(
             }
         }
     }
+
+    // A title about as close to two covers (e.g. in the gutter between two rows) is ambiguous:
+    // leaving it unassigned beats giving it to the wrong card.
+    let mean_h = covers.iter().map(|c| c[3] - c[1]).sum::<f32>() / covers.len() as f32;
+    let tie = (0.02 * mean_h).max(1.0);
+    let ambiguous: Vec<bool> = (0..works.len())
+        .map(|w| {
+            let mut d: Vec<f32> = pair_candidates
+                .iter()
+                .filter(|c| c.work_idx == w)
+                .map(|c| c.dist)
+                .collect();
+            d.sort_by(f32::total_cmp);
+            d.len() >= 2 && d[1] - d[0] <= tie
+        })
+        .collect();
+    pair_candidates.retain(|c| !ambiguous[c.work_idx]);
 
     // Sort candidates by distance ascending
     pair_candidates.sort_by(|a, b| a.dist.total_cmp(&b.dist));
