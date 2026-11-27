@@ -198,6 +198,29 @@ pub fn named(response: egui::Response, name: &str) -> egui::Response {
     response
 }
 
+/// Says in Spanish the names egui gives its own controls, which it has no setting for.
+pub struct SpanishNames;
+
+impl egui::Plugin for SpanishNames {
+    fn debug_name(&self) -> &'static str {
+        "photosort_spanish_names"
+    }
+
+    fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
+        let Some(update) = &mut output.platform_output.accesskit_update else {
+            return;
+        };
+        for (_, node) in &mut update.nodes {
+            let spanish = match node.label() {
+                Some("Close window") => "Cerrar ventana",
+                Some("Resize panel") => "Cambiar el tamaño del panel",
+                _ => continue,
+            };
+            node.set_label(spanish);
+        }
+    }
+}
+
 /// Draws the keyboard focus ring around any focused control. Buttons with their own stroke or
 /// no frame hide egui's focus stroke, so it is painted here, once, outside the control.
 pub fn paint_focus_ring(ctx: &egui::Context) {

@@ -137,6 +137,7 @@ impl PhotosortApp {
         let settings = loaded.settings;
         let (thumbs, thumbs_warning) = open_thumbnails(&data_dir, &settings.valid_roots());
         theme::configure_styles(&cc.egui_ctx, settings.theme);
+        cc.egui_ctx.add_plugin(theme::SpanishNames);
 
         let logo_texture = theme::logo_color_image().map(|img| {
             cc.egui_ctx

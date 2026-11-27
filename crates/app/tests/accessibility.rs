@@ -480,3 +480,19 @@ fn enter_on_close_or_back_never_starts_an_export() {
     let done = harness.wait_for(false, |h| h.has_name_containing("Abrir carpeta"));
     assert!(done && !is_empty_dir(&dest), "Intro sin foco no exportó");
 }
+
+#[test]
+fn names_that_egui_gives_are_in_spanish() {
+    let mut harness = Harness::new(CaptureView::Gallery, Theme::Dark);
+    harness.press(Key::ArrowRight, Modifiers::NONE);
+    assert!(
+        harness
+            .find(Role::Splitter, "Cambiar el tamaño del panel")
+            .is_some()
+    );
+    harness.click("Exportar…");
+    assert!(harness.find(Role::Button, "Cerrar ventana").is_some());
+    for english in ["Close window", "Resize panel"] {
+        assert!(!harness.has_name_containing(english), "{english}");
+    }
+}
