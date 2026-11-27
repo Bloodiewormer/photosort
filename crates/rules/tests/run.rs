@@ -222,6 +222,16 @@ fn read_facts_reads_png_with_and_without_exif_and_gif() {
 }
 
 #[test]
+fn read_facts_reads_jfif_as_jpeg() {
+    let tmp = tempfile::tempdir().unwrap();
+    let jfif = write_file(tmp.path(), "image.jfif", &jpeg_bytes(320, 240, None));
+    let f = read_facts(&jfif).unwrap();
+    assert_eq!(f.extension, "jfif");
+    assert_eq!(f.format.as_deref(), Some("JPEG"));
+    assert_eq!((f.width, f.height), (320, 240));
+}
+
+#[test]
 fn run_populates_rules_suggestions_and_second_run_analyzes_nothing() {
     let s = Setup::new(&[
         ("shots/Screenshot_01.png", png_bytes(1920, 1080, None)),

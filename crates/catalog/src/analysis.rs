@@ -36,7 +36,15 @@ pub struct StageErrorRecord {
 /// can NEVER contain OCR text, file paths, or file names.
 pub fn sanitize_stage_error_reason(stage: &str, raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
-    let msg = if lower.contains("not found")
+    let msg = if lower.contains("códec de imagen")
+        || lower.contains("codec de imagen")
+        || lower.contains("image codec")
+        || (lower.contains("imagen") && (lower.contains("códec") || lower.contains("codec")))
+    {
+        "Códec de imagen no disponible"
+    } else if lower.contains("códec") || lower.contains("codec") {
+        "Códec de vídeo no disponible"
+    } else if lower.contains("not found")
         || lower.contains("no such file")
         || lower.contains("os error 2")
         || lower.contains("os error 3")
@@ -61,8 +69,6 @@ pub fn sanitize_stage_error_reason(stage: &str, raw: &str) -> String {
         || lower.contains("catalogo")
     {
         "Error al guardar en el catálogo"
-    } else if lower.contains("códec") || lower.contains("codec") {
-        "Códec de vídeo no disponible"
     } else if lower.contains("corrupt")
         || lower.contains("invalid")
         || lower.contains("decode")

@@ -75,6 +75,23 @@ pub fn read_facts(path: &Path) -> io::Result<Facts> {
         });
     }
 
+    if thumbs::is_wic_path(path) {
+        let meta = thumbs::read_image_metadata(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        return Ok(Facts {
+            file_name,
+            extension,
+            format: Some(meta.format),
+            width: meta.width,
+            height: meta.height,
+            has_camera_exif: false,
+            captured_at_ns: None,
+            captured_year: None,
+            media_type: catalog::MediaType::Image,
+            duration_ms: None,
+        });
+    }
+
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let detected_format = reader.format().map(image_format_name);
     let (width, height) = reader.into_dimensions().map_err(|e| match e {
@@ -125,13 +142,15 @@ fn image_format_name(fmt: image::ImageFormat) -> &'static str {
 
 fn format_from_extension(ext: &str) -> Option<&'static str> {
     match ext {
-        "jpg" | "jpeg" => Some("JPEG"),
+        "jpg" | "jpeg" | "jfif" => Some("JPEG"),
         "png" => Some("PNG"),
         "gif" => Some("GIF"),
         "webp" => Some("WEBP"),
         "bmp" => Some("BMP"),
         "tif" | "tiff" => Some("TIFF"),
         "avif" => Some("AVIF"),
+        "heic" | "heif" => Some("HEIC"),
+        "jxl" => Some("JXL"),
         "ico" => Some("ICO"),
         _ => None,
     }

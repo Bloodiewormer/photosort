@@ -6,7 +6,8 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif", "avif", "jxl",
+    "jpg", "jpeg", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif", "avif",
+    "jxl",
 ];
 
 pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "3gp", "mkv", "wmv", "mov", "avi"];

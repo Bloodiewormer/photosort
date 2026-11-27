@@ -144,3 +144,17 @@ fn sha256_of_a_missing_file_is_an_error() {
     let tmp = tempfile::tempdir().unwrap();
     assert!(sha256_file(&tmp.path().join("missing.jpg")).is_err());
 }
+
+#[test]
+fn scans_jfif_files_as_images() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    write(&root, "photo.jfif", b"test jpeg");
+    write(&root, "UPPER.JFIF", b"test jpeg upper");
+
+    let report = scan(&root).unwrap();
+    assert_eq!(names(&root, &report.files), ["UPPER.JFIF", "photo.jfif"]);
+    for f in &report.files {
+        assert_eq!(f.media_type, scanner::MediaType::Image);
+    }
+}

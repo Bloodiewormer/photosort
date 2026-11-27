@@ -1,5 +1,6 @@
 use fsguard::DestPath;
 pub mod video;
+pub mod wic;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
@@ -18,6 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub use video::{
     VideoMetadata, create_synthetic_video, extract_frame, extract_frames, is_video_extension,
     is_video_path, read_metadata,
+};
+pub use wic::{
+    ImageFacts, WIC_EXTENSIONS, decode_wic, is_wic_extension, is_wic_path, read_image_metadata,
 };
 
 const JPEG_QUALITY: u8 = 85;
@@ -102,14 +106,11 @@ impl Thumbs {
             return Ok(png_target.as_path().to_path_buf());
         }
 
-        let (resized, is_png) = if is_video_path(source) {
-            let frame = extract_frame(source, 0.1, self.max_px)?;
-            (DynamicImage::ImageRgb8(frame), false)
+        let resized = decode(source, self.max_px)?;
+        let is_png = if is_video_path(source) {
+            false
         } else {
-            let ext_format = format_for_extension(source)?;
-            let img = decode_and_resize(source, ext_format, self.max_px)?;
-            let is_png = img.color().has_alpha();
-            (img, is_png)
+            resized.color().has_alpha()
         };
 
         let target = if is_png { png_target } else { jpg_target };
@@ -147,7 +148,7 @@ fn format_for_extension(path: &Path) -> Result<ImageFormat, ThumbError> {
         .and_then(|e| e.to_str())
         .ok_or_else(|| ThumbError::Unsupported("missing file extension".into()))?;
     match ext.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => Ok(ImageFormat::Jpeg),
+        "jpg" | "jpeg" | "jfif" => Ok(ImageFormat::Jpeg),
         "png" => Ok(ImageFormat::Png),
         "webp" => Ok(ImageFormat::WebP),
         "gif" => Ok(ImageFormat::Gif),
@@ -174,6 +175,8 @@ pub fn decode(source: &Path, max_px: u32) -> Result<DynamicImage, ThumbError> {
     if is_video_path(source) {
         let frame = extract_frame(source, 0.1, max_px)?;
         Ok(DynamicImage::ImageRgb8(frame))
+    } else if is_wic_path(source) {
+        decode_wic(source, max_px)
     } else {
         decode_and_resize(source, format_for_extension(source)?, max_px)
     }
