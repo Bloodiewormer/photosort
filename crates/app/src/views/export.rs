@@ -501,6 +501,30 @@ fn draw_done_step(
             });
     }
 
+    if !summary.warnings.is_empty() {
+        ui.add_space(theme::SPACE_SM);
+        ui.label(
+            RichText::new("Avisos:")
+                .strong()
+                .color(palette.status_suggested_fg.color32()),
+        );
+        ui.add_space(theme::SPACE_XS);
+        ScrollArea::vertical()
+            .id_salt("export_warning_list")
+            .max_height(100.0)
+            .show(ui, |ui| {
+                for (path, warning) in &summary.warnings {
+                    let name = path.file_name().unwrap_or(path.as_os_str());
+                    ui.label(
+                        RichText::new(format!("{} — {warning}", name.to_string_lossy()))
+                            .size(theme::FONT_SMALL)
+                            .color(palette.status_suggested_fg.color32()),
+                    )
+                    .on_hover_text(path.display().to_string());
+                }
+            });
+    }
+
     ui.add_space(theme::SPACE_LG);
     ui.separator();
     ui.add_space(theme::SPACE_SM);

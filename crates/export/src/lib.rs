@@ -86,6 +86,8 @@ pub enum Outcome {
 #[derive(Debug)]
 pub struct ExportReport {
     pub outcomes: Vec<(PathBuf, Outcome)>,
+    /// Per source, the manifest's `warning`: something optional that did not happen.
+    pub warnings: Vec<(PathBuf, String)>,
     pub manifest_json: PathBuf,
     pub manifest_csv: PathBuf,
     pub stopped: bool,
@@ -693,6 +695,7 @@ pub fn export_with_options(
     fs::create_dir_all(dest.as_path())?;
     let total = items.len();
     let mut outcomes = Vec::with_capacity(total);
+    let mut all_warnings = Vec::new();
     let mut files: Vec<Value> = Vec::with_capacity(total);
     let has_tagged_hashes = options.embed_jpeg_tags;
     let mut csv = if has_tagged_hashes {
@@ -784,8 +787,9 @@ pub fn export_with_options(
             file_obj["sha256_original"] = json!(sha);
             file_obj["sha256_after_tagging"] = json!(final_sha);
         }
-        if let Some(w) = &warning {
+        if let Some(w) = warning {
             file_obj["warning"] = json!(w);
+            all_warnings.push((item.source.clone(), w));
         }
         files.push(file_obj);
 
@@ -855,6 +859,7 @@ pub fn export_with_options(
     let manifest_csv = write_new(dest, "manifest", "csv", &csv)?;
     Ok(ExportReport {
         outcomes,
+        warnings: all_warnings,
         manifest_json,
         manifest_csv,
         stopped,
