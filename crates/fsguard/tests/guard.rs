@@ -239,3 +239,37 @@ fn a_data_folder_reached_through_a_junction_outside_the_library_is_usable() {
     assert!(db.verify().is_ok());
     assert!(moved.join("photosort").join("catalog.sqlite").is_file());
 }
+
+/// `name:stream` opens a stream of `name`, and NTFS follows a junction to reach it. The guard must
+/// refuse it by rule, not because Windows happens to return an error for that spelling.
+#[cfg(windows)]
+#[test]
+fn refuses_a_stream_name_that_a_junction_would_carry_into_the_library() {
+    let f = fixture();
+    let export = f.tmp.path().join("export");
+    let out = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(export.join("link"))
+        .arg(&f.library)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "could not create junction: {out:?}");
+    let dest = ensure_writable(&export, &f.roots).unwrap();
+
+    for name in ["link:s", "link::$DATA", "new:s"] {
+        assert!(
+            matches!(
+                dest.join_name(name.as_ref()),
+                Err(GuardError::InvalidName(_))
+            ),
+            "{name} was accepted"
+        );
+        assert!(
+            matches!(
+                ensure_writable(&export.join(name), &f.roots),
+                Err(GuardError::InvalidName(_))
+            ),
+            "{name} was accepted"
+        );
+    }
+}

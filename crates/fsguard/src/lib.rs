@@ -145,6 +145,14 @@ fn resolve(path: &Path) -> Result<PathBuf, GuardError> {
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(GuardError::ParentDirComponent(path.to_path_buf()));
     }
+    // `name:stream` writes into `name`, through it if it is a link: never a plain name on Windows.
+    #[cfg(windows)]
+    if let Some(Component::Normal(name)) = path
+        .components()
+        .find(|c| matches!(c, Component::Normal(n) if n.as_encoded_bytes().contains(&b':')))
+    {
+        return Err(GuardError::InvalidName(name.to_owned()));
+    }
     let abs = std::path::absolute(path)?;
     let mut missing: Vec<OsString> = Vec::new();
     let mut current = abs.as_path();
