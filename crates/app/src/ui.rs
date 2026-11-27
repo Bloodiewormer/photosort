@@ -505,11 +505,8 @@ impl PhotosortApp {
 
     fn reload_person_cards(&mut self) {
         if let Some(cat) = &self.catalog {
-            self.person_cards = views::persons::PersonCards::load(
-                cat,
-                &self.persons,
-                &self.persons_view.postponed_persons,
-            );
+            self.person_cards =
+                views::persons::PersonCards::load(cat, &self.persons_view.postponed_persons);
         }
     }
 

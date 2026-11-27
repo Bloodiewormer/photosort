@@ -35,14 +35,17 @@ pub struct PersonCards {
 }
 
 impl PersonCards {
-    pub fn load(cat: &Catalog, persons: &[Person], postponed: &HashSet<PersonId>) -> Self {
+    pub fn load(cat: &Catalog, postponed: &HashSet<PersonId>) -> Self {
         let mut cards = Self::default();
-        for person in persons {
-            if let (Some(face_id), Some(asset)) = (person.cover_face_id, person.cover_asset_id)
-                && let Ok(faces) = cat.asset_face_details(asset)
-                && let Some(face) = faces.into_iter().find(|f| f.id == face_id)
-            {
-                cards.covers.insert(person.id, face);
+        // One query for every cover: a query per person took ~24 ms with 500 persons.
+        for (face, path, sha256) in cat.person_covers().unwrap_or_default() {
+            if let Some(source) = path {
+                cards
+                    .thumbs
+                    .insert(face.asset_id, ThumbRequest { source, sha256 });
+            }
+            if let Some(pid) = face.person_id {
+                cards.covers.insert(pid, face);
             }
         }
         cards.naming = cat
@@ -56,8 +59,10 @@ impl PersonCards {
                 (p, faces)
             });
         let naming_faces = cards.naming.iter().flat_map(|(_, faces)| faces);
-        for face in cards.covers.values().chain(naming_faces) {
-            if let Ok(Some(entry)) = cat.entry_for(face.asset_id) {
+        for face in naming_faces {
+            if !cards.thumbs.contains_key(&face.asset_id)
+                && let Ok(Some(entry)) = cat.entry_for(face.asset_id)
+            {
                 let thumb = ThumbRequest {
                     source: entry.path,
                     sha256: entry.sha256,

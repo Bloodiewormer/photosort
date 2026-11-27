@@ -638,3 +638,44 @@ fn person_edits_and_grouping_wait_for_another_writer() {
     );
     assert!(s.cat.asset_face_details(b).unwrap()[0].person_id.is_some());
 }
+
+#[test]
+fn person_covers_give_each_persons_best_face_with_its_photo_in_one_query() {
+    let mut s = setup(&[("a.jpg", b"1"), ("b.jpg", b"2")]);
+    let a = s.asset("a.jpg");
+    let b = s.asset("b.jpg");
+    let emb = vec![0.0f32; EMBEDDING_DIM];
+    s.cat
+        .save_vision_result(
+            a,
+            SIGLIP2_MODEL_ID,
+            &emb,
+            &[DetectedFace::new([10.0, 10.0, 100.0, 100.0], 0.92)],
+        )
+        .unwrap();
+    s.cat
+        .save_vision_result(
+            b,
+            SIGLIP2_MODEL_ID,
+            &emb,
+            &[DetectedFace::new([10.0, 10.0, 100.0, 100.0], 0.97)],
+        )
+        .unwrap();
+    let face_a = s.cat.asset_face_details(a).unwrap()[0].id;
+    let face_b = s.cat.asset_face_details(b).unwrap()[0].id;
+    let p = s.cat.create_person(Some("Carlos")).unwrap();
+    let empty = s.cat.create_person(None).unwrap();
+    s.cat.assign_face_to_person(face_a, p, true).unwrap();
+    s.cat.assign_face_to_person(face_b, p, true).unwrap();
+
+    let covers = s.cat.person_covers().unwrap();
+
+    assert_eq!(covers.len(), 1, "a person without faces has no cover");
+    let (face, path, sha256) = &covers[0];
+    assert_eq!(face.id, face_b);
+    assert_eq!(face.person_id, Some(p));
+    assert_ne!(face.person_id, Some(empty));
+    let entry = s.cat.entry_for(b).unwrap().unwrap();
+    assert_eq!(path.as_ref(), Some(&entry.path));
+    assert_eq!(sha256, &entry.sha256);
+}
