@@ -170,3 +170,81 @@ fn stages_are_independent() {
     assert!(s.cat.pending("rules", 1, 10).unwrap().is_empty());
     assert_eq!(s.cat.pending("ocr", 1, 10).unwrap().len(), 3);
 }
+
+#[test]
+fn stage_errors_persist_sanitize_increment_clear_and_hide_removed_folders() {
+    use catalog::{OCR_STAGE, VISION_STAGE, sanitize_stage_error_reason};
+
+    // Sanitizer must NEVER leak OCR text, paths, or filenames.
+    let nasty =
+        r"failed reading C:\Users\Private\secret_photo_99.jpg: OCR text 'Contraseña secreta 12345'";
+    let clean = sanitize_stage_error_reason(OCR_STAGE, nasty);
+    assert!(!clean.contains("Private"));
+    assert!(!clean.contains("secret_photo"));
+    assert!(!clean.contains("Contraseña"));
+    assert!(!clean.contains("12345"));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_a = tmp.path().join("lib_a");
+    let lib_b = tmp.path().join("lib_b");
+    write(&lib_a, "a.jpg", b"img-a");
+    write(&lib_b, "b.jpg", b"img-b");
+    let roots_guard = [
+        LibraryRoot::new(&lib_a).unwrap(),
+        LibraryRoot::new(&lib_b).unwrap(),
+    ];
+    fs::create_dir_all(tmp.path().join("data")).unwrap();
+    let db = ensure_writable(
+        &tmp.path().join("data").join("catalog.sqlite"),
+        &roots_guard,
+    )
+    .unwrap();
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.index(&roots_guard[0]).unwrap();
+    cat.index(&roots_guard[1]).unwrap();
+    let root_a = &roots_guard[0];
+    let root_b = &roots_guard[1];
+
+    let a = cat
+        .asset_of(&dunce::canonicalize(lib_a.join("a.jpg")).unwrap())
+        .unwrap()
+        .unwrap();
+    let b = cat
+        .asset_of(&dunce::canonicalize(lib_b.join("b.jpg")).unwrap())
+        .unwrap()
+        .unwrap();
+
+    cat.record_stage_error(a, VISION_STAGE, r"decode failed on C:\secret\a.jpg")
+        .unwrap();
+    cat.record_stage_error(a, VISION_STAGE, r"decode failed on C:\secret\a.jpg")
+        .unwrap();
+    cat.record_stage_error(b, OCR_STAGE, "timeout reading secret OCR text")
+        .unwrap();
+
+    let both = vec![
+        root_a.as_path().to_path_buf(),
+        root_b.as_path().to_path_buf(),
+    ];
+    let only_a = vec![root_a.as_path().to_path_buf()];
+
+    assert_eq!(cat.count_stage_error_assets_in_roots(&both).unwrap(), 2);
+    assert_eq!(cat.count_stage_error_assets_in_roots(&only_a).unwrap(), 1);
+
+    let list_a = cat.list_stage_errors_in_roots(&only_a).unwrap();
+    assert_eq!(list_a.len(), 1);
+    assert_eq!(list_a[0].asset, a);
+    assert_eq!(list_a[0].stage, VISION_STAGE);
+    assert_eq!(list_a[0].attempts, 2);
+    assert_eq!(list_a[0].reason, "No se pudo leer la imagen");
+    assert!(list_a[0].last_at_secs > 0);
+
+    // Succeeding on that stage clears the error automatically.
+    cat.mark_done(a, VISION_STAGE, 1).unwrap();
+    assert_eq!(cat.count_stage_error_assets_in_roots(&only_a).unwrap(), 0);
+    assert!(cat.list_stage_errors_in_roots(&only_a).unwrap().is_empty());
+
+    // Re-review (`reset_stages`) also clears persisted errors for that asset/stage.
+    assert_eq!(cat.count_stage_error_assets_in_roots(&both).unwrap(), 1);
+    cat.reset_stages(&[b], &[OCR_STAGE]).unwrap();
+    assert_eq!(cat.count_stage_error_assets_in_roots(&both).unwrap(), 0);
+}

@@ -20,6 +20,7 @@ pub enum ActiveView {
     Works,
     Tags,
     Settings,
+    Errors,
 }
 
 #[derive(Default)]
@@ -34,6 +35,7 @@ pub struct TopBarOutcome {
     pub search_changed: bool,
     pub toggle_pause: bool,
     pub retry_failed: bool,
+    pub open_errors: bool,
     pub open_settings: bool,
     pub dismiss_error: bool,
     pub dismiss_notice: bool,
@@ -53,6 +55,7 @@ pub fn draw_top_bar(
     search: &mut String,
     focus_search_next_frame: &mut bool,
     engine_snapshot: &EngineSnapshot,
+    error_count: usize,
     banner_error: Option<&str>,
     status_notice: Option<&str>,
 ) -> TopBarOutcome {
@@ -213,20 +216,30 @@ pub fn draw_top_bar(
                         }
                     }
 
-                    if engine_snapshot.failed_count > 0 {
+                    let shown_errors = error_count.max(engine_snapshot.failed_count);
+                    if shown_errors > 0 {
                         if ui.button("Reintentar").clicked() {
                             outcome.retry_failed = true;
                         }
-                        let err_txt = if engine_snapshot.failed_count == 1 {
+                        let err_txt = if shown_errors == 1 {
                             "1 error".to_string()
                         } else {
-                            format!("{} errores", engine_snapshot.failed_count)
+                            format!("{shown_errors} errores")
                         };
-                        ui.label(
-                            RichText::new(err_txt)
-                                .size(theme::FONT_SMALL)
-                                .color(palette.status_rejected_fg.color32()),
-                        );
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(err_txt)
+                                        .size(theme::FONT_SMALL)
+                                        .color(palette.status_rejected_fg.color32()),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("Ver lista de fotos con errores")
+                            .clicked()
+                        {
+                            outcome.open_errors = true;
+                        }
                     } else if !engine_snapshot.paused_stages.is_empty()
                         && !matches!(engine_snapshot.phase, EnginePhase::Blocked(_))
                     {

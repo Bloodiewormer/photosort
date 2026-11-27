@@ -98,6 +98,9 @@ pub fn analyze_pending_item(
                 catalog.suggest(item.asset, label, Source::Rules, s.confidence)?;
                 suggestions += 1;
             }
+            if catalog.suggest_work_from_path(item.asset, &item.path)? {
+                suggestions += 1;
+            }
             catalog.mark_done(item.asset, STAGE, VERSION)?;
             Ok(Ok(suggestions))
         }
@@ -189,6 +192,9 @@ pub fn run_with(
                     for s in suggest(&facts) {
                         let label = catalog.label(s.kind, s.name)?;
                         catalog.suggest(item.asset, label, Source::Rules, s.confidence)?;
+                        report.suggestions += 1;
+                    }
+                    if catalog.suggest_work_from_path(item.asset, &item.path)? {
                         report.suggestions += 1;
                     }
                     catalog.mark_done(item.asset, STAGE, VERSION)?;

@@ -1,4 +1,4 @@
-use catalog::{Assignment, LabelKind, Status};
+use catalog::{AssetWork, Assignment, LabelKind, Status};
 use fsguard::DestPath;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -15,6 +15,8 @@ pub struct ExportItem {
     pub source: PathBuf,
     /// What the catalog knows about the image; goes into the manifest.
     pub labels: Vec<Assignment>,
+    /// Optional work ownership relation (`belongs_to`); goes into the manifest when not rejected.
+    pub belongs_to: Option<AssetWork>,
 }
 
 /// How exported copies are arranged inside the destination folder.
@@ -383,7 +385,9 @@ pub fn export_with(
     let total = items.len();
     let mut outcomes = Vec::with_capacity(total);
     let mut files: Vec<Value> = Vec::with_capacity(total);
-    let mut csv = String::from("source_path,dest_path,sha256,size,status,labels\n");
+    let mut csv = String::from(
+        "source_path,dest_path,sha256,size,status,labels,belongs_to_work,belongs_to_chapter,belongs_to_page\n",
+    );
     let (mut copied, mut present, mut failed, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     let mut stopped = false;
 
@@ -421,6 +425,21 @@ pub fn export_with(
         let source = item.source.to_string_lossy();
         let dest_text = dest_path.as_ref().map(|p| p.to_string_lossy().into_owned());
 
+        let applied_work = item
+            .belongs_to
+            .as_ref()
+            .filter(|w| w.status != Status::Rejected);
+        let belongs_to_json = applied_work.map(|w| {
+            json!({
+                "work": w.work_name,
+                "chapter": w.chapter,
+                "page": w.page,
+                "source": lower(w.source),
+                "confidence": w.confidence,
+                "status": lower(w.status),
+            })
+        });
+
         files.push(json!({
             "source_path": source,
             "dest_path": dest_text,
@@ -434,12 +453,21 @@ pub fn export_with(
                 "confidence": l.confidence,
                 "status": lower(l.status),
             })).collect::<Vec<_>>(),
+            "belongs_to": belongs_to_json,
         }));
         let label_text = applied
             .iter()
             .map(|l| format!("{}:{}", lower(l.kind), l.name))
             .collect::<Vec<_>>()
             .join("; ");
+        let (work_col, chapter_col, page_col) = match applied_work {
+            Some(w) => (
+                w.work_name.clone(),
+                w.chapter.clone(),
+                w.page.map(|p| p.to_string()).unwrap_or_default(),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        };
         let fields = [
             source.into_owned(),
             dest_text.unwrap_or_default(),
@@ -447,6 +475,9 @@ pub fn export_with(
             size.map(|s| s.to_string()).unwrap_or_default(),
             status,
             label_text,
+            work_col,
+            chapter_col,
+            page_col,
         ];
         csv.push_str(&fields.map(|f| csv_field(&f)).join(","));
         csv.push('\n');

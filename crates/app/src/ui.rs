@@ -18,8 +18,8 @@ use crate::vision_worker::{TagsApplyEvent, TagsApplyWorker, VisionRankResult, Vi
 use crate::worker::{Notify, PreviewWorker, ThumbPool, ThumbnailProvider};
 use crate::works_worker::{WorksEvent, WorksWorker};
 use catalog::{
-    AssetId, Catalog, Counts, DuplicateGroup, Entry, LabelCount, ReviewedCounts, ReviewedFilter,
-    SCREENSHOT_CATEGORY, Status, VisionRule, WorkSummary,
+    AssetId, Catalog, Counts, DuplicateGroup, Entry, LabelCount, LabelId, ReviewedCounts,
+    ReviewedFilter, SCREENSHOT_CATEGORY, StageErrorRecord, Status, VisionRule, WorkSummary,
 };
 use eframe::egui::{self, Key, Modifiers, Pos2, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -51,9 +51,12 @@ pub struct PhotosortApp {
     vision_analyzed_count: usize,
     tags_view: TagsViewState,
     similarity_view: Option<SimilarityView>,
+    work_order_view: Option<(LabelId, String)>,
     pending_suggestions_assets: HashSet<AssetId>,
     review_flow: ReviewFlow,
     duplicate_groups: Vec<DuplicateGroup>,
+    stage_errors: Vec<StageErrorRecord>,
+    stage_error_assets_count: usize,
 
     filter: FilterState,
     sidebar_state: SidebarState,
@@ -194,9 +197,12 @@ impl PhotosortApp {
             vision_analyzed_count: 0,
             tags_view: TagsViewState::default(),
             similarity_view: None,
+            work_order_view: None,
             pending_suggestions_assets: HashSet::new(),
             review_flow: ReviewFlow::new(),
             duplicate_groups: Vec::new(),
+            stage_errors: Vec::new(),
+            stage_error_assets_count: 0,
             filter: FilterState::default(),
             sidebar_state: SidebarState::default(),
             settings_state: SettingsViewState::default(),
@@ -278,6 +284,9 @@ impl PhotosortApp {
             CaptureView::Tags => {
                 self.active_view = ActiveView::Tags;
             }
+            CaptureView::Errors => {
+                self.active_view = ActiveView::Errors;
+            }
         }
         self.preset_export_dir = preset_export_dir;
         self
@@ -351,7 +360,20 @@ impl PhotosortApp {
         if let Ok(n) = cat.count_assets_with_vision_in_roots(&roots) {
             self.vision_analyzed_count = n;
         }
-        if self.similarity_view.is_none() {
+        match cat.list_stage_errors_in_roots(&roots) {
+            Ok(list) => self.stage_errors = list,
+            Err(e) => self.banner_error = Some(format!("Error al cargar errores de revisión: {e}")),
+        }
+        if let Ok(n) = cat.count_stage_error_assets_in_roots(&roots) {
+            self.stage_error_assets_count = n;
+        }
+        if let Some((work_id, _)) = self.work_order_view.clone() {
+            if let Ok(next) = cat.entries_belonging_to_work(work_id, Some(&roots)) {
+                self.selection.reconcile(&self.entries, &next);
+                self.entries = next;
+                self.sync_inspector(true);
+            }
+        } else if self.similarity_view.is_none() {
             self.reload_entries();
         } else {
             self.sync_inspector(true);
@@ -360,6 +382,7 @@ impl PhotosortApp {
 
     fn reload_entries(&mut self) {
         self.similarity_view = None;
+        self.work_order_view = None;
         let Some(cat) = &self.catalog else {
             return;
         };
@@ -423,12 +446,14 @@ impl PhotosortApp {
     fn reload_inspector_details(&mut self) {
         match (self.inspector.asset, &self.catalog) {
             (Some(asset), Some(cat)) => {
+                self.inspector.asset_work = cat.asset_work(asset).unwrap_or(None);
                 self.inspector.ocr_lines = cat.ocr_lines(asset).unwrap_or_default();
                 self.inspector.ocr_done = cat.has_ocr_done(asset).unwrap_or(false);
                 self.inspector.faces = cat.asset_faces(asset).unwrap_or_default();
                 self.inspector.vision_done = cat.has_vision_done(asset).unwrap_or(false);
             }
             _ => {
+                self.inspector.asset_work = None;
                 self.inspector.ocr_lines.clear();
                 self.inspector.ocr_done = false;
                 self.inspector.faces.clear();
@@ -765,6 +790,31 @@ impl PhotosortApp {
         if let Some(engine) = &self.review_engine {
             engine.prioritize(assets);
         }
+    }
+
+    fn retry_all_failed(&mut self) {
+        if let Some(cat) = &self.catalog {
+            let _ = cat.clear_all_stage_errors_in_roots(&self.settings.library_roots);
+        }
+        if let Some(engine) = &self.review_engine {
+            engine.retry_failed();
+        } else if self.demo_mode {
+            self.status_notice = Some("Modo demo: errores limpiados (sin cargar modelos)".into());
+        }
+        self.reload_catalog();
+    }
+
+    fn retry_single_asset(&mut self, asset: AssetId) {
+        if let Some(cat) = &self.catalog {
+            let _ = cat.clear_stage_errors_for_asset(asset);
+        }
+        if let Some(engine) = &self.review_engine {
+            engine.retry_asset(asset);
+        } else if self.demo_mode {
+            self.status_notice =
+                Some("Modo demo: foto puesta en cola para reintentar (sin cargar modelos)".into());
+        }
+        self.reload_catalog();
     }
 
     fn find_similar_to(&mut self, entry: &Entry) {
@@ -1211,6 +1261,7 @@ impl eframe::App for PhotosortApp {
             &mut self.filter.search,
             &mut self.focus_search_next_frame,
             &self.engine_snapshot,
+            self.stage_error_assets_count,
             self.banner_error.as_deref(),
             self.status_notice.as_deref(),
         );
@@ -1220,6 +1271,9 @@ impl eframe::App for PhotosortApp {
         }
         if top_out.open_settings {
             self.active_view = ActiveView::Settings;
+        }
+        if top_out.open_errors {
+            self.active_view = ActiveView::Errors;
         }
         if top_out.toggle_pause {
             if self.demo_mode {
@@ -1239,10 +1293,8 @@ impl eframe::App for PhotosortApp {
                 engine.set_paused(next);
             }
         }
-        if top_out.retry_failed
-            && let Some(engine) = &self.review_engine
-        {
-            engine.retry_failed();
+        if top_out.retry_failed {
+            self.retry_all_failed();
         }
         if top_out.dismiss_error {
             self.banner_error = None;
@@ -1273,6 +1325,7 @@ impl eframe::App for PhotosortApp {
                     self.preview_loaded.as_ref(),
                 );
 
+                let work_banner = self.work_order_view.as_ref().map(|(_, name)| name.as_str());
                 let gal_out = views::gallery::draw(
                     ui,
                     palette,
@@ -1280,6 +1333,7 @@ impl eframe::App for PhotosortApp {
                     &mut self.selection,
                     &mut self.filter.sort,
                     self.similarity_view.as_ref(),
+                    work_banner,
                     &self.reviewed_assets,
                     &self.pending_suggestions_assets,
                     self.counts.locations > 0,
@@ -1339,6 +1393,24 @@ impl eframe::App for PhotosortApp {
                         match cat.reject(asset, label) {
                             Ok(()) => catalog_mutated = true,
                             Err(e) => self.banner_error = Some(format!("No se pudo rechazar: {e}")),
+                        }
+                    }
+                    if let Some(asset) = insp_out.accept_work {
+                        match cat.accept_asset_work(asset) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo confirmar la obra: {e}"))
+                            }
+                        }
+                    }
+                    if let Some(asset) = insp_out.reject_work {
+                        match cat.reject_asset_work(asset) {
+                            Ok(_) => catalog_mutated = true,
+                            Err(e) => {
+                                self.banner_error =
+                                    Some(format!("No se pudo descartar la obra: {e}"))
+                            }
                         }
                     }
                     if let Some((asset, kind, name)) = insp_out.add_user_label {
@@ -1489,6 +1561,7 @@ impl eframe::App for PhotosortApp {
                     palette,
                     &mut self.works_view,
                     &self.works,
+                    &self.settings.library_roots,
                     self.catalog.as_mut(),
                     self.works_worker.is_some(),
                     other_heavy,
@@ -1501,6 +1574,13 @@ impl eframe::App for PhotosortApp {
                 }
                 if let Some(work_id) = outcome.deleted {
                     self.filter.set_chip(work_id, None);
+                    if self
+                        .work_order_view
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id == work_id)
+                    {
+                        self.work_order_view = None;
+                    }
                 }
                 if outcome.catalog_mutated {
                     self.reload_catalog();
@@ -1518,6 +1598,25 @@ impl eframe::App for PhotosortApp {
                     self.filter.set_chip(work_id, Some(ChipMode::Require));
                     self.active_view = ActiveView::Gallery;
                     self.reload_entries();
+                }
+                if let Some((work_id, work_name)) = outcome.open_belongs_in_gallery
+                    && let Some(cat) = &self.catalog
+                {
+                    match cat.entries_belonging_to_work(work_id, Some(&self.settings.library_roots))
+                    {
+                        Ok(next) => {
+                            self.similarity_view = None;
+                            self.work_order_view = Some((work_id, work_name));
+                            self.selection.reconcile(&self.entries, &next);
+                            self.entries = next;
+                            self.active_view = ActiveView::Gallery;
+                            self.sync_inspector(true);
+                        }
+                        Err(e) => {
+                            self.banner_error =
+                                Some(format!("No se pudieron cargar las páginas de la obra: {e}"));
+                        }
+                    }
                 }
             }
             ActiveView::Tags => {
@@ -1566,6 +1665,7 @@ impl eframe::App for PhotosortApp {
                     &mut self.settings_state,
                     &self.root_counts,
                     &self.engine_snapshot,
+                    self.stage_error_assets_count,
                     &self.data_dir,
                     self.demo_mode,
                 );
@@ -1577,6 +1677,9 @@ impl eframe::App for PhotosortApp {
                 }
                 if let Some(root) = outcome.remove_folder {
                     self.remove_library(&root);
+                }
+                if outcome.open_errors {
+                    self.active_view = ActiveView::Errors;
                 }
                 if outcome.scan_changes_now {
                     if let Some(task) = self.foreground_heavy_task() {
@@ -1591,6 +1694,26 @@ impl eframe::App for PhotosortApp {
                 if outcome.settings_changed {
                     self.save_settings_and_sync_engine();
                     self.reload_catalog();
+                }
+            }
+            ActiveView::Errors => {
+                let outcome = views::errors::draw(
+                    ui,
+                    palette,
+                    &self.stage_errors,
+                    &self.thumb_pool,
+                    &self.thumb_textures,
+                    &self.thumb_failed,
+                );
+                self.last_thumbs_ready = outcome.thumbs_ready;
+                if outcome.back {
+                    self.active_view = ActiveView::Gallery;
+                }
+                if outcome.retry_all {
+                    self.retry_all_failed();
+                }
+                if let Some(asset) = outcome.retry_asset {
+                    self.retry_single_asset(asset);
                 }
             }
         }

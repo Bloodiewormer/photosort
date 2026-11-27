@@ -39,6 +39,7 @@ pub fn draw(
     selection: &mut Selection,
     sort: &mut Sort,
     similarity_view: Option<&SimilarityView>,
+    work_order_banner: Option<&str>,
     reviewed_assets: &HashSet<AssetId>,
     pending_suggestions_assets: &HashSet<AssetId>,
     has_indexed_locations: bool,
@@ -100,6 +101,31 @@ pub fn draw(
                         });
                     });
                 ui.add_space(theme::SPACE_MD);
+            } else if let Some(work_name) = work_order_banner {
+                Frame::new()
+                    .fill(palette.bg_panel.color32())
+                    .stroke(Stroke::new(1.0, palette.accent.color32()))
+                    .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+                    .inner_margin(Margin::symmetric(
+                        theme::SPACE_MD as i8,
+                        theme::SPACE_SM as i8,
+                    ))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(format!("Obra: {work_name}")).strong());
+                            ui.label(
+                                RichText::new("· Páginas ordenadas por capítulo y página")
+                                    .size(theme::FONT_SMALL)
+                                    .color(palette.text_secondary.color32()),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Volver a la galería").clicked() {
+                                    outcome.exit_similarity = true;
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(theme::SPACE_MD);
             }
 
             // Gallery header: count and sort
@@ -109,7 +135,7 @@ pub fn draw(
                         .size(theme::FONT_BODY)
                         .color(palette.text_secondary.color32()),
                 );
-                if similarity_view.is_none() {
+                if similarity_view.is_none() && work_order_banner.is_none() {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let prev_sort = *sort;
                         egui::ComboBox::from_id_salt("gallery_sort_combo")

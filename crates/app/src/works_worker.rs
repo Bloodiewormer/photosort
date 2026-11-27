@@ -53,6 +53,14 @@ impl WorksWorker {
                 }
             };
 
+            let filename_matched = match cat.apply_filename_works(None) {
+                Ok((_, matched)) => matched,
+                Err(e) => {
+                    emit(WorksEvent::Failed(e.to_string()));
+                    return;
+                }
+            };
+
             let matcher = match cat.load_work_matcher() {
                 Ok(m) => m,
                 Err(e) => {
@@ -74,22 +82,22 @@ impl WorksWorker {
                 emit(WorksEvent::Finished {
                     stopped: false,
                     processed: 0,
-                    matched_assets: 0,
-                    suggestions: 0,
+                    matched_assets: filename_matched,
+                    suggestions: filename_matched,
                 });
                 return;
             }
 
             let mut processed = 0usize;
             let mut matched_assets = 0usize;
-            let mut suggestions = 0usize;
+            let mut suggestions = filename_matched;
             let mut stopped = false;
 
             emit(WorksEvent::Progress {
                 done: 0,
                 total,
                 matched_assets: 0,
-                suggestions: 0,
+                suggestions,
             });
 
             for (idx, asset) in assets.into_iter().enumerate() {
@@ -101,7 +109,10 @@ impl WorksWorker {
                 match cat.apply_work_matches(asset, &matcher) {
                     Ok(res) => {
                         processed += 1;
-                        let count = res.works.len() + usize::from(res.promo_confidence.is_some());
+                        let count = res.works.len()
+                            + usize::from(res.promo_confidence.is_some())
+                            + usize::from(res.credits_confidence.is_some())
+                            + usize::from(res.recruitment_confidence.is_some());
                         if count > 0 {
                             matched_assets += 1;
                             suggestions += count;

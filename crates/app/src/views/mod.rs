@@ -1,5 +1,6 @@
 pub mod context_menu;
 pub mod duplicates;
+pub mod errors;
 pub mod export;
 pub mod gallery;
 pub mod inspector;

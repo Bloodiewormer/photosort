@@ -21,6 +21,7 @@ pub struct SettingsOutcome {
     pub add_folder: bool,
     pub remove_folder: Option<PathBuf>,
     pub scan_changes_now: bool,
+    pub open_errors: bool,
     pub settings_changed: bool,
     pub theme_changed: bool,
     pub error: Option<String>,
@@ -34,6 +35,7 @@ pub fn draw(
     state: &mut SettingsViewState,
     root_counts: &HashMap<PathBuf, usize>,
     engine_snapshot: &EngineSnapshot,
+    error_count: usize,
     data_dir: &Path,
     is_demo: bool,
 ) -> SettingsOutcome {
@@ -277,6 +279,41 @@ pub fn draw(
                                         .color(palette.status_rejected_fg.color32()),
                                     );
                                 }
+
+                                ui.add_space(theme::SPACE_SM);
+                                ui.separator();
+                                ui.add_space(theme::SPACE_SM);
+
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new("Errores de revisión")
+                                                .color(palette.text_primary.color32()),
+                                        );
+                                        let err_desc = if error_count == 0 {
+                                            "Sin fotos con errores pendientes".to_string()
+                                        } else {
+                                            format!(
+                                                "{} con fallos guardados",
+                                                count_phrase(error_count, "foto", "fotos")
+                                            )
+                                        };
+                                        ui.label(
+                                            RichText::new(err_desc)
+                                                .size(theme::FONT_SMALL)
+                                                .color(if error_count > 0 {
+                                                    palette.status_rejected_fg.color32()
+                                                } else {
+                                                    palette.text_secondary.color32()
+                                                }),
+                                        );
+                                    });
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if ui.button("Ver errores").clicked() {
+                                            outcome.open_errors = true;
+                                        }
+                                    });
+                                });
 
                                 ui.add_space(theme::SPACE_MD);
                                 ui.label(

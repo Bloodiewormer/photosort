@@ -2,9 +2,9 @@
 #![allow(clippy::disallowed_methods)]
 
 use catalog::{
-    AssetId, Catalog, LabelId, LabelKind, OcrLine, OcrRecognizer, PROMO_CATEGORY,
-    SCREENSHOT_CATEGORY, Source, Status, WorkEntry, WorkMatcher, extract_work_title_from_stem,
-    work_match_key,
+    AssetId, CREDITS_CATEGORY, Catalog, LabelId, LabelKind, OcrLine, OcrRecognizer, PROMO_CATEGORY,
+    ParsedWorkFilename, RECRUITMENT_CATEGORY, SCREENSHOT_CATEGORY, Source, Status, WorkEntry,
+    WorkMatcher, extract_work_title_from_stem, parse_work_from_stem, work_match_key,
 };
 use fsguard::{LibraryRoot, ensure_writable};
 use std::collections::{HashMap, HashSet};
@@ -620,4 +620,436 @@ fn deleting_a_work_removes_only_that_work() {
     assert_eq!(works.len(), 1);
     assert_eq!((works[0].label, works[0].aliases), (kept, 1));
     assert!(cat.work_aliases(doomed).unwrap().is_empty());
+}
+
+#[test]
+fn credits_and_recruitment_detected_from_ocr_without_flagging_dialogue() {
+    let matcher = WorkMatcher::build(&[]);
+
+    // 1. Spanish credits page
+    let credits_es = matcher.match_asset(
+        &[
+            line("CRÉDITOS", 0.96, [20.0, 20.0, 180.0, 44.0]),
+            line("Traducción: Alex", 0.94, [20.0, 60.0, 200.0, 82.0]),
+            line("Limpieza: Sam", 0.92, [20.0, 90.0, 200.0, 112.0]),
+            line("Typesetting: Pat", 0.91, [20.0, 120.0, 210.0, 142.0]),
+        ],
+        false,
+    );
+    assert!(credits_es.credits_confidence.is_some());
+    assert!(credits_es.recruitment_confidence.is_none());
+
+    // 2. English credits with abbreviated roles
+    let credits_en = matcher.match_asset(
+        &[
+            line("TL: Alice", 0.92, [20.0, 40.0, 120.0, 62.0]),
+            line("CL: Bob", 0.91, [20.0, 70.0, 120.0, 92.0]),
+            line("TS: Carol", 0.90, [20.0, 100.0, 120.0, 122.0]),
+        ],
+        false,
+    );
+    assert!(credits_en.credits_confidence.is_some());
+
+    // 3. Spanish recruitment page
+    let recruit_es = matcher.match_asset(
+        &[
+            line("RECLUTAMIENTO", 0.95, [20.0, 20.0, 240.0, 44.0]),
+            line(
+                "Buscamos traductores, cleaners y redibujadores",
+                0.92,
+                [20.0, 70.0, 320.0, 94.0],
+            ),
+            line(
+                "Únete al equipo en Discord",
+                0.90,
+                [20.0, 110.0, 260.0, 134.0],
+            ),
+        ],
+        false,
+    );
+    assert!(recruit_es.recruitment_confidence.is_some());
+
+    // 4. English recruitment page
+    let recruit_en = matcher.match_asset(
+        &[
+            line("WE ARE HIRING!", 0.95, [20.0, 20.0, 220.0, 44.0]),
+            line(
+                "Join our team: need redrawers and proofreaders",
+                0.91,
+                [20.0, 70.0, 340.0, 94.0],
+            ),
+        ],
+        false,
+    );
+    assert!(recruit_en.recruitment_confidence.is_some());
+
+    // 5. Negatives: ordinary manga speech-bubble dialogue must NOT be flagged.
+    let dialogue_cases: &[&[&str]] = &[
+        &[
+            "¡Hola! ¿Viste al traductor ayer?",
+            "Dijo que el editor no vino hoy.",
+        ],
+        &[
+            "Necesito hacer limpieza en mi cuarto",
+            "antes de terminar la edición del video.",
+        ],
+        &["¡Únete a nosotros y conquistaremos el mundo!"],
+        &["Join us or perish! The dark lord awaits."],
+        &["We are hiring a new chef for the tavern."],
+        &["¿Qué estás haciendo aquí? ¡Vámonos rápido!"],
+    ];
+    for case in dialogue_cases {
+        let lines: Vec<OcrLine> = case
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                line(
+                    t,
+                    0.95,
+                    [20.0, (i as f32) * 40.0, 280.0, (i as f32) * 40.0 + 22.0],
+                )
+            })
+            .collect();
+        let res = matcher.match_asset(&lines, false);
+        assert!(
+            res.credits_confidence.is_none(),
+            "ordinary dialogue must not trigger Créditos: {case:?}"
+        );
+        assert!(
+            res.recruitment_confidence.is_none(),
+            "ordinary dialogue must not trigger Reclutamiento: {case:?}"
+        );
+        assert!(
+            res.promo_confidence.is_none(),
+            "ordinary dialogue must not trigger Página promocional: {case:?}"
+        );
+    }
+
+    // 6. Idempotence and user decisions in apply_work_matches
+    let (_tmp, mut cat, ids) = setup_catalog(&[("credits.png", b"c1"), ("recruit.png", b"r1")]);
+    let c_id = ids["credits.png"];
+    let r_id = ids["recruit.png"];
+    cat.save_ocr_lines(
+        c_id,
+        &[
+            line("Translator: Bob", 0.92, [10.0, 20.0, 180.0, 42.0]),
+            line("Typesetter: Alice", 0.91, [10.0, 50.0, 180.0, 72.0]),
+        ],
+    )
+    .unwrap();
+    cat.save_ocr_lines(
+        r_id,
+        &[line(
+            "Buscamos staff para el fansub",
+            0.93,
+            [10.0, 20.0, 240.0, 42.0],
+        )],
+    )
+    .unwrap();
+
+    let m = cat.load_work_matcher().unwrap();
+    cat.apply_work_matches(c_id, &m).unwrap();
+    cat.apply_work_matches(r_id, &m).unwrap();
+
+    let c_lbl = cat
+        .labels_of(c_id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.kind == LabelKind::Category && a.name == CREDITS_CATEGORY)
+        .expect("Créditos suggested");
+    assert_eq!(
+        (c_lbl.source, c_lbl.status),
+        (Source::Ocr, Status::Suggested)
+    );
+
+    let r_lbl = cat
+        .labels_of(r_id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.kind == LabelKind::Category && a.name == RECRUITMENT_CATEGORY)
+        .expect("Reclutamiento suggested");
+    assert_eq!(
+        (r_lbl.source, r_lbl.status),
+        (Source::Ocr, Status::Suggested)
+    );
+
+    // Reject Créditos, accept Reclutamiento, re-apply -> decisions preserved!
+    cat.reject(c_id, c_lbl.label).unwrap();
+    cat.accept(r_id, r_lbl.label).unwrap();
+    cat.apply_work_matches(c_id, &m).unwrap();
+    cat.apply_work_matches(r_id, &m).unwrap();
+    assert_eq!(
+        cat.labels_of(c_id)
+            .unwrap()
+            .iter()
+            .find(|a| a.label == c_lbl.label)
+            .unwrap()
+            .status,
+        Status::Rejected
+    );
+    assert_eq!(
+        cat.labels_of(r_id)
+            .unwrap()
+            .iter()
+            .find(|a| a.label == r_lbl.label)
+            .unwrap()
+            .status,
+        Status::Accepted
+    );
+}
+
+#[test]
+fn parse_work_from_stem_extracts_title_chapter_and_page() {
+    assert_eq!(
+        parse_work_from_stem("¡Quiero ser alabado por una Gal Gamer! - Capítulo 23.00 - 7"),
+        Some(ParsedWorkFilename {
+            title: "¡Quiero ser alabado por una Gal Gamer!".into(),
+            chapter: "23.00".into(),
+            page: Some(7),
+        })
+    );
+    assert_eq!(
+        parse_work_from_stem("Onee-chan ga Kita - Cap. 12 - 03"),
+        Some(ParsedWorkFilename {
+            title: "Onee-chan ga Kita".into(),
+            chapter: "12".into(),
+            page: Some(3),
+        })
+    );
+    assert_eq!(
+        parse_work_from_stem("My Series Chapter 5"),
+        Some(ParsedWorkFilename {
+            title: "My Series".into(),
+            chapter: "5".into(),
+            page: None,
+        })
+    );
+    assert_eq!(
+        parse_work_from_stem("My Series Ch. 04.5 - p12"),
+        Some(ParsedWorkFilename {
+            title: "My Series".into(),
+            chapter: "04.5".into(),
+            page: Some(12),
+        })
+    );
+}
+
+#[test]
+fn work_ownership_belongs_to_is_separate_from_mentions_idempotent_ordered_and_respects_roots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_a = tmp.path().join("lib_a");
+    let lib_b = tmp.path().join("lib_b");
+    fs::create_dir_all(&lib_a).unwrap();
+    fs::create_dir_all(&lib_b).unwrap();
+
+    let files_a = [
+        (
+            "¡Quiero ser alabado por una Gal Gamer! - Capítulo 23.00 - 7.jpg",
+            b"p23-7" as &[u8],
+        ),
+        (
+            "¡Quiero ser alabado por una Gal Gamer! - Capítulo 2.00 - 10.jpg",
+            b"p2-10",
+        ),
+        (
+            "¡Quiero ser alabado por una Gal Gamer! - Capítulo 2.00 - 2.jpg",
+            b"p2-2",
+        ),
+        ("Gal Gamer Alias - Capítulo 10.00 - 1.jpg", b"p10-1"),
+        ("Obra Desconocida - Capítulo 1 - 1.jpg", b"unknown"),
+        ("solo_ocr.jpg", b"ocr-only"),
+    ];
+    for (name, bytes) in files_a {
+        fs::write(lib_a.join(name), bytes).unwrap();
+    }
+    fs::write(
+        lib_b.join("¡Quiero ser alabado por una Gal Gamer! - Capítulo 99 - 1.jpg"),
+        b"p99-1",
+    )
+    .unwrap();
+
+    let roots_guard = [
+        LibraryRoot::new(&lib_a).unwrap(),
+        LibraryRoot::new(&lib_b).unwrap(),
+    ];
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let db = ensure_writable(&data.join("catalog.sqlite"), &roots_guard).unwrap();
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.index(&roots_guard[0]).unwrap();
+    cat.index(&roots_guard[1]).unwrap();
+    let root_a = &roots_guard[0];
+
+    let work_a = cat
+        .create_work("¡Quiero ser alabado por una Gal Gamer!")
+        .unwrap();
+    cat.add_work_alias(work_a, "Gal Gamer Alias").unwrap();
+    let work_b = cat.create_work("Academia Nebulosa").unwrap();
+    let work_c = cat.create_work("Isla de Cristal").unwrap();
+
+    // Promo page belongs to work A while mentioning A, B, and C via OCR.
+    let promo_path = dunce::canonicalize(
+        lib_a.join("¡Quiero ser alabado por una Gal Gamer! - Capítulo 23.00 - 7.jpg"),
+    )
+    .unwrap();
+    let promo_asset = cat.asset_of(&promo_path).unwrap().unwrap();
+    cat.save_ocr_lines(
+        promo_asset,
+        &[
+            line("PROYECTOS ACTIVOS", 0.95, [10.0, 10.0, 220.0, 32.0]),
+            line(
+                "¡Quiero ser alabado por una Gal Gamer!",
+                0.93,
+                [10.0, 60.0, 300.0, 82.0],
+            ),
+            line("Academia Nebulosa", 0.92, [10.0, 100.0, 200.0, 122.0]),
+            line("Isla de Cristal", 0.91, [10.0, 140.0, 200.0, 162.0]),
+        ],
+    )
+    .unwrap();
+
+    // OCR-only image mentions work A, must NEVER get belongs_to from OCR.
+    let ocr_only_asset = cat
+        .asset_of(&dunce::canonicalize(lib_a.join("solo_ocr.jpg")).unwrap())
+        .unwrap()
+        .unwrap();
+    cat.save_ocr_lines(
+        ocr_only_asset,
+        &[line(
+            "¡Quiero ser alabado por una Gal Gamer!",
+            0.95,
+            [10.0, 20.0, 300.0, 42.0],
+        )],
+    )
+    .unwrap();
+
+    let matcher = cat.load_work_matcher().unwrap();
+    cat.apply_work_matches(promo_asset, &matcher).unwrap();
+    cat.apply_work_matches(ocr_only_asset, &matcher).unwrap();
+    cat.apply_filename_works(None).unwrap();
+
+    // Must never auto-create "Obra Desconocida".
+    assert_eq!(cat.list_works().unwrap().len(), 3);
+    // OCR-only image has no belongs_to.
+    assert!(cat.asset_work(ocr_only_asset).unwrap().is_none());
+
+    // Promo page belongs to work A (chapter 23.00, page 7) AND mentions A, B, C!
+    let aw = cat.asset_work(promo_asset).unwrap().unwrap();
+    assert_eq!(aw.work, work_a);
+    assert_eq!(aw.chapter, "23.00");
+    assert_eq!(aw.page, Some(7));
+    assert_eq!(aw.status, Status::Suggested);
+    let mentioned_works: HashSet<LabelId> = cat
+        .labels_of(promo_asset)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == LabelKind::Entity)
+        .map(|a| a.label)
+        .collect();
+    assert!(mentioned_works.contains(&work_a));
+    assert!(mentioned_works.contains(&work_b));
+    assert!(mentioned_works.contains(&work_c));
+
+    // Ordering by chapter then page (only root_a): 2.00 p2 -> 2.00 p10 -> 10.00 p1 -> 23.00 p7
+    let roots_a = vec![root_a.as_path().to_path_buf()];
+    let ordered = cat
+        .entries_belonging_to_work(work_a, Some(&roots_a))
+        .unwrap();
+    let ordered_names: Vec<String> = ordered
+        .iter()
+        .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        ordered_names,
+        vec![
+            "¡Quiero ser alabado por una Gal Gamer! - Capítulo 2.00 - 2.jpg",
+            "¡Quiero ser alabado por una Gal Gamer! - Capítulo 2.00 - 10.jpg",
+            "Gal Gamer Alias - Capítulo 10.00 - 1.jpg",
+            "¡Quiero ser alabado por una Gal Gamer! - Capítulo 23.00 - 7.jpg",
+        ]
+    );
+
+    // Counts separate belongs_to from mentions and hide removed folder root_b.
+    let works_a = cat.list_works_in_roots(&roots_a).unwrap();
+    let wa = works_a.iter().find(|w| w.label == work_a).unwrap();
+    assert_eq!(wa.belongs_to, 4);
+    assert_eq!(wa.belongs_to_suggested, 4);
+    assert_eq!(wa.images, 2); // promo_asset + ocr_only_asset
+
+    // Reject one, accept all remaining in root_a -> rejected stays rejected, root_b stays suggested.
+    let p10_asset = cat
+        .asset_of(
+            &dunce::canonicalize(lib_a.join("Gal Gamer Alias - Capítulo 10.00 - 1.jpg")).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    cat.reject_asset_work(p10_asset).unwrap();
+    let confirmed = cat
+        .accept_all_suggested_work_ownership(work_a, Some(&roots_a))
+        .unwrap();
+    assert_eq!(confirmed, 3);
+    assert_eq!(
+        cat.asset_work(p10_asset).unwrap().unwrap().status,
+        Status::Rejected
+    );
+    assert_eq!(
+        cat.asset_work(promo_asset).unwrap().unwrap().status,
+        Status::Accepted
+    );
+
+    // Re-running apply_filename_works is idempotent and never overwrites accepted/rejected.
+    cat.apply_filename_works(None).unwrap();
+    assert_eq!(
+        cat.asset_work(p10_asset).unwrap().unwrap().status,
+        Status::Rejected
+    );
+    assert_eq!(
+        cat.asset_work(promo_asset).unwrap().unwrap().status,
+        Status::Accepted
+    );
+
+    // Deleting work_a removes its asset_work rows.
+    assert!(cat.delete_work(work_a).unwrap());
+    assert!(cat.asset_work(promo_asset).unwrap().is_none());
+}
+
+#[test]
+fn rejecting_one_work_does_not_block_a_different_one_and_never_comes_back() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[("Mi Obra - Capítulo 3 - 4.jpg", b"page")]);
+    let asset = ids["Mi Obra - Capítulo 3 - 4.jpg"];
+    let wrong = cat.create_work("Otra Cosa").unwrap();
+    cat.add_work_alias(wrong, "Mi Obra").unwrap();
+    cat.apply_filename_works(None).unwrap();
+    assert_eq!(cat.asset_work(asset).unwrap().unwrap().work, wrong);
+    assert!(cat.reject_asset_work(asset).unwrap());
+
+    // The user deletes the wrong work's alias by recreating the right one.
+    cat.remove_work_alias(wrong, "Mi Obra").unwrap();
+    let right = cat.create_work("Mi Obra").unwrap();
+    cat.apply_filename_works(None).unwrap();
+    let now = cat.asset_work(asset).unwrap().unwrap();
+    assert_eq!((now.work, now.status), (right, Status::Suggested));
+
+    // Pointing the name back at the rejected work must not suggest it again.
+    cat.delete_work(right).unwrap();
+    cat.add_work_alias(wrong, "Mi Obra").unwrap();
+    cat.apply_filename_works(None).unwrap();
+    let after = cat.asset_work(asset).unwrap().unwrap();
+    assert_eq!((after.work, after.status), (wrong, Status::Rejected));
+}
+
+#[test]
+fn a_second_copy_with_a_plain_name_keeps_the_ownership_suggestion() {
+    let (_tmp, mut cat, ids) = setup_catalog(&[
+        ("a/scan001.jpg", b"same"),
+        ("b/Mi Obra - Capítulo 3 - 4.jpg", b"same"),
+    ]);
+    let asset = ids["a/scan001.jpg"];
+    let work = cat.create_work("Mi Obra").unwrap();
+    cat.apply_filename_works(None).unwrap();
+    let aw = cat
+        .asset_work(asset)
+        .unwrap()
+        .expect("suggested from the named copy");
+    assert_eq!(aw.work, work);
 }

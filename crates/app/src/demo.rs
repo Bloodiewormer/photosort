@@ -157,8 +157,17 @@ pub fn plan_demo_images(count: usize, seed: u64) -> Vec<ImageSpec> {
     let mut specs: Vec<ImageSpec> = Vec::with_capacity(count);
 
     // Curated starter set so even small counts exercise every rule, aspect ratio, format,
-    // alpha transparency, duplicate group, and give the first screen rich visual variety.
+    // alpha transparency, duplicate group, work ownership, and give the first screen rich visual variety.
     let starters: &[(&str, &str, u32, u32, DemoFormat, bool, PatternKind)] = &[
+        (
+            "anime",
+            "Crónicas del Relojero - Capítulo 23.00 - 7.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::Gradient,
+        ),
         (
             "capturas",
             "Screenshot_2024-01-02.png",
@@ -194,6 +203,33 @@ pub fn plan_demo_images(count: usize, seed: u64) -> Vec<ImageSpec> {
             DemoFormat::Png,
             false,
             PatternKind::Stripes,
+        ),
+        (
+            "manga",
+            "Crónicas del Relojero - Capítulo 23.00 - 1.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::ColorBlocks,
+        ),
+        (
+            "manga",
+            "Crónicas del Relojero - Capítulo 24.00 - 2.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::Stripes,
+        ),
+        (
+            "manga",
+            "Academia Nebulosa - Cap. 5 - 03.png",
+            220,
+            300,
+            DemoFormat::Png,
+            false,
+            PatternKind::Checker,
         ),
         (
             "manga",
@@ -991,6 +1027,7 @@ pub fn prepare_demo(
     seed_demo_ocr(&mut cat, canonical_root, &specs)?;
     seed_demo_works(&mut cat)?;
     seed_demo_vision(&mut cat, canonical_root, &specs)?;
+    seed_demo_errors(&cat, canonical_root, &specs)?;
 
     Ok(DemoSetup {
         base_dir: resolved_base,
@@ -1116,6 +1153,75 @@ fn seed_demo_ocr(
                 .map_err(|e| e.to_string())?;
                 continue;
             }
+            if i == 5 {
+                // Synthetic credits page (Spanish + English roles).
+                cat.save_ocr_lines(
+                    asset,
+                    &[
+                        OcrLine {
+                            text: "CRÉDITOS DEL CAPÍTULO".to_string(),
+                            score: 0.96,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 20.0, 260.0, 44.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "Traducción: Alex".to_string(),
+                            score: 0.94,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 70.0, 200.0, 92.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "Limpieza: Sam".to_string(),
+                            score: 0.93,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 100.0, 200.0, 122.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "Typesetting: Pat".to_string(),
+                            score: 0.92,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 130.0, 210.0, 152.0],
+                            top_strip: false,
+                        },
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+                continue;
+            }
+            if i == 6 {
+                // Synthetic recruitment page.
+                cat.save_ocr_lines(
+                    asset,
+                    &[
+                        OcrLine {
+                            text: "RECLUTAMIENTO DE STAFF".to_string(),
+                            score: 0.95,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 20.0, 280.0, 46.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "Buscamos traductores, cleaners y redibujadores".to_string(),
+                            score: 0.91,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 80.0, 300.0, 104.0],
+                            top_strip: false,
+                        },
+                        OcrLine {
+                            text: "Únete al equipo en Discord".to_string(),
+                            score: 0.92,
+                            recognizer: OcrRecognizer::V6,
+                            rect: [20.0, 120.0, 260.0, 144.0],
+                            top_strip: false,
+                        },
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+                continue;
+            }
             let (text, score, rec) = sample_texts[i % sample_texts.len()];
             cat.save_ocr_lines(
                 asset,
@@ -1156,6 +1262,33 @@ fn seed_demo_works(cat: &mut Catalog) -> Result<(), String> {
     let assets = cat.assets_with_ocr().map_err(|e| e.to_string())?;
     for asset in assets {
         cat.apply_work_matches(asset, &matcher)
+            .map_err(|e| e.to_string())?;
+    }
+    cat.apply_filename_works(None).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn seed_demo_errors(
+    cat: &Catalog,
+    canonical_root: &Path,
+    specs: &[ImageSpec],
+) -> Result<(), String> {
+    if let Some(spec) = specs.get(12)
+        && let Some(asset) = cat
+            .asset_of(&canonical_root.join(&spec.rel_path))
+            .map_err(|e| e.to_string())?
+    {
+        cat.record_stage_error(asset, catalog::VISION_STAGE, "decode error")
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(spec) = specs.get(13)
+        && let Some(asset) = cat
+            .asset_of(&canonical_root.join(&spec.rel_path))
+            .map_err(|e| e.to_string())?
+    {
+        cat.record_stage_error(asset, catalog::OCR_STAGE, "timeout")
+            .map_err(|e| e.to_string())?;
+        cat.record_stage_error(asset, catalog::OCR_STAGE, "timeout")
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1209,7 +1342,16 @@ fn seed_demo_vision(
             Some("type_meme") => 4,
             Some("type_document") => 5,
             Some("tag_person") => 6,
-            _ => 8 + (rule_idx % 8),
+            Some("cat_anime") => 8,
+            Some("cat_manhwa") => 9,
+            Some("cat_webtoon") => 10,
+            Some("cat_animals") => 11,
+            Some("cat_computers_hardware") => 12,
+            Some("cat_tech_electronics") => 13,
+            Some("cat_nature_landscapes") => 14,
+            Some("cat_videogames") => 15,
+            Some("page_manga_cover") => 16,
+            _ => 17 + (rule_idx % 8),
         };
         for (i, text) in rule.positives.iter().enumerate() {
             let mut v = vec![0.0f32; EMBEDDING_DIM];

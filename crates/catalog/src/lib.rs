@@ -6,7 +6,7 @@ mod ocr;
 mod vision;
 mod works;
 
-pub use analysis::{Pending, ReviewedCounts};
+pub use analysis::{Pending, ReviewedCounts, StageErrorRecord, sanitize_stage_error_reason};
 pub use browse::{Entry, LabelCount, Sort};
 pub use dupes::DuplicateGroup;
 pub use labels::{
@@ -18,16 +18,19 @@ pub use ocr::{
     ocr_search_key,
 };
 pub use vision::{
-    CompiledRule, CompiledVisionRules, DEFAULT_CUSTOM_THRESHOLD, DEFAULT_PERSON_THRESHOLD,
-    DEFAULT_TYPE_THRESHOLD, DetectedFace, EMBEDDING_BYTES, EMBEDDING_DIM, RankedAsset, RuleId,
-    RuleMode, SIGLIP2_MODEL_ID, TAG_PERSON, TYPE_DOCUMENT, TYPE_ILLUSTRATION, TYPE_MANGA,
-    TYPE_MEME, TYPE_PHOTO, VISION_STAGE, VISION_VERSION, VisionRule, VisionSuggestion,
+    CAT_ANIMALS, CAT_ANIME, CAT_COMPUTERS_HARDWARE, CAT_MANHWA, CAT_NATURE_LANDSCAPES,
+    CAT_TECH_ELECTRONICS, CAT_VIDEOGAMES, CAT_WEBTOON, CompiledRule, CompiledVisionRules,
+    DEFAULT_CATEGORY_THRESHOLD, DEFAULT_CUSTOM_THRESHOLD, DEFAULT_PERSON_THRESHOLD,
+    DEFAULT_TYPE_THRESHOLD, DetectedFace, EMBEDDING_BYTES, EMBEDDING_DIM, MANGA_COVER_CATEGORY,
+    RankedAsset, RuleId, RuleMode, SIGLIP2_MODEL_ID, TAG_PERSON, TYPE_DOCUMENT, TYPE_ILLUSTRATION,
+    TYPE_MANGA, TYPE_MEME, TYPE_PHOTO, VISION_STAGE, VISION_VERSION, VisionRule, VisionSuggestion,
     YUNET_FACE_SCORE_THRESHOLD, decode_embedding_array, encode_embedding,
     independent_ordering_confidence,
 };
 pub use works::{
-    AssetWorkMatches, PROMO_CATEGORY, WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal,
-    WorkSummary, extract_work_title_from_stem, work_match_key,
+    AssetWork, AssetWorkMatches, CREDITS_CATEGORY, PROMO_CATEGORY, ParsedWorkFilename,
+    RECRUITMENT_CATEGORY, WorkAlias, WorkEntry, WorkMatch, WorkMatcher, WorkProposal, WorkSummary,
+    extract_work_title_from_stem, parse_work_from_stem, work_match_key,
 };
 
 use fsguard::{DestPath, LibraryRoot};
@@ -170,6 +173,26 @@ CREATE TABLE IF NOT EXISTS text_embedding_cache (
     vector BLOB NOT NULL CHECK (length(vector) = 3072),
     PRIMARY KEY (model, text)
 );
+CREATE TABLE IF NOT EXISTS asset_work (
+    asset_id   INTEGER NOT NULL REFERENCES asset(id),
+    work_id    INTEGER NOT NULL REFERENCES label(id),
+    chapter    TEXT NOT NULL DEFAULT '',
+    page       INTEGER,
+    source     TEXT NOT NULL CHECK (source IN ('ai', 'ocr', 'rules', 'user')),
+    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    status     TEXT NOT NULL CHECK (status IN ('suggested', 'accepted', 'rejected')),
+    PRIMARY KEY (asset_id, work_id)
+);
+CREATE INDEX IF NOT EXISTS asset_work_work ON asset_work(work_id, status);
+CREATE TABLE IF NOT EXISTS stage_error (
+    asset_id     INTEGER NOT NULL REFERENCES asset(id),
+    stage        TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    last_at_secs INTEGER NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (asset_id, stage)
+);
+CREATE INDEX IF NOT EXISTS stage_error_stage ON stage_error(stage, asset_id);
 ";
 
 #[derive(Debug)]

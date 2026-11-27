@@ -61,20 +61,23 @@ pub fn build_export_items(
     catalog: &Catalog,
     entries: &[&Entry],
 ) -> Result<Vec<ExportItem>, CatalogError> {
-    let mut cache: HashMap<AssetId, Vec<Assignment>> = HashMap::new();
+    let mut cache: HashMap<AssetId, (Vec<Assignment>, Option<catalog::AssetWork>)> = HashMap::new();
     let mut items = Vec::with_capacity(entries.len());
     for entry in entries {
-        let labels = match cache.get(&entry.asset) {
+        let (labels, belongs_to) = match cache.get(&entry.asset) {
             Some(cached) => cached.clone(),
             None => {
-                let loaded = catalog.labels_of(entry.asset)?;
-                cache.insert(entry.asset, loaded.clone());
-                loaded
+                let loaded_labels = catalog.labels_of(entry.asset)?;
+                let loaded_work = catalog.asset_work(entry.asset)?;
+                let pair = (loaded_labels, loaded_work);
+                cache.insert(entry.asset, pair.clone());
+                pair
             }
         };
         items.push(ExportItem {
             source: entry.path.clone(),
             labels,
+            belongs_to,
         });
     }
     Ok(items)

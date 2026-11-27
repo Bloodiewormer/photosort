@@ -72,6 +72,7 @@ fn previewing_and_exporting_leave_the_originals_untouched() {
         items.push(ExportItem {
             source: p,
             labels: vec![],
+            belongs_to: None,
         });
     }
     let root = LibraryRoot::new(&library).unwrap();
@@ -114,7 +115,11 @@ fn previewing_and_exporting_in_all_four_layouts_leave_the_originals_untouched() 
         let p = library.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, bytes).unwrap();
-        items.push(ExportItem { source: p, labels });
+        items.push(ExportItem {
+            source: p,
+            labels,
+            belongs_to: None,
+        });
     }
     let root = LibraryRoot::new(&library).unwrap();
 

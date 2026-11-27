@@ -117,7 +117,7 @@ impl LabelKind {
 }
 
 impl Source {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Ai => "ai",
             Self::Ocr => "ocr",
@@ -126,7 +126,7 @@ impl Source {
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "ai" => Self::Ai,
             "ocr" => Self::Ocr,
@@ -138,7 +138,7 @@ impl Source {
 }
 
 impl Status {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Suggested => "suggested",
             Self::Accepted => "accepted",
@@ -146,7 +146,7 @@ impl Status {
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "suggested" => Self::Suggested,
             "accepted" => Self::Accepted,

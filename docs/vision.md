@@ -11,12 +11,14 @@
 
 ## Reglas integradas y puntuación
 
-Al crear un catálogo nuevo se generan una sola vez 7 reglas iniciales (si el usuario las edita o elimina, no se vuelven a crear ni se sobrescriben):
+Al crear un catálogo nuevo se generan una sola vez 16 reglas iniciales, controladas individualmente por `builtin_key` (los catálogos anteriores reciben las reglas nuevas una sola vez sin recrear ni sobrescribir las editadas o eliminadas, y reutilizan cualquier etiqueta existente con el mismo nombre sin sustituir su regla):
 
 - **Tipo de imagen (exclusivo, categoría):** `Manga`, `Ilustración`, `Foto`, `Capturas de pantalla` (nombre exacto compartido con reglas locales y OCR), `Meme` y `Documento`.
+- **Categorías independientes de contenido:** `Anime`, `Manhwa`, `Webtoon`, `Animales`, `Computadoras y hardware`, `Tecnología y electrónica`, `Naturaleza y paisajes` y `Videojuegos`. Se combinan libremente con el tipo de imagen (por ejemplo, una imagen puede ser `Capturas de pantalla` y `Videojuegos`).
+- **Tipo de página visual (independiente, categoría):** `Portada de manga`, restringida para sugerirse únicamente cuando el tipo ganador es `Manga` o `Ilustración`.
 - **Etiqueta independiente:** `persona` (con descripciones negativas para evitar personajes dibujados).
 
-Las descripciones iniciales están en inglés; el usuario puede editarlas o escribir nuevas en español o inglés.
+Las descripciones iniciales están en inglés y **todos sus umbrales iniciales están sin calibrar**; el usuario puede editarlas o escribir nuevas en español o inglés.
 
 ### Similitud coseno, no probabilidades
 
@@ -37,7 +39,7 @@ Los archivos ONNX divididos de SigLIP 2 no incluyen `logit_scale` ni `logit_bias
 
 ## Alcance de lo verificado (2026-11-26, solo datos sintéticos)
 
-- **Prueba de extremo a extremo con motor real (`vision_e2e`, DirectML lote 8, 4 maquetas sintéticas):** `scene_comic` → `Manga (1,00)`, `scene_document` → `Documento (0,98)`, `scene_phone_chat` → `Capturas de pantalla (0,98)`, `scene_landscape` → `Capturas de pantalla (0,45)`; 0 rostros detectados y originales intactos.
+- **Prueba de extremo a extremo con motor real (`vision_e2e`, DirectML lote 8, 4 maquetas sintéticas, 16 reglas integradas con umbrales sin calibrar):** `scene_comic` → `Manga (1,00)`, `Manhwa (0,63)`, `Webtoon (0,77)`; `scene_document` → `Documento (0,99)`; `scene_phone_chat` → `Capturas de pantalla (0,99)`, `Webtoon (0,70)`; `scene_landscape` → `Capturas de pantalla (0,38)`; 0 rostros detectados, `Portada de manga` no se disparó en ninguna maqueta y originales intactos. Nótese que, con el umbral provisional de `0,10` sin calibrar, `Webtoon` también se sugirió en la captura vertical de chat y en el cómic sintético, y `Naturaleza y paisajes` no se disparó en el degradado sintético de paisaje.
 - **Rendimiento en `--release` sobre 45.000 activos sintéticos (`benchmark_vision_rank_and_apply_45k_assets`):**
   - Ordenación top-200 por similitud coseno: **media 210,84 ms · p95 231,02 ms**.
   - Aplicación de las 7 reglas a los 45.000 activos: **1,04 s** (39.375 activos con sugerencias, 41.785 sugerencias).

@@ -2,9 +2,11 @@
 #![allow(clippy::disallowed_methods)]
 
 use catalog::{
-    AssetId, Catalog, DetectedFace, EMBEDDING_DIM, LabelKind, SCREENSHOT_CATEGORY,
-    SIGLIP2_MODEL_ID, Source, Status, TAG_PERSON, TYPE_DOCUMENT, TYPE_ILLUSTRATION, TYPE_MANGA,
-    TYPE_MEME, TYPE_PHOTO, VISION_STAGE, VISION_VERSION,
+    AssetId, CAT_ANIMALS, CAT_ANIME, CAT_COMPUTERS_HARDWARE, CAT_MANHWA, CAT_NATURE_LANDSCAPES,
+    CAT_TECH_ELECTRONICS, CAT_VIDEOGAMES, CAT_WEBTOON, Catalog, DetectedFace, EMBEDDING_DIM,
+    LabelKind, MANGA_COVER_CATEGORY, RuleMode, SCREENSHOT_CATEGORY, SIGLIP2_MODEL_ID, Source,
+    Status, TAG_PERSON, TYPE_DOCUMENT, TYPE_ILLUSTRATION, TYPE_MANGA, TYPE_MEME, TYPE_PHOTO,
+    VISION_STAGE, VISION_VERSION,
 };
 use fsguard::{DestPath, LibraryRoot, ensure_writable};
 use std::fs;
@@ -81,7 +83,16 @@ fn seed_orthogonal_rule_embeddings(cat: &mut Catalog) {
             Some("type_meme") => 4,
             Some("type_document") => 5,
             Some("tag_person") => 6,
-            _ => 10 + idx,
+            Some("cat_anime") => 8,
+            Some("cat_manhwa") => 9,
+            Some("cat_webtoon") => 10,
+            Some("cat_animals") => 11,
+            Some("cat_computers_hardware") => 12,
+            Some("cat_tech_electronics") => 13,
+            Some("cat_nature_landscapes") => 14,
+            Some("cat_videogames") => 15,
+            Some("page_manga_cover") => 16,
+            _ => 20 + idx,
         };
         for p in &rule.positives {
             pairs.push((p.clone(), unit_basis(dim)));
@@ -101,7 +112,7 @@ fn seed_orthogonal_rule_embeddings(cat: &mut Catalog) {
 fn builtin_rules_created_once_and_never_recreated_after_edit_or_delete() {
     let s = setup(&[("a.jpg", b"aaa")]);
     let rules = s.cat.list_vision_rules().unwrap();
-    assert_eq!(rules.len(), 7);
+    assert_eq!(rules.len(), 16);
 
     let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(
@@ -114,22 +125,36 @@ fn builtin_rules_created_once_and_never_recreated_after_edit_or_delete() {
             TYPE_MEME,
             TYPE_DOCUMENT,
             TAG_PERSON,
+            CAT_ANIME,
+            CAT_MANHWA,
+            CAT_WEBTOON,
+            CAT_ANIMALS,
+            CAT_COMPUTERS_HARDWARE,
+            CAT_TECH_ELECTRONICS,
+            CAT_NATURE_LANDSCAPES,
+            CAT_VIDEOGAMES,
+            MANGA_COVER_CATEGORY,
         ]
     );
 
-    // Edit Manga threshold and delete Meme
+    // Edit Manga threshold and delete Meme + Videojuegos
     let manga = rules.iter().find(|r| r.name == TYPE_MANGA).unwrap();
     let meme = rules.iter().find(|r| r.name == TYPE_MEME).unwrap();
+    let games = rules.iter().find(|r| r.name == CAT_VIDEOGAMES).unwrap();
+    assert_eq!(games.mode, RuleMode::Independent);
+    assert_eq!(games.kind, LabelKind::Category);
     s.cat
         .update_vision_rule(manga.id, true, 0.25, &["custom manga prompt".into()], &[])
         .unwrap();
     assert!(s.cat.delete_vision_rule(meme.id).unwrap());
+    assert!(s.cat.delete_vision_rule(games.id).unwrap());
 
-    // Reopen database: Meme must NOT be recreated, Manga edit must NOT be overwritten
+    // Reopen database: Meme and Videojuegos must NOT be recreated, Manga edit must NOT be overwritten
     let reopened = Catalog::open(&s.db).unwrap();
     let after = reopened.list_vision_rules().unwrap();
-    assert_eq!(after.len(), 6);
+    assert_eq!(after.len(), 14);
     assert!(!after.iter().any(|r| r.name == TYPE_MEME));
+    assert!(!after.iter().any(|r| r.name == CAT_VIDEOGAMES));
     let manga_after = after.iter().find(|r| r.name == TYPE_MANGA).unwrap();
     assert!((manga_after.threshold - 0.25).abs() < 1e-6);
     assert_eq!(manga_after.positives, vec!["custom manga prompt"]);
@@ -477,4 +502,204 @@ fn creating_a_tag_never_replaces_an_existing_rule() {
     );
     assert!(attempt.is_err());
     assert_eq!(person(&cat), before);
+}
+
+#[test]
+fn content_categories_combine_independently_with_image_type() {
+    let mut s = setup(&[("game_shot.png", b"g1")]);
+    seed_orthogonal_rule_embeddings(&mut s.cat);
+    let (compiled, _) = s.cat.compile_vision_rules(SIGLIP2_MODEL_ID).unwrap();
+
+    // Image aligns with both Capturas de pantalla (dim 3) and Videojuegos (dim 15).
+    let mut v = vec![0.0f32; EMBEDDING_DIM];
+    v[3] = 0.72;
+    v[15] = 0.69;
+    let asset = s.asset("game_shot.png");
+    s.cat
+        .save_vision_result(asset, SIGLIP2_MODEL_ID, &normalized(v), &[])
+        .unwrap();
+    s.cat.apply_vision_rules(asset, &compiled).unwrap();
+
+    let names: Vec<String> = s
+        .cat
+        .labels_of(asset)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(
+        names.contains(&SCREENSHOT_CATEGORY.to_string()),
+        "expected Capturas de pantalla in {names:?}"
+    );
+    assert!(
+        names.contains(&CAT_VIDEOGAMES.to_string()),
+        "expected Videojuegos in {names:?}"
+    );
+}
+
+#[test]
+fn manga_cover_only_suggested_when_winning_type_is_manga_or_illustration() {
+    let mut s = setup(&[
+        ("manga_cover.png", b"mc"),
+        ("illus_cover.png", b"ic"),
+        ("photo_cover.png", b"pc"),
+    ]);
+    seed_orthogonal_rule_embeddings(&mut s.cat);
+    let (compiled, _) = s.cat.compile_vision_rules(SIGLIP2_MODEL_ID).unwrap();
+
+    // Note: negatives in seed_orthogonal_rule_embeddings use dim 0, so for Manga (dim 0)
+    // give dim 16 (cover) slightly higher weight than dim 0 so pos > neg.
+    let mut v_manga = vec![0.0f32; EMBEDDING_DIM];
+    v_manga[0] = 0.60;
+    v_manga[16] = 0.80;
+    let a_manga = s.asset("manga_cover.png");
+    s.cat
+        .save_vision_result(a_manga, SIGLIP2_MODEL_ID, &normalized(v_manga), &[])
+        .unwrap();
+    s.cat.apply_vision_rules(a_manga, &compiled).unwrap();
+    let names_m: Vec<String> = s
+        .cat
+        .labels_of(a_manga)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(names_m.contains(&TYPE_MANGA.to_string()));
+    assert!(
+        names_m.contains(&MANGA_COVER_CATEGORY.to_string()),
+        "expected Portada de manga on Manga: {names_m:?}"
+    );
+
+    let mut v_illus = vec![0.0f32; EMBEDDING_DIM];
+    v_illus[1] = 0.70;
+    v_illus[16] = 0.71;
+    let a_illus = s.asset("illus_cover.png");
+    s.cat
+        .save_vision_result(a_illus, SIGLIP2_MODEL_ID, &normalized(v_illus), &[])
+        .unwrap();
+    s.cat.apply_vision_rules(a_illus, &compiled).unwrap();
+    let names_i: Vec<String> = s
+        .cat
+        .labels_of(a_illus)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(names_i.contains(&TYPE_ILLUSTRATION.to_string()));
+    assert!(
+        names_i.contains(&MANGA_COVER_CATEGORY.to_string()),
+        "expected Portada de manga on Ilustración: {names_i:?}"
+    );
+
+    let mut v_photo = vec![0.0f32; EMBEDDING_DIM];
+    v_photo[2] = 0.70;
+    v_photo[16] = 0.71;
+    let a_photo = s.asset("photo_cover.png");
+    s.cat
+        .save_vision_result(a_photo, SIGLIP2_MODEL_ID, &normalized(v_photo), &[])
+        .unwrap();
+    s.cat.apply_vision_rules(a_photo, &compiled).unwrap();
+    let names_p: Vec<String> = s
+        .cat
+        .labels_of(a_photo)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(names_p.contains(&TYPE_PHOTO.to_string()));
+    assert!(
+        !names_p.contains(&MANGA_COVER_CATEGORY.to_string()),
+        "Portada de manga must NOT trigger on Foto: {names_p:?}"
+    );
+}
+
+#[test]
+fn upgrading_legacy_catalog_adds_new_builtins_once_preserving_edits_deletions_and_existing_labels()
+{
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("legacy_catalog.sqlite");
+
+    // Create a legacy v1 database (old schema without asset_work/stage_error, old seeding flag '1'):
+    // - Meme was deleted by user
+    // - Manga was edited by user (threshold 0.25)
+    // - Category "anime" (lowercase) already exists without a rule
+    // - Category "VIDEOJUEGOS" (uppercase) already exists WITH a custom rule
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE asset (id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, size INTEGER NOT NULL);
+             CREATE TABLE location (id INTEGER PRIMARY KEY, asset_id INTEGER NOT NULL, root TEXT NOT NULL, path TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mtime_ns INTEGER, seen_run INTEGER NOT NULL, missing INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE label (id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('category', 'tag', 'entity')), name TEXT NOT NULL COLLATE NOCASE, UNIQUE (kind, name));
+             CREATE TABLE asset_label (asset_id INTEGER NOT NULL, label_id INTEGER NOT NULL, source TEXT NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL, PRIMARY KEY (asset_id, label_id));
+             CREATE TABLE analysis (asset_id INTEGER NOT NULL, stage TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (asset_id, stage));
+             CREATE TABLE catalog_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE vision_rule (id INTEGER PRIMARY KEY, label_id INTEGER NOT NULL UNIQUE, mode TEXT NOT NULL, threshold REAL NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, positives TEXT NOT NULL, negatives TEXT NOT NULL DEFAULT '', builtin_key TEXT UNIQUE);
+             CREATE TABLE vision_managed_label (label_id INTEGER PRIMARY KEY);
+             INSERT INTO catalog_meta (key, value) VALUES ('vision_builtins_seeded', '1');
+             INSERT INTO label (id, kind, name) VALUES (1, 'category', 'Manga');
+             INSERT INTO vision_rule (label_id, mode, threshold, enabled, positives, negatives, builtin_key)
+                 VALUES (1, 'type', 0.25, 1, 'edited manga prompt', '', 'type_manga');
+             INSERT INTO label (id, kind, name) VALUES (10, 'category', 'anime');
+             INSERT INTO label (id, kind, name) VALUES (11, 'category', 'VIDEOJUEGOS');
+             INSERT INTO vision_rule (label_id, mode, threshold, enabled, positives, negatives, builtin_key)
+                 VALUES (11, 'independent', 0.33, 1, 'custom game prompt', '', NULL);",
+        )
+        .unwrap();
+    }
+
+    let db = ensure_writable(&db_path, &[]).unwrap();
+    let cat = Catalog::open(&db).unwrap();
+    let rules = cat.list_vision_rules().unwrap();
+
+    // Old deleted built-ins (e.g. Meme, Foto, Documento, Ilustración, Capturas, persona) must NOT be recreated.
+    assert!(!rules.iter().any(|r| r.name == TYPE_MEME));
+    assert!(!rules.iter().any(|r| r.name == TYPE_PHOTO));
+    assert!(!rules.iter().any(|r| r.name == TAG_PERSON));
+
+    // Edited Manga rule must be preserved untouched.
+    let manga = rules.iter().find(|r| r.name == TYPE_MANGA).unwrap();
+    assert!((manga.threshold - 0.25).abs() < 1e-6);
+    assert_eq!(manga.positives, vec!["edited manga prompt"]);
+
+    // Existing lowercase "anime" label must be reused (label_id == 10) and receive a rule.
+    let anime = rules
+        .iter()
+        .find(|r| r.name.eq_ignore_ascii_case(CAT_ANIME))
+        .expect("anime rule seeded on existing label");
+    assert_eq!(anime.label.0, 10);
+
+    // Existing uppercase "VIDEOJUEGOS" rule must NOT be overwritten.
+    let games = rules
+        .iter()
+        .find(|r| r.name.eq_ignore_ascii_case(CAT_VIDEOGAMES))
+        .expect("existing videogames rule kept");
+    assert_eq!(games.label.0, 11);
+    assert!((games.threshold - 0.33).abs() < 1e-6);
+    assert_eq!(games.positives, vec!["custom game prompt"]);
+
+    // New built-ins (e.g. Animales, Manhwa, Webtoon, Portada de manga) were added.
+    let animals = rules
+        .iter()
+        .find(|r| r.name == CAT_ANIMALS)
+        .expect("Animales added");
+    assert!(rules.iter().any(|r| r.name == CAT_MANHWA));
+    assert!(rules.iter().any(|r| r.name == MANGA_COVER_CATEGORY));
+
+    // Delete a newly added built-in (Animales) and reopen: deletion must survive reopen.
+    assert!(cat.delete_vision_rule(animals.id).unwrap());
+    drop(cat);
+    let reopened = Catalog::open(&db).unwrap();
+    let after = reopened.list_vision_rules().unwrap();
+    assert!(!after.iter().any(|r| r.name == CAT_ANIMALS));
+    assert!(!after.iter().any(|r| r.name == TYPE_MEME));
+}
+
+#[test]
+fn opening_an_up_to_date_catalog_does_not_need_the_write_lock() {
+    let s = setup(&[("a.jpg", b"aaa")]);
+    let writer = rusqlite::Connection::open(s.db.as_path()).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let reopened = Catalog::open(&s.db);
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(reopened.is_ok(), "{:?}", reopened.err());
 }
