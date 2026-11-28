@@ -1649,9 +1649,20 @@ impl PhotosortApp {
     }
 }
 
+/// A question Windows asks while moving, such as before deleting for good, opens over this window.
+fn own_system_dialogs(frame: &eframe::Frame) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = frame.window_handle()
+        && let RawWindowHandle::Win32(window) = handle.as_raw()
+    {
+        fsguard::set_dialog_owner(window.hwnd.get());
+    }
+}
+
 impl eframe::App for PhotosortApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        own_system_dialogs(frame);
         theme::scroll_focus_into_view(&ctx);
         self.draw(ui);
         theme::paint_focus_ring(&ctx);

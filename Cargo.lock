@@ -230,6 +230,7 @@ dependencies = [
  "fsguard",
  "image",
  "ocr",
+ "raw-window-handle",
  "rfd",
  "rules",
  "scanner",

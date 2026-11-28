@@ -152,7 +152,12 @@ fn the_move_confirmation_says_how_many_go_to_the_recycle_bin() {
     assert_eq!(
         move_confirmation_text(5, 2),
         "Se moverán 5 fotos fuera de sus carpetas. 2 irán a la Papelera después de copiarse y \
-         verificarse. Puedes deshacerlo."
+         verificarse; si Windows fuera a borrar alguna para siempre, te preguntará antes. Las de \
+         memorias USB o de red conservan el original. Puedes deshacerlo."
+    );
+    assert_eq!(
+        move_confirmation_text(2, 0),
+        "Se moverán 2 fotos fuera de sus carpetas. Puedes deshacerlo."
     );
     assert!(
         move_confirmation_text(1, 1).starts_with("Se moverá 1 foto fuera de su carpeta. 1 irá")

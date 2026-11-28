@@ -61,11 +61,15 @@ Si algo falla, el original se queda donde estaba y solo se limpia el temporal de
    - se le ponen las fechas del original y se renombra dentro del destino sin sobrescribir.
 2. Se vuelve a comprobar el original: mismo tamaño, misma fecha de modificación y mismo SHA-256 que al empezar.
    Si cambió, no se toca y se informa «copiado, original conservado».
-3. El original va a la Papelera con `SHFileOperationW` (`FO_DELETE`), usando estas banderas:
-   - `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING`;
-   - `FOF_WANTNUKEWARNING` hace que Windows **pregunte** si fuera a borrarlo para siempre. Pasa, por ejemplo,
-     en una unidad USB sin Papelera o con la Papelera llena.
-   - Si el usuario cancela o la llamada falla, el resultado es «copiado, original conservado».
+3. El original va a la Papelera con `SHFileOperationW` (`FO_DELETE`), como `Supr` en el Explorador:
+   - antes se comprueba con `GetVolumePathNameW` y `GetDriveTypeW` que el volumen es un disco fijo
+     (`DRIVE_FIXED`). En memorias USB y otras unidades extraíbles, en red o en un CD **no se toca el original**;
+   - las banderas son `FOF_ALLOWUNDO | FOF_SILENT | FOF_WANTNUKEWARNING`. Van sin `FOF_NOCONFIRMATION` ni
+     `FOF_NOERRORUI`: con la configuración por defecto Windows recicla sin preguntar, y **pregunta siempre**
+     antes de borrar algo para siempre (`FOF_NOCONFIRMATION` respondería que sí por el usuario);
+   - si el usuario cancela o la llamada falla, el resultado es «copiado, original conservado»;
+   - la Papelera **no es duradera**: Windows la vacía cuando se llena o con el Sensor de almacenamiento. La
+     protección real es la copia verificada del destino.
 
 ## Destino
 
@@ -131,7 +135,9 @@ revisión periódica de carpetas. Al terminar se recarga la galería, y las foto
     cuántos **a otro disco** (copia + Papelera), los conflictos y el espacio libre (solo cuenta lo que va a
     otro disco).
 - **Mover pide una segunda confirmación**: «Se moverán N fotos fuera de sus carpetas. M irán a la Papelera
-  después de copiarse y verificarse. Puedes deshacerlo.»
+  después de copiarse y verificarse; si Windows fuera a borrar alguna para siempre, te preguntará antes. Las de
+  memorias USB o de red conservan el original. Puedes deshacerlo.» Sin fotos a otro disco, se omite la parte de
+  la Papelera.
 - El resumen final ofrece **Deshacer este movimiento** y **Abrir carpeta**. La barra de la galería tiene
   **Deshacer último movimiento**, activo cuando hay algo que deshacer.
 - Teclado y Narrador: las mismas reglas que la ventana actual (foco inicial en la carpeta, `Esc` cierra si no

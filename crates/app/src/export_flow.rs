@@ -141,13 +141,21 @@ pub fn validate_destination(
 /// What the second confirmation of a move says: `photos` leave their folders, and `recycled` of
 /// them go to another disk.
 pub fn move_confirmation_text(photos: usize, recycled: usize) -> String {
+    let bin = if recycled == 0 {
+        String::new()
+    } else {
+        format!(
+            " {recycled} {} a la Papelera después de copiarse y verificarse; si Windows fuera a \
+             borrar alguna para siempre, te preguntará antes. Las de memorias USB o de red \
+             conservan el original.",
+            plural_word(recycled, "irá", "irán"),
+        )
+    };
     format!(
-        "{} {} fuera de {}. {recycled} {} a la Papelera después de copiarse y verificarse. \
-         Puedes deshacerlo.",
+        "{} {} fuera de {}.{bin} Puedes deshacerlo.",
         plural_word(photos, "Se moverá", "Se moverán"),
         count_phrase(photos, "foto", "fotos"),
         plural_word(photos, "su carpeta", "sus carpetas"),
-        plural_word(recycled, "irá", "irán"),
     )
 }
 

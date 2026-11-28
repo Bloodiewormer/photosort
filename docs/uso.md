@@ -123,7 +123,9 @@ La vista **Duplicados** es de solo lectura: nunca borra, mueve ni renombra archi
 
 ### Qué pasa al mover
 
-- La vista previa dice cuántos archivos van **en el mismo disco** (instantáneo: no cambian ni los bytes, ni las fechas, ni los atributos) y cuántos **a otro disco**. Estos se copian, se verifican con SHA-256, se comprueba que el original no ha cambiado y solo entonces el original va a la **Papelera de Windows**. Si Windows avisa de que lo borraría para siempre (una unidad sin Papelera o la Papelera llena), puedes cancelar: la copia se queda y el original también.
+- La vista previa dice cuántos archivos van **en el mismo disco** (instantáneo: no cambian ni los bytes, ni las fechas, ni los atributos) y cuántos **a otro disco**. Estos se copian, se verifican con SHA-256, se comprueba que el original no ha cambiado y solo entonces el original va a la **Papelera de Windows**, como al pulsar `Supr` en el Explorador. Si Windows fuera a borrarlo para siempre (por ejemplo, porque no cabe en la Papelera), te pregunta antes: si respondes que no, la copia se queda y el original también.
+- Si el original está en una **memoria USB** u otra unidad extraíble, en una **carpeta de red** o en un disco óptico, no se toca: se copia, se verifica y el original **se queda donde estaba**.
+- La Papelera **no es un lugar seguro a largo plazo**: Windows la vacía cuando se llena o con el Sensor de almacenamiento. Lo que protege tu foto es la copia verificada del destino.
 - Entre discos se conservan las fechas y los atributos de solo lectura, oculto y sistema, pero no los flujos alternativos ni los permisos de Windows (el original de la Papelera los mantiene).
 - Si en el destino ya hay un archivo idéntico, el original **no se toca**. Si el nombre lo ocupa otro archivo distinto, se usa `nombre (1)`.
 - Si el resumen dice **Copiado, original conservado**, hay una copia en el destino y el original sigue en su sitio, con el motivo.

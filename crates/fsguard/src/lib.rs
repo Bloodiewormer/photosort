@@ -3,6 +3,7 @@ use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 /// A directory the user registered as a photo library. Nothing below it is ever deleted, rewritten or
 /// overwritten; files only move through [`move_no_replace`] and [`recycle`].
@@ -404,38 +405,69 @@ fn shell_path(path: &Path) -> Option<Vec<u16>> {
     Some(wide)
 }
 
-/// Sends an original to the Recycle Bin; callers do it only once a verified copy exists. Windows asks
-/// first if it would delete it for good. `Ok(true)` only when the file really left its place.
+/// The application's main window, so that a question from Windows opens in front of it.
+static DIALOG_OWNER: AtomicIsize = AtomicIsize::new(0);
+
+/// Tells [`recycle`] which window owns the questions Windows asks. `0` means none.
+pub fn set_dialog_owner(hwnd: isize) {
+    DIALOG_OWNER.store(hwnd, Ordering::Relaxed);
+}
+
+/// True only on a local fixed disk: removable drives, network shares and discs may have no Recycle Bin.
+#[cfg(windows)]
+fn on_fixed_disk(path: &[u16]) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
+    let mut volume = [0u16; 261];
+    // SAFETY: `path` is null-terminated UTF-16 and `volume` is as long as stated.
+    unsafe {
+        GetVolumePathNameW(path.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) != 0
+            && GetDriveTypeW(volume.as_ptr()) == DRIVE_FIXED
+    }
+}
+
+/// Sends an original to the Recycle Bin; callers do it only once a verified copy exists. Like Del in
+/// Explorer: Windows recycles without asking (as configured by default) and always asks before
+/// deleting for good. `Ok(true)` only when the file really left its place; `Ok(false)` leaves it
+/// there: not a fixed disk, a path the shell could misread, or the user said no.
 #[cfg(windows)]
 pub fn recycle(file: &MoveSource) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::ERROR_CANCELLED;
     use windows_sys::Win32::UI::Shell::{
-        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
-        FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
+        FO_DELETE, FOF_ALLOWUNDO, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW,
+        SHFileOperationW,
     };
     // It may have been replaced by a link or a folder since it was checked.
     let file = ensure_move_source(&file.0).map_err(io::Error::other)?;
     let Some(from) = shell_path(&file.0) else {
         return Ok(false);
     };
+    if !on_fixed_disk(&from) {
+        return Ok(false);
+    }
     let mut operation = SHFILEOPSTRUCTW {
+        hwnd: DIALOG_OWNER.load(Ordering::Relaxed) as _,
         wFunc: FO_DELETE,
         pFrom: from.as_ptr(),
-        fFlags: (FOF_ALLOWUNDO
-            | FOF_NOCONFIRMATION
-            | FOF_SILENT
-            | FOF_NOERRORUI
-            | FOF_WANTNUKEWARNING) as u16,
+        // No FOF_NOCONFIRMATION: it would also answer yes to deleting for good.
+        fFlags: (FOF_ALLOWUNDO | FOF_SILENT | FOF_WANTNUKEWARNING) as u16,
         ..Default::default()
     };
-    // SAFETY: `from` ends in two NULs and outlives the call; the other pointers are null.
+    // SAFETY: `from` ends in two NULs and outlives the call; the other pointers are null, and a
+    // window handle that is no longer valid only makes the call fail.
     let code = unsafe { SHFileOperationW(&mut operation) };
+    if code as u32 == ERROR_CANCELLED {
+        return Ok(false);
+    }
     if code != 0 {
         return Err(io::Error::other(format!(
             "la Papelera de Windows devolvió el error {code}"
         )));
     }
-    Ok(operation.fAnyOperationsAborted == 0
-        && matches!(std::fs::symlink_metadata(&file.0), Err(e) if e.kind() == io::ErrorKind::NotFound))
+    // A file that is still there was not retired, whether or not the user aborted.
+    let gone =
+        matches!(std::fs::symlink_metadata(&file.0), Err(e) if e.kind() == io::ErrorKind::NotFound);
+    Ok(gone && operation.fAnyOperationsAborted == 0)
 }
 
 /// There is no Recycle Bin to rely on outside Windows, so nothing is ever retired.
@@ -447,6 +479,15 @@ pub fn recycle(_file: &MoveSource) -> io::Result<bool> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// Only the question is tested: temp folders are on a fixed disk, here and in CI.
+    #[test]
+    fn a_temp_folder_is_on_a_fixed_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(on_fixed_disk(
+            &shell_path(&tmp.path().join("a.jpg")).unwrap()
+        ));
+    }
 
     /// The Recycle Bin itself is never called by tests: this is the part that decides what it receives.
     #[test]
