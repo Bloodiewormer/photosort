@@ -1,10 +1,10 @@
-# Integridad: lectura segura y exportación verificada
+# Integridad: lectura segura, copia verificada y movimiento reversible
 
 El proyecto está escrito en Rust. Los fragmentos son bocetos de la intención: manda el código real y sus tests.
 
 ## Guardián de rutas
 
-`DestPath` es un tipo cuyo único constructor es `ensure_writable`. Toda función que escribe, crea directorios, renombra o borra un temporal recibe un `DestPath`, nunca un `&Path`. Así, escribir sin pasar por el guardián **no compila**.
+`DestPath` es un tipo que solo construyen `ensure_writable`, `ensure_export_dir` y `ensure_move_dir` (ver «Mover»). Toda función que escribe, crea directorios, renombra o borra un temporal recibe un `DestPath`, nunca un `&Path`. Así, escribir sin pasar por el guardián **no compila**.
 
 ```rust
 pub struct DestPath(PathBuf); // constructor privado: solo lo crea ensure_writable
@@ -58,10 +58,42 @@ Al final se añade un resumen: copiados, omitidos, fallidos y bytes.
 - Sidecar: `<dest_file>.xmp`, escrito solo en el destino, sin tocar ni el original ni la copia.
 - Incrustar etiquetas en la copia solo si el usuario lo activa expresamente. Eso cambia los bytes de la copia: el manifiesto guarda `sha256_original` y `sha256_after_tagging`, y la escritura pasa por el guardián.
 
+## Mover
+
+Los originales nunca se borran. Solo `fsguard` mueve un original (`move_no_replace`) o lo manda a la Papelera (`recycle`), y solo con un `MoveSource`: un archivo normal, no un enlace ni un punto de reanálisis. El flujo de mover exige además que el catálogo lo conozca.
+
+### Destino
+
+`ensure_move_dir` permite carpetas dentro o fuera de una biblioteca, rechaza los datos de la app y, como siempre, no sigue enlaces que salgan de la carpeta elegida. Nunca se sobrescribe: si el nombre está ocupado por otros bytes, se usa `nombre (1).jpg`. Si ya hay un archivo idéntico (mismo SHA-256), **no se toca el original**.
+
+### Mismo disco
+
+Es un renombrado del sistema de archivos: atómico, sin tocar los bytes; conserva todas las fechas, los atributos y los flujos alternativos.
+
+- Se usa `MoveFileExW` **sin** `MOVEFILE_REPLACE_EXISTING` y **sin** `MOVEFILE_COPY_ALLOWED`. `std::fs::rename` **no sirve**: en Windows reemplaza el destino si existe.
+- Si Windows responde `ERROR_NOT_SAME_DEVICE`, se aplica el camino entre discos.
+
+### Entre discos
+
+Si algo falla, el original se queda donde estaba y solo se limpia el temporal del destino.
+
+1. Copia verificada, como al copiar: se escribe en un `.part` en el destino, se compara su SHA-256 con el del original, se le ponen las fechas del original y se renombra dentro del destino sin sobrescribir. Al mover se copian además los atributos de solo lectura, oculto y sistema.
+2. Se vuelve a comprobar el original: mismo tamaño, misma fecha de modificación y mismo SHA-256 que al empezar. Si cambió, no se toca y se informa «copiado, original conservado».
+3. El original va a la Papelera con `SHFileOperationW` (`FO_DELETE`) y las banderas `FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING`. `FOF_WANTNUKEWARNING` hace que Windows **pregunte** si fuera a borrarlo para siempre. Si el usuario cancela o la llamada falla, el resultado es «copiado, original conservado». Una ruta que la Papelera no puede recibir tal cual (demasiado larga, de red o con un nombre que Windows reinterpretaría) no se retira.
+
+No se conservan entre discos los flujos alternativos (ADS), la ACL ni el propietario; el original en la Papelera los mantiene.
+
+### Registro y deshacer
+
+- **Antes** de tocar un archivo se escribe su fila en `move_log` en estado `pending`. Después pasa a `done` (o `kept_original`) en la misma transacción que actualiza `location`.
+- **Al abrir el catálogo**, cada fila `pending` se resuelve mirando el disco: destino presente y origen ausente → `done`; origen presente y destino ausente → se descarta; ambos presentes → `kept_original`, sin tocar nada. Un movimiento en curso mantiene un candado (una base SQLite aparte junto al catálogo, que el sistema libera aunque la app se cierre de golpe) y, mientras tanto, las filas pendientes no se tocan.
+- **Deshacer** revierte, en orden inverso, el lote más reciente con filas `done`. El archivo del destino tiene que conservar el mismo SHA-256 y la ruta original tiene que estar libre; si no, se salta y se informa. Si la carpeta original no existe, se crea. `rename` vuelve con `MoveFileExW`; `copy_recycle` vuelve con el procedimiento entre discos (la copia del destino va a la Papelera). La fila pasa a `undone` y `location` vuelve a la ruta original.
+
 ## Pruebas de integridad obligatorias (`tests/safety.rs`)
 
 - Los fixtures se generan en el test, con bytes sintéticos de JPEG y PNG que incluyen segmentos EXIF (orientación 6, GPS falso), ICC e iTXt. Nunca se usan fotos reales.
 - Antes y después de indexar y exportar se guarda `sha256` + metadatos del sistema de archivos (tamaño, `mtime`, creación) de cada fixture de origen, y deben ser idénticos.
 - Las copias tienen el mismo SHA-256, el mismo `mtime` y la misma fecha de creación.
 - Exportar dos veces al mismo destino no crea duplicados ni sobrescribe nada.
-- El guardián rechaza: un destino dentro de una raíz, una raíz dentro del destino, un junction que apunta a la biblioteca y la misma ruta con otras mayúsculas.
+- Al mover (siempre con una Papelera falsa inyectada, nunca la real): no se pierde ningún archivo, no se sobrescribe nada y se conservan los bytes y las fechas.
+- El guardián rechaza al copiar: un destino dentro de una raíz, una raíz dentro del destino, un junction que apunta a la biblioteca y la misma ruta con otras mayúsculas.

@@ -9,7 +9,7 @@ Sustituye a la v1 (Immich y carpetas) y a la v2 (Python y web). Esta v3 cambia l
   - Ningún gestor existente cubre a la vez lo que pides: etiquetas múltiples con confianza y revisión, entidades (obras) extraídas de páginas de scanlation, búsqueda OCR y exportación con vista previa, manifiesto y verificación SHA-256.
   - No se reinventa ningún modelo: todos los de IA son abiertos y locales.
 - **Coste de funcionamiento: 0 €.** Todo se procesa en tu GPU (GTX 1650 Super, 4 GB). La alternativa de pago más barata costaría entre 5 y 38 USD por pasada para 35.000 fotos, y tus fotos saldrían del PC (§8).
-- **Los originales nunca se tocan.** La indexación solo lee. Las etiquetas viven en la base de datos. Exportar es un acto explícito tuyo, con copias byte a byte verificadas.
+- **Los originales nunca se borran ni se modifican.** La indexación solo lee. Las etiquetas viven en la base de datos. Copiar o mover es un acto explícito tuyo: las copias se verifican byte a byte y un movimiento se puede deshacer (ver la decisión del 2026-11-27 en [decisiones.md](decisiones.md)).
 
 ## 1. Re-evaluación de herramientas existentes
 
@@ -45,7 +45,7 @@ Conclusión: se reutilizan **modelos y librerías** (SigLIP, WD Tagger, RapidOCR
 
 | Pieza | Tecnología | Por qué |
 |---|---|---|
-| Originales | Tus carpetas actuales en D: | No se mueven. El guardián de rutas impide escribir en ellas. |
+| Originales | Tus carpetas actuales en D: | Solo se mueven si tú lo pides, de forma verificada y reversible. El guardián de rutas impide borrarlos o sobrescribirlos. |
 | Base de datos | **SQLite** (`rusqlite` con FTS5 incluido, WAL) para el texto OCR y los nombres | Un archivo local, sin servidor, rápido para 35.000 filas y con búsqueda de texto integrada. |
 | Caché | Carpeta de datos de la app (`D:\photosort\cache\`) con miniaturas WebP de 256 px y 1024 px y embeddings | Desechable y regenerable. Unos 6 GB estimados. |
 | Motor de IA | **Rust** + `ort` (ONNX Runtime con CUDA), `tokenizers` y `oar-ocr`, en el mismo proceso | Sin Python ni procesos auxiliares. Los modelos se usan en formato ONNX. |

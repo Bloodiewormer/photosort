@@ -7,7 +7,7 @@ description: Guía técnica permanente y reglas innegociables del proyecto photo
 
 photosort es una aplicación de escritorio local que **cataloga** una biblioteca de fotos sin tocarla. Lee los directorios existentes, analiza las imágenes con IA local y guarda en su propia base de datos categorías, etiquetas y entidades. Desde la interfaz, el usuario explora, corrige y selecciona. Solo cuando él lo decide, la aplicación exporta **copias fieles**.
 
-Los originales son irreemplazables: fotos personales, escaneos y años de material. Un solo error (un `save()` que vuelve a codificar, un `rename` o un `utime` mal dirigido) destruye información que no se puede recuperar. Por eso cada regla de abajo existe, y por eso esta skill prevalece sobre las demás cuando haya conflicto.
+Si el usuario lo pide, también puede **moverlos**, sin tocar sus bytes. Los originales son irreemplazables: fotos personales, escaneos y años de material. Un solo error (un `save()` que vuelve a codificar, un `rename` o un `utime` mal dirigido) destruye información que no se puede recuperar. Por eso cada regla de abajo existe, y por eso esta skill prevalece sobre las demás cuando haya conflicto.
 
 Orden de prioridad ante instrucciones contradictorias:
 1. Integridad y seguridad de originales (esta skill).
@@ -18,24 +18,29 @@ Orden de prioridad ante instrucciones contradictorias:
 
 ## 1. Integridad de los originales (innegociable)
 
-Una **raíz de biblioteca** es cualquier directorio que el usuario registró para indexar. Todo lo que hay debajo es de solo lectura, siempre.
+Una **raíz de biblioteca** es cualquier directorio que el usuario registró para indexar. Sus archivos **nunca se borran, no se vuelven a codificar, no se sobrescriben y no se les cambian metadatos ni fechas**. **Solo se mueven** cuando el usuario lo pide expresamente, de forma verificada y reversible:
+- en el mismo disco, con `MoveFileExW` sin reemplazar el destino;
+- entre discos, con copia verificada, nueva comprobación del original y envío a la Papelera de Windows;
+- siempre con registro en el catálogo y con deshacer.
+
+Ningún otro código mueve: solo `fsguard::move_no_replace` y `fsguard::recycle`. El procedimiento exacto está en [references/integrity.md](references/integrity.md).
 
 **Prohibido sobre cualquier ruta dentro de una raíz de biblioteca:**
-- Borrar, mover, renombrar o reemplazar: `fs::remove_file`, `fs::remove_dir_all`, `fs::rename`, `fs::copy` hacia una ruta de la biblioteca, la crate `trash`, ni la papelera.
-- Abrir para escritura: `File::create`, `OpenOptions` con `write`, `append` o `truncate`, `fs::write`.
-- Cambiar fechas, permisos o atributos: `File::set_times`, `set_modified`, `set_permissions`, `SetFileTime`, `attrib`.
+- Borrar o reemplazar: `fs::remove_file`, `fs::remove_dir_all`, `fs::rename` (en Windows reemplaza el destino), la crate `trash`, y cualquier envío a la Papelera que no sea `fsguard::recycle` tras una copia verificada.
+- Abrir un original para escritura: `File::create`, `OpenOptions` con `write`, `append` o `truncate`, `fs::write`.
+- Cambiar fechas, permisos o atributos de un original: `File::set_times`, `set_modified`, `set_permissions`, `SetFileTime`, `attrib`.
 - Guardar imágenes encima: `DynamicImage::save`, `exiftool -overwrite_original`, rotación "sin pérdida" in situ.
-- Crear archivos junto a los originales: `.xmp`, miniaturas, `.json`, `desktop.ini`, cachés o bases de datos. Las sidecars solo existen en el destino de una exportación.
+- Crear archivos junto a los originales: `.xmp`, miniaturas, `.json`, `desktop.ini`, cachés o bases de datos. **Única excepción:** la carpeta de destino que el usuario elige al mover (y la ruta original al deshacer), donde se escriben el archivo movido, su temporal verificado, el manifiesto y el `.xmp` opcional.
 
 **Permitido:** listar, leer los metadatos del sistema de archivos, abrir con `File::open` (solo lectura) y decodificar en memoria para analizar o generar miniaturas.
 
 **Cómo se hace cumplir:**
-- El proyecto está escrito en **Rust**. Toda escritura pasa por un único módulo (`fsguard`). Sus funciones aceptan solo `DestPath`, un tipo cuyo único constructor es `ensure_writable`: resuelve la ruta real (`dunce::canonicalize`, sin distinguir mayúsculas en Windows, siguiendo junctions y symlinks) y devuelve error si cae dentro de una raíz de biblioteca. Así, escribir sin pasar por el guardián **no compila**. No añadas atajos ni un segundo camino de escritura.
+- El proyecto está escrito en **Rust**. Toda escritura pasa por un único módulo (`fsguard`). Sus funciones aceptan solo `DestPath`, un tipo que solo construyen `ensure_writable`, `ensure_export_dir` y `ensure_move_dir`. El primero resuelve la ruta real (`dunce::canonicalize`, sin distinguir mayúsculas en Windows, siguiendo junctions y symlinks) y devuelve error si cae dentro de una raíz de biblioteca (al mover, `ensure_move_dir` permite las bibliotecas y rechaza los datos de la app). Así, escribir sin pasar por el guardián **no compila**. No añadas atajos ni un segundo camino de escritura.
 - `clippy.toml` prohíbe con `disallowed-methods` las APIs destructivas de `std::fs`. Solo `fsguard` y la crate `export` pueden permitirlas con `#[allow]`, y cada `allow` se justifica en la revisión.
-- `tests/safety.rs` verifica, con fixtures sintéticos, que el hash y los metadatos de los originales no cambian tras indexar y exportar, y que el guardián rechaza rutas dentro de una raíz (también vía junction o con otras mayúsculas). Si añades una operación de archivos, amplía ese test. Nunca lo debilites.
+- `tests/safety.rs` verifica, con fixtures sintéticos, que el hash y los metadatos de los originales no cambian tras indexar y copiar, que mover nunca borra ni sobrescribe, y que el guardián rechaza rutas dentro de una raíz (también vía junction o con otras mayúsculas). Si añades una operación de archivos, amplía ese test. Nunca lo debilites.
 - Se recomienda una defensa adicional a nivel de sistema: aplicar una ACL de solo lectura a la biblioteca si el usuario lo aprueba.
 
-Si una tarea parece requerir escribir en la biblioteca, para y explícale al usuario por qué. No busques una forma indirecta de hacerlo.
+Si una tarea parece requerir escribir en la biblioteca fuera del flujo de mover, para y explícale al usuario por qué. No busques una forma indirecta de hacerlo.
 
 ## 2. Indexación: catalogar, no copiar
 
@@ -71,18 +76,18 @@ Lo que el usuario acepta o rechaza **nunca lo sobrescribe un nuevo análisis**. 
 
 | Pieza | Dónde vive | Regla |
 |---|---|---|
-| Originales | Raíces de biblioteca del usuario | Solo lectura (§1) |
+| Originales | Raíces de biblioteca del usuario | Nunca se borran ni modifican; solo se mueven por acción del usuario (§1) |
 | Base de datos | Directorio de datos de la app, fuera del repo y de la biblioteca | Única fuente de verdad del catálogo |
 | Caché | Directorio de caché de la app (miniaturas, embeddings) | Desechable: se puede borrar y regenerar sin perder nada del usuario |
 | Motor de IA | Proceso o módulo local | No conoce la interfaz; recibe rutas y devuelve resultados |
-| Interfaz | Ventana de escritorio | Solo modifica el catálogo, nunca archivos |
-| Exportación | Módulo aparte, invocado solo por acción del usuario | Único código que escribe archivos de imagen (§5) |
+| Interfaz | Ventana de escritorio | Solo modifica el catálogo; para copiar o mover llama a la exportación |
+| Exportación | Módulo aparte, invocado solo por acción del usuario | Único código que escribe archivos de imagen y que pide a `fsguard` mover o mandar a la Papelera (§5) |
 
 Cada pieza se comunica por interfaces claras. La interfaz no importa el motor de IA, y el motor no escribe en la base de datos de exportación. Las decisiones tecnológicas vigentes están en `docs/` (empieza por `docs/propuesta-tecnica.md`). Léelas antes de proponer otra tecnología, y si cambias una, registra el porqué.
 
-## 5. Exportación: copia fiel, solo por decisión del usuario
+## 5. Copiar o mover: fiel y solo por decisión del usuario
 
-Nada se exporta automáticamente tras clasificar. El flujo siempre es: selección → **vista previa** (número de archivos, bytes, conflictos de nombre, espacio libre en el destino) → confirmación → copia. El procedimiento exacto, con los detalles de Windows, está en [references/integrity.md](references/integrity.md). En resumen:
+Nada se exporta automáticamente tras clasificar. El flujo siempre es: selección → **vista previa** (número de archivos, bytes, conflictos de nombre, espacio libre en el destino) → confirmación → copia. Mover pide una **segunda confirmación**. El procedimiento exacto, con los detalles de Windows, está en [references/integrity.md](references/integrity.md). En resumen:
 
 1. Copia **byte a byte**, sin decodificar ni volver a codificar. Así se conservan EXIF, IPTC, XMP, ICC, la orientación y el GPS, porque son parte del archivo.
 2. Escribe primero a un archivo temporal en el destino, calcula su SHA-256, compáralo con el del original y solo entonces renómbralo **dentro del destino**.
@@ -92,6 +97,8 @@ Nada se exporta automáticamente tras clasificar. El flujo siempre es: selecció
 6. Incrustar etiquetas en las **copias** solo se hace si el usuario lo activa expresamente. Como eso cambia los bytes, la verificación SHA-256 se hace antes, y el manifiesto registra los dos hashes.
 
 Cualquier fallo de verificación borra **solo el temporal del destino**, se reporta y no cuenta como exportado.
+
+**Mover** sigue las mismas reglas de nombres y manifiesto, nunca incrusta etiquetas (cambiaría el único ejemplar) y, si en el destino ya hay un archivo idéntico, conserva el original. Cada archivo queda registrado en `move_log` antes de tocarlo y se puede deshacer.
 
 ## 6. IA y costos
 

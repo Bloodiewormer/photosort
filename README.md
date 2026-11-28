@@ -24,8 +24,9 @@ Consulta la **[guía de uso](docs/uso.md)** para empezar paso a paso.
 
 ## Tus originales y tu privacidad
 
-- Los originales nunca se borran, mueven, renombran, sobrescriben ni se vuelven a codificar, y no se crean archivos junto a ellos.
-- Toda escritura pasa por un protector de rutas que rechaza cualquier destino dentro de una biblioteca registrada. Al leer un archivo, Windows puede actualizar su fecha de último acceso según la configuración del equipo.
+- Los originales nunca se borran, sobrescriben ni se vuelven a codificar, y no se les cambian metadatos ni fechas. Solo se mueven cuando tú lo pides, de forma verificada y con deshacer; entre discos, el original va a la Papelera de Windows después de verificar la copia.
+- No se crean archivos junto a los originales, salvo en la carpeta de destino que eliges al mover (el manifiesto y el `.xmp` opcional).
+- Toda escritura pasa por un protector de rutas. Al copiar, rechaza cualquier destino dentro de una biblioteca registrada; al mover permite ordenar dentro de ellas, pero nunca sobrescribe. Al leer un archivo, Windows puede actualizar su fecha de último acceso según la configuración del equipo.
 - Todo se procesa en tu equipo, sin servicios en línea, APIs de pago ni telemetría. El catálogo se guarda en `%LOCALAPPDATA%\photosort`.
 
 ## Compilar y ejecutar

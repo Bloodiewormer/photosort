@@ -1,4 +1,6 @@
-# The photo library is read-only. Every write goes through the `fsguard` crate, which takes a `DestPath`.
+# Originals are never deleted, re-encoded or overwritten, and their dates and attributes never change. They
+# are only moved when the user asks, through `fsguard::move_no_replace` and `fsguard::recycle`.
+# Every write goes through the `fsguard` crate, which takes a `DestPath`.
 # Only `fsguard` and the export crate may `#[allow(clippy::disallowed_methods)]`, and each allow is justified in review.
 disallowed-methods = [
   { path = "std::fs::remove_file", reason = "originals are never deleted" },

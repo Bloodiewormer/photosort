@@ -90,3 +90,6 @@ Formato: fecha · decisión · alternativas · porqué.
   - `DestPath` guarda las raíces y la carpeta con las que se validó. `join_name` y `verify` resuelven la ruta real y rechazan la que cae en una biblioteca, sale de esa carpeta por un enlace o pasa por un enlace roto. La exportación lo comprueba también después de crear cada carpeta y antes de escribir; si falla, falla ese elemento y sigue con los demás.
   - La comparación ignora el prefijo `\\?\` que `dunce` conserva en rutas largas: sin esto, una ruta de más de 260 caracteres dentro de una biblioteca no se reconocía como tal.
   - Límite conocido: comprobar y escribir son dos pasos. Un enlace que otro programa cree justo entre ambos no se detecta; cerrarlo exigiría abrir cada componente por manejador.
+- **2026-11-27 · La app puede mover fotos, nunca borrarlas** (opción A: copia verificada y Papelera entre discos). Alternativas: dejar el original oculto (no cumple que dejen de estar en D:) o retirarlo para siempre (sin vuelta atrás). Pedido por el usuario para separar y ordenar.
+  - Mismo disco: `MoveFileExW` sin reemplazar. Entre discos: copia verificada, nueva comprobación del original y Papelera. Registro en `move_log` y deshacer.
+  - Mientras hay un movimiento en curso, un candado en una base SQLite aparte impide que otra conexión que abra el catálogo resuelva sus filas pendientes.
