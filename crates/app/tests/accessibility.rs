@@ -403,6 +403,19 @@ fn walking_the_whole_photo_menu_leaves_the_gallery_where_it_was() {
 }
 
 #[test]
+fn renaming_a_person_puts_the_focus_in_the_name_field() {
+    let mut harness = Harness::new(CaptureView::Persons, Theme::Dark);
+    for _ in 0..200 {
+        harness.press(Key::Tab, Modifiers::NONE);
+        if harness.focused_name() == "Renombrar" {
+            break;
+        }
+    }
+    harness.press(Key::Enter, Modifiers::NONE);
+    assert_eq!(harness.focused_name(), "Nombre de la persona");
+}
+
+#[test]
 fn keyboard_focus_ring_is_drawn_in_both_themes() {
     for (preference, palette) in [
         (Theme::Dark, &theme::DARK_PALETTE),
