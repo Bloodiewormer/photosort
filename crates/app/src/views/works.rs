@@ -604,19 +604,23 @@ pub fn draw(
                                 ui.add_space(theme::SPACE_SM);
                                 ui.horizontal(|ui| {
                                     for entry in &group.sample_entries {
-                                        visible_hashes.insert(entry.sha256.clone());
-                                        if !thumb_textures.contains_key(&entry.sha256)
-                                            && !thumb_failed.contains(&entry.sha256)
-                                        {
-                                            to_request.push(ThumbRequest {
-                                                source: entry.path.clone(),
-                                                sha256: entry.sha256.clone(),
-                                            });
-                                        }
                                         let (rect, _) = ui.allocate_exact_size(
                                             Vec2::new(56.0, 56.0),
                                             Sense::hover(),
                                         );
+                                        // Only on-screen samples ask for a thumbnail, so a long
+                                        // list does not outgrow the texture cache and flicker.
+                                        if ui.is_rect_visible(rect) {
+                                            visible_hashes.insert(entry.sha256.clone());
+                                            if !thumb_textures.contains_key(&entry.sha256)
+                                                && !thumb_failed.contains(&entry.sha256)
+                                            {
+                                                to_request.push(ThumbRequest {
+                                                    source: entry.path.clone(),
+                                                    sha256: entry.sha256.clone(),
+                                                });
+                                            }
+                                        }
                                         draw_thumb_box(
                                             ui,
                                             palette,
