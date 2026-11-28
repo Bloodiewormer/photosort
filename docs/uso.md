@@ -1,6 +1,6 @@
 # Guía de uso de photosort
 
-photosort cataloga tus fotos y vídeos en tu propio equipo sin tocar nunca los archivos originales. Todas las etiquetas, categorías, obras y personas viven en el catálogo de la aplicación, y solo se crean copias si decides exportar.
+photosort cataloga tus fotos y vídeos en tu propio equipo. Nunca borra ni modifica los archivos originales, y solo los mueve si tú lo pides. Todas las etiquetas, categorías, obras y personas viven en el catálogo de la aplicación, y solo se copian o se mueven archivos si tú lo decides.
 
 ## Primeros pasos
 
@@ -102,12 +102,12 @@ La vista **Duplicados** es de solo lectura: nunca borra, mueve ni renombra archi
 - **Duplicados exactos:** agrupa archivos con el mismo SHA-256 (contenido idéntico), ordenados por espacio duplicado.
 - **Parecidos:** compara los vectores visuales guardados (requiere al menos 2 fotos analizadas con **Reconocer imágenes**). Ajusta **Umbral de similitud** (entre 0,80 y 0,99) y pulsa **Buscar parecidos**. Cada grupo incluye **Ver en galería**.
 
-## Exportar
+## Copiar o mover
 
-Exportar siempre crea copias nuevas en la carpeta que elijas. Los originales nunca se tocan.
+**Copiar** crea copias nuevas en la carpeta que elijas y deja los originales donde están. **Mover (cortar)** se lleva el único ejemplar a esa carpeta, para separar y ordenar. Ninguna de las dos borra, sobrescribe ni vuelve a codificar un archivo.
 
-1. En la galería, selecciona las fotos que quieras exportar (o pulsa `Ctrl+A` para seleccionar todos los resultados visibles) y pulsa **Exportar…** en la barra de selección o en el menú contextual.
-2. En la ventana **Exportar copias**, elige la **Carpeta de destino** con **Elegir carpeta…**. Debe estar fuera de todas tus bibliotecas registradas.
+1. En la galería, selecciona las fotos (o pulsa `Ctrl+A` para seleccionar todos los resultados visibles) y pulsa **Copiar o mover…** en la barra de selección o en el menú contextual.
+2. En la ventana **Copiar o mover**, elige **Copiar** o **Mover (cortar)** y la **Carpeta de destino** con **Elegir carpeta…**. Para copiar debe estar fuera de todas tus bibliotecas registradas. Para mover puede estar dentro de una (para ordenar carpetas) o fuera, pero no en la carpeta de datos de photosort.
 3. Elige la **Estructura de carpetas**:
    - **Plana:** todas las copias directamente en la carpeta de destino.
    - **Por categoría:** una subcarpeta por la primera categoría de cada imagen (o «Sin categoría»).
@@ -115,10 +115,31 @@ Exportar siempre crea copias nuevas en la carpeta que elijas. Los originales nun
    - **Por año:** una subcarpeta por el año de modificación del archivo (o «Sin fecha»).
    - **Conservar carpetas:** replica la estructura original de carpetas respecto a su biblioteca (si exportas desde varias bibliotecas, añade el nombre de cada una como primer nivel).
 4. Opciones de **Metadatos y etiquetas** (desactivadas por defecto):
-   - **Guardar etiquetas en un archivo XMP junto a cada copia:** crea un archivo `.xmp` al lado de cada copia en el destino con categorías, jerarquía, etiquetas, obras y personas con nombre. Nunca se crea junto al original.
-   - **Incrustar etiquetas en las copias JPEG (cambia sus bytes; el original no se toca):** inserta las etiquetas XMP en la copia JPEG después de verificarla, sin recomprimir la imagen. El manifiesto guarda la huella SHA-256 antes y después.
-5. Pulsa **Calcular vista previa** para revisar cuántos archivos se copiarán, el tamaño total, el espacio libre en destino, los conflictos de nombre (se renombran con sufijo sin sobrescribir) y los archivos ya presentes (se omiten si tienen el mismo SHA-256).
-6. Pulsa **Exportar**. Cada archivo se copia byte a byte, se verifica con SHA-256, conserva sus fechas y se acompaña de dos manifiestos (CSV y JSON). Al terminar puedes pulsar **Abrir carpeta**.
+   - **Guardar etiquetas en un archivo XMP junto a cada archivo del destino:** crea un archivo `.xmp` al lado de cada copia (o de cada foto movida) con categorías, jerarquía, etiquetas, obras y personas con nombre. Solo se crea en la carpeta de destino.
+   - **Incrustar etiquetas en las copias JPEG (cambia sus bytes; el original no se toca):** inserta las etiquetas XMP en la copia JPEG después de verificarla, sin recomprimir la imagen. El manifiesto guarda la huella SHA-256 antes y después. No está disponible al mover.
+5. Pulsa **Calcular vista previa** para revisar cuántos archivos se copiarán o moverán, el tamaño total, el espacio libre en destino, los conflictos de nombre (se renombran con sufijo sin sobrescribir) y los archivos ya presentes (se omiten si tienen el mismo SHA-256).
+6. Para copiar, pulsa **Copiar**. Cada archivo se copia byte a byte, se verifica con SHA-256, conserva sus fechas y se acompaña de dos manifiestos (CSV y JSON), con la columna `operacion`. Al terminar puedes pulsar **Abrir carpeta**.
+7. Para mover, pulsa **Mover…**, lee la segunda confirmación y pulsa **Mover**. Ahí `Intro` no hace nada, salvo que lleves el foco al botón **Mover**.
+
+### Qué pasa al mover
+
+- La vista previa dice cuántos archivos van **en el mismo disco** (instantáneo: no cambian ni los bytes, ni las fechas, ni los atributos) y cuántos **a otro disco**. Estos se copian, se verifican con SHA-256, se comprueba que el original no ha cambiado y solo entonces el original va a la **Papelera de Windows**. Si Windows avisa de que lo borraría para siempre (una unidad sin Papelera o la Papelera llena), puedes cancelar: la copia se queda y el original también.
+- Entre discos se conservan las fechas y los atributos de solo lectura, oculto y sistema, pero no los flujos alternativos ni los permisos de Windows (el original de la Papelera los mantiene).
+- Si en el destino ya hay un archivo idéntico, el original **no se toca**. Si el nombre lo ocupa otro archivo distinto, se usa `nombre (1)`.
+- Si el resumen dice **Copiado, original conservado**, hay una copia en el destino y el original sigue en su sitio, con el motivo.
+- Al mover no se incrustan etiquetas en los JPEG. El archivo `.xmp` al lado es opcional.
+- Las etiquetas siguen con la foto. Si la mueves fuera de tus bibliotecas, deja de verse en la galería; si añades esa carpeta como biblioteca, reaparece con todo.
+- Si una foto tiene duplicados exactos en otras rutas, solo se mueve la que ves en la galería.
+- Puedes cancelar a mitad: lo que ya se movió se puede deshacer y el resto no se toca.
+- Los accesos directos, las carpetas, los enlaces y los archivos de OneDrive «solo en la nube» (u otros marcadores de posición) no se mueven.
+
+### Deshacer un movimiento
+
+**Deshacer este movimiento**, en el resumen, o **Deshacer último movimiento**, en la barra de la galería, devuelven cada archivo a su ruta original; las veces siguientes, el movimiento anterior. Un archivo solo vuelve si el del destino no ha cambiado y la ruta original está libre. Los que no puedan volver se indican con el motivo y se pueden reintentar; mientras quede alguno pendiente, no se pasa al movimiento anterior. Si volvía desde otro disco, la copia del destino va a la Papelera. Una copia no se puede «deshacer», porque sería borrarla.
+
+## Recargar
+
+El botón **Recargar** de la galería vuelve a revisar tus carpetas y quita las fotos que ya no están (por ejemplo, las que moviste o borraste fuera de photosort). Sus etiquetas se conservan. Mientras trabaja dice **Recargando…**; si la revisión está en pausa, se hará al reanudarla.
 
 ## Teclado y accesibilidad
 
@@ -136,7 +157,7 @@ Exportar siempre crea copias nuevas en la carpeta que elijas. Los originales nun
 | Sugerencias | `A` / `R` | Acepta o rechaza la sugerencia actual |
 | Sugerencias | `↑` / `↓` y `←` / `→` | Cambia de fila o de grupo |
 | Sugerencias | `Ctrl+Z` | Deshace la última decisión |
-| Exportar copias | `Esc` | Cierra la ventana (cuando no está copiando) |
+| Copiar o mover | `Esc` | Cierra la ventana (cuando no está copiando ni moviendo) |
 
 ### Probar con Narrador de Windows
 
@@ -146,7 +167,7 @@ La interfaz expone sus controles mediante AccessKit y UI Automation. Para compro
 2. Pulsa una flecha en la galería para seleccionar la primera foto y llega con `Tab` a una miniatura: debe oírse el nombre del archivo, su estado y si está seleccionada.
 3. Con una foto seleccionada, pulsa la tecla de menú o `Mayús+F10`: Narrador debe leer cada orden al moverte con las flechas, y `Esc` cierra el menú.
 4. En **Configuración**, comprueba que cada interruptor anuncia qué controla y si está activado, y que Apariencia y Dispositivo indican cuál está elegido.
-5. Abre **Exportar…**: el foco debe empezar en **Carpeta de destino**, y `Esc` cierra la ventana.
+5. Abre **Copiar o mover…**: el foco debe empezar en **Carpeta de destino**, y `Esc` cierra la ventana.
 6. En **Personas** y **Etiquetas**, comprueba que los campos de texto y el umbral se anuncian con su nombre.
 7. Repite el recorrido con `Tab` en los temas **Claro** y **Oscuro** (en **Configuración → Apariencia**) para comprobar que el borde de foco se distingue en ambos.
 

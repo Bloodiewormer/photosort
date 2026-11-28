@@ -4,7 +4,7 @@
 use app::export_flow::{
     ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, build_export_items,
     layout_description, layout_label, move_confirmation_text, remember_export_dir, select_entries,
-    validate_destination,
+    undo_messages, validate_destination,
 };
 use app::model::Selection;
 use app::settings::{self, Settings};
@@ -156,6 +156,37 @@ fn the_move_confirmation_says_how_many_go_to_the_recycle_bin() {
     );
     assert!(
         move_confirmation_text(1, 1).starts_with("Se moverá 1 foto fuera de su carpeta. 1 irá")
+    );
+}
+
+#[test]
+fn the_undo_message_counts_what_came_back_and_says_why_the_rest_did_not() {
+    let mut report = export::UndoReport {
+        restored: vec![PathBuf::from("a.jpg"), PathBuf::from("b.jpg")],
+        ..Default::default()
+    };
+    assert_eq!(
+        undo_messages(&report),
+        ("Se restauraron 2 fotos".to_string(), None)
+    );
+    report.restored.truncate(1);
+    report.skipped = (0..5)
+        .map(|i| (PathBuf::from(format!("c{i}.jpg")), "ocupada".to_string()))
+        .collect();
+    let (done, problems) = undo_messages(&report);
+    assert_eq!(done, "Se restauró 1 foto");
+    let problems = problems.unwrap();
+    assert!(
+        problems.starts_with("5 no se pudieron restaurar: c0.jpg (ocupada)"),
+        "{problems}"
+    );
+    assert!(problems.ends_with("y 2 más"), "{problems}");
+
+    report.skipped.clear();
+    report.warnings = vec![(PathBuf::from("a.jpg"), "la copia sigue ahí".into())];
+    assert_eq!(
+        undo_messages(&report).1.as_deref(),
+        Some("Aviso: a.jpg (la copia sigue ahí)")
     );
 }
 

@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 const EXPORT_WINDOW_WIDTH: f32 = 520.0;
 
-/// Draws the «Copiar o mover» window when open, polling its background workers each frame.
+/// Draws the «Copiar o mover» window when open, polling its background workers each frame. Returns
+/// true when the user asks to undo the move it just made.
 pub fn draw_window(
     ctx: &egui::Context,
     palette: &Palette,
@@ -23,14 +24,15 @@ pub fn draw_window(
     data_dir: &Path,
     settings: &mut Settings,
     banner_error: &mut Option<String>,
-) {
+) -> bool {
     let Some(wizard) = slot.as_mut() else {
-        return;
+        return false;
     };
 
     wizard.poll();
 
     let mut close_requested = false;
+    let mut undo_requested = false;
     if !wizard.is_running()
         && !ctx.egui_wants_keyboard_input()
         && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
@@ -101,7 +103,14 @@ pub fn draw_window(
                 draw_running_step(ui, palette, wizard, done, total);
             }
             ExportPhase::Done(summary) => {
-                draw_done_step(ui, palette, &summary, banner_error, &mut close_requested);
+                draw_done_step(
+                    ui,
+                    palette,
+                    &summary,
+                    banner_error,
+                    &mut close_requested,
+                    &mut undo_requested,
+                );
             }
             ExportPhase::Error(message) => {
                 draw_error_step(ui, palette, wizard, &message, &mut close_requested);
@@ -109,9 +118,10 @@ pub fn draw_window(
         }
     });
 
-    if (!open_flag && !wizard.is_running()) || close_requested {
+    if (!open_flag && !wizard.is_running()) || close_requested || undo_requested {
         *slot = None;
     }
+    undo_requested
 }
 
 fn draw_header(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
@@ -299,7 +309,7 @@ fn draw_choose_step(
                     && let Err(e) = remember_export_dir(data_dir, settings, &dest)
                 {
                     *banner_error = Some(format!(
-                        "No se pudo guardar la última carpeta de exportación: {e}"
+                        "No se pudo guardar la última carpeta de destino: {e}"
                     ));
                 }
             }
@@ -583,6 +593,7 @@ fn draw_done_step(
     summary: &ExportSummary,
     banner_error: &mut Option<String>,
     close_requested: &mut bool,
+    undo_requested: &mut bool,
 ) {
     let moving = summary.operation == Operation::Move;
     let title = match (moving, summary.stopped) {
@@ -721,6 +732,9 @@ fn draw_done_step(
             && let Err(e) = open_in_explorer(&summary.dest)
         {
             *banner_error = Some(format!("No se pudo abrir la carpeta de destino: {e}"));
+        }
+        if moving && summary.moved > 0 && ui.button("Deshacer este movimiento").clicked() {
+            *undo_requested = true;
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.button("Cerrar").clicked() {

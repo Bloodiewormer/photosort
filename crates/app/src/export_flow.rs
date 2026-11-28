@@ -4,7 +4,8 @@ use crate::worker::Notify;
 use catalog::{AssetId, Assignment, Catalog, CatalogError, Entry};
 use export::{
     Control, ExportItem, ExportOptions, ExportProgress, ExportReport, Layout, MoveContext,
-    Operation, Outcome, Preview, export_with_options, move_with_options, preview_with_options,
+    Operation, Outcome, Preview, UndoReport, export_with_options, move_with_options,
+    preview_with_options, undo_last_move,
 };
 use fsguard::{
     DestPath, GuardError, LibraryRoot, MoveSource, ensure_export_dir, ensure_move_dir, io_reason,
@@ -394,6 +395,98 @@ impl Drop for ExportWorker {
             let _ = handle.join();
         }
     }
+}
+
+/// Brings the last move back on a background thread. Dropping it waits for it to finish.
+pub struct UndoWorker {
+    rx: mpsc::Receiver<Result<Option<UndoReport>, String>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl UndoWorker {
+    pub fn start(
+        db: DestPath,
+        roots: Vec<LibraryRoot>,
+        app_data: PathBuf,
+        notify: Option<Notify>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let result = Catalog::open(&db)
+                .map_err(|e| e.to_string())
+                .and_then(|catalog| {
+                    let context = MoveContext {
+                        catalog: &catalog,
+                        roots: &roots,
+                        retire: &fsguard::recycle,
+                        force_cross_volume: false,
+                        before_retire: None,
+                    };
+                    undo_last_move(&context, &app_data).map_err(|e| io_reason(&e))
+                });
+            let _ = tx.send(result);
+            if let Some(cb) = &notify {
+                cb();
+            }
+        });
+        Self {
+            rx,
+            join: Some(join),
+        }
+    }
+
+    /// The result, once the undo is over.
+    pub fn try_recv(&self) -> Option<Result<Option<UndoReport>, String>> {
+        match self.rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err("se detuvo inesperadamente".into())),
+        }
+    }
+}
+
+impl Drop for UndoWorker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// What to tell after an undo: how many came back and, apart, anything that needs attention.
+pub fn undo_messages(report: &UndoReport) -> (String, Option<String>) {
+    const SHOWN: usize = 3;
+    let n = report.restored.len();
+    let done = format!(
+        "{} {}",
+        plural_word(n, "Se restauró", "Se restauraron"),
+        count_phrase(n, "foto", "fotos")
+    );
+    let list = |files: &[(PathBuf, String)]| {
+        let mut text = files
+            .iter()
+            .take(SHOWN)
+            .map(|(path, why)| format!("{} ({why})", file_name_or_full(path)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if files.len() > SHOWN {
+            text.push_str(&format!(" y {} más", files.len() - SHOWN));
+        }
+        text
+    };
+    let mut problems = Vec::new();
+    if !report.skipped.is_empty() {
+        let k = report.skipped.len();
+        problems.push(format!(
+            "{k} no se {} restaurar: {}",
+            plural_word(k, "pudo", "pudieron"),
+            list(&report.skipped)
+        ));
+    }
+    if !report.warnings.is_empty() {
+        problems.push(format!("Aviso: {}", list(&report.warnings)));
+    }
+    (done, (!problems.is_empty()).then(|| problems.join(". ")))
 }
 
 /// State machine for the «Copiar o mover» wizard: `Choose -> Preview -> Running -> Done / Error`,

@@ -2,7 +2,7 @@
 
 # photosort
 
-Aplicación de escritorio para **catalogar una biblioteca personal de fotos y vídeos sin tocarla**. Lee las carpetas que elijas, analiza cada archivo en tu equipo y guarda etiquetas, obras y personas en su propia base de datos. Solo exporta copias cuando tú lo pides.
+Aplicación de escritorio para **catalogar una biblioteca personal de fotos y vídeos sin tocarla**. Lee las carpetas que elijas, analiza cada archivo en tu equipo y guarda etiquetas, obras y personas en su propia base de datos. Solo copia o mueve archivos cuando tú lo pides.
 
 Escrita en Rust con [egui](https://github.com/emilk/egui). Windows 10 y 11 de 64 bits.
 
@@ -19,7 +19,7 @@ Consulta la **[guía de uso](docs/uso.md)** para empezar paso a paso.
 - **Subcategorías y etiquetas**: categorías en árbol, renombrado, traslado, fusión y borrado del catálogo. Cada sugerencia se acepta o rechaza y un análisis posterior no pisa tu decisión.
 - **Fechas, formatos y filtros**: filtra por tipo de medio, categorías con modos (exigir, incluir alguna, excluir), etiquetas, entidades, formato, orientación, año de captura y personas.
 - **Revisión en segundo plano**: desactivada por defecto; procesa por lotes sin compartir VRAM entre visión y OCR, permite volver a revisar fotos concretas y guarda los fallos en una lista de errores para reintentarlos sin bucles. Ver [docs/revision.md](docs/revision.md).
-- **Exportación verificada**: copias byte a byte verificadas con SHA-256, restauración de fechas, manifiestos CSV y JSON, sidecars XMP opcionales, incrustación opcional en copias JPEG y disposición «Conservar carpetas».
+- **Copiar o mover**: copias byte a byte verificadas con SHA-256, movimientos con deshacer, restauración de fechas, manifiestos CSV y JSON, sidecars XMP opcionales, incrustación opcional en copias JPEG y disposición «Conservar carpetas».
 - **Accesibilidad**: navegación completa con teclado, foco visible, contraste comprobado y árbol de accesibilidad para Narrador de Windows.
 
 ## Tus originales y tu privacidad

@@ -115,6 +115,9 @@ pub struct PhotosortApp {
     export_wizard: Option<crate::export_flow::ExportWizard>,
     preset_export_dir: Option<PathBuf>,
     export_open_failed: bool,
+    /// Asked of the catalog at startup and after each move or undo, not every frame.
+    can_undo_move: bool,
+    undo_worker: Option<crate::export_flow::UndoWorker>,
     screenshot: Option<crate::screenshot::ScreenshotController>,
     last_thumbs_ready: bool,
 }
@@ -267,10 +270,13 @@ impl PhotosortApp {
             export_wizard: None,
             preset_export_dir: None,
             export_open_failed: false,
+            can_undo_move: false,
+            undo_worker: None,
             screenshot: None,
             last_thumbs_ready: false,
         };
         app.reload_catalog();
+        app.refresh_can_undo();
         if app.demo_mode {
             app.engine_snapshot.phase = EnginePhase::Running {
                 done: app.reviewed_counts.reviewed,
@@ -579,7 +585,8 @@ impl PhotosortApp {
     }
 
     fn foreground_heavy_task(&self) -> Option<&'static str> {
-        if self.export_wizard.as_ref().is_some_and(|w| w.is_moving()) {
+        if self.undo_worker.is_some() || self.export_wizard.as_ref().is_some_and(|w| w.is_moving())
+        {
             Some("el movimiento de fotos")
         } else if self.works_worker.is_some() {
             Some("la búsqueda de obras")
@@ -610,6 +617,74 @@ impl PhotosortApp {
             engine.request_index();
         }
         ctx.request_repaint_after(self.folder_recheck.remaining(now));
+    }
+
+    /// «Recargar»: lists the folders again; the gallery reloads when that ends.
+    fn reload_folders(&mut self) {
+        let Some(engine) = &self.review_engine else {
+            self.reload_catalog();
+            return;
+        };
+        if engine.is_paused() {
+            self.status_notice =
+                Some("La revisión está en pausa: las carpetas se revisarán al reanudarla".into());
+        }
+        engine.request_index();
+    }
+
+    fn refresh_can_undo(&mut self) {
+        self.can_undo_move = self
+            .catalog
+            .as_ref()
+            .is_some_and(|c| c.last_undoable_batch().is_ok_and(|b| b.is_some()));
+    }
+
+    fn start_undo(&mut self, ctx: &egui::Context) {
+        if self.undo_worker.is_some() {
+            return;
+        }
+        let roots = self.settings.valid_roots();
+        match settings::db_dest_path(&self.data_dir, &roots) {
+            Ok(db) => {
+                let ctx = ctx.clone();
+                let notify: Notify = Arc::new(move || ctx.request_repaint());
+                self.undo_worker = Some(crate::export_flow::UndoWorker::start(
+                    db,
+                    roots,
+                    self.data_dir.clone(),
+                    Some(notify),
+                ));
+                self.status_notice = Some("Deshaciendo el último movimiento…".into());
+                self.sync_engine_yield();
+            }
+            Err(e) => self.banner_error = Some(e.to_string()),
+        }
+    }
+
+    fn poll_undo(&mut self, ctx: &egui::Context) {
+        let Some(result) = self.undo_worker.as_ref().and_then(|w| w.try_recv()) else {
+            return;
+        };
+        self.undo_worker = None;
+        self.sync_engine_yield();
+        match result {
+            Ok(Some(report)) => {
+                let (done, problems) = crate::export_flow::undo_messages(&report);
+                self.status_notice = Some(done);
+                if problems.is_some() {
+                    self.banner_error = problems;
+                }
+            }
+            Ok(None) => self.status_notice = Some("No hay movimientos que deshacer".into()),
+            Err(e) => {
+                self.status_notice = None;
+                self.banner_error = Some(format!("No se pudo deshacer: {e}"));
+            }
+        }
+        // Even a failed undo may have brought some files back.
+        self.reload_catalog();
+        self.refresh_can_undo();
+        ctx.request_repaint();
     }
 
     /// Flags in the catalog the photos found to be gone, and says whether it flagged any.
@@ -979,7 +1054,7 @@ impl PhotosortApp {
 
     fn pick_and_add_library(&mut self) {
         if let Some(folder) = rfd::FileDialog::new()
-            .set_title("Elegir carpeta con fotos (solo lectura)")
+            .set_title("Elegir carpeta con fotos")
             .pick_folder()
         {
             match self.settings.add_library_root(&folder, &self.data_dir) {
@@ -1519,7 +1594,7 @@ impl PhotosortApp {
     /// The «Copiar o mover» window, opened from the selection bar or the photo menu.
     fn draw_export_window(&mut self, ctx: &egui::Context, palette: &theme::Palette) {
         let moving_before = self.export_wizard.as_ref().is_some_and(|w| w.is_moving());
-        views::export::draw_window(
+        let undo_requested = views::export::draw_window(
             ctx,
             palette,
             &mut self.export_wizard,
@@ -1538,7 +1613,11 @@ impl PhotosortApp {
             .is_some_and(|w| w.take_finished_move())
         {
             self.reload_catalog();
+            self.refresh_can_undo();
             ctx.request_repaint();
+        }
+        if undo_requested {
+            self.start_undo(ctx);
         }
     }
 
@@ -1584,6 +1663,7 @@ impl PhotosortApp {
         let ctx = ui.ctx().clone();
         self.recheck_folders(&ctx);
         self.poll_workers(&ctx);
+        self.poll_undo(&ctx);
         self.handle_shortcuts(&ctx);
 
         let palette = theme::palette_for(&ctx);
@@ -1741,7 +1821,23 @@ impl PhotosortApp {
                     &self.thumb_pool,
                     &self.thumb_textures,
                     &self.thumb_failed,
+                    views::gallery::FolderActions {
+                        reloading: matches!(
+                            self.engine_snapshot.phase,
+                            EnginePhase::Indexing { .. }
+                        ),
+                        // With the window open, its summary is the one that offers to undo.
+                        can_undo: self.can_undo_move
+                            && self.undo_worker.is_none()
+                            && self.export_wizard.is_none(),
+                    },
                 );
+                if gal_out.reload {
+                    self.reload_folders();
+                }
+                if gal_out.undo_move {
+                    self.start_undo(&ctx);
+                }
                 if let Some(out) = naming_outcome {
                     if out.postponed.is_some() {
                         self.reload_person_cards();

@@ -233,7 +233,7 @@ fn every_control_in_every_view_has_a_name() {
     harness.press(Key::Enter, Modifiers::NONE);
     harness.assert_all_named("visor");
     harness.press(Key::Escape, Modifiers::NONE);
-    harness.click("Exportar…");
+    harness.click("Copiar o mover…");
     harness.assert_all_named("exportar");
 }
 
@@ -309,7 +309,7 @@ fn tab_reaches_the_main_actions_and_keeps_the_focus_in_view() {
     for wanted in [
         "Buscar en texto o ruta",
         "Configuración",
-        "Exportar…",
+        "Copiar o mover…",
         "Quitar selección",
         "Visor",
         ".png",
@@ -366,7 +366,7 @@ fn menu_keys_open_the_photo_menu_and_escape_closes_menus_and_dialogs() {
     harness.press(Key::Escape, Modifiers::NONE);
     assert_eq!(harness.focused_name(), thumbnail);
 
-    harness.click("Exportar…");
+    harness.click("Copiar o mover…");
     assert!(harness.has_name_containing("Calcular vista previa"));
     // The focus starts inside the window, not behind it.
     assert_eq!(harness.focused_name(), "Carpeta de destino");
@@ -493,7 +493,7 @@ impl Harness {
     /// Opens the export window for the selection, types `dest` and presses Enter to preview it.
     /// With `hold`, Enter stays down and repeats once the preview is ready.
     fn export_preview(&mut self, dest: &std::path::Path, hold: bool) {
-        self.click("Exportar…");
+        self.click("Copiar o mover…");
         assert_eq!(self.focused_name(), "Carpeta de destino");
         self.press(Key::A, Modifiers::COMMAND);
         self.run(vec![Event::Text(dest.display().to_string())]);
@@ -552,7 +552,7 @@ fn enter_never_confirms_a_move() {
     let out = tempfile::tempdir().expect("carpeta temporal");
     let mut harness = Harness::new(CaptureView::Gallery, Theme::Dark);
     harness.press(Key::ArrowRight, Modifiers::NONE);
-    harness.click("Exportar…");
+    harness.click("Copiar o mover…");
     harness.activate(Role::RadioButton, "Mover (cortar)");
     harness.assert_all_named("mover");
     harness.focus_on(Role::TextInput, "Carpeta de destino");
@@ -572,6 +572,67 @@ fn enter_never_confirms_a_move() {
 
     harness.click("Volver");
     assert!(harness.find(Role::Button, "Mover…").is_some());
+
+    // Enter held on the focused «Mover…» repeats into the confirmation, whose button takes its
+    // place: the repeats must not press it.
+    harness.focus_on(Role::Button, "Mover…");
+    for _ in 0..10 {
+        harness.run(vec![enter_key(true)]);
+    }
+    harness.run(vec![enter_key(false)]);
+    harness.settle();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    harness.settle();
+    assert!(harness.has_text_containing("Puedes deshacerlo."));
+    assert!(harness.find(Role::Button, "Mover").is_some());
+    assert!(is_empty_dir(out.path()), "Intro mantenido movió la foto");
+}
+
+#[test]
+fn reload_and_undo_have_names_and_are_reached_with_tab() {
+    // Its own data: the test writes to the catalog, so that there is something to undo.
+    let config = DemoConfig {
+        count: 8,
+        seed: demo::DEFAULT_SEED,
+    };
+    let setup = demo::prepare_demo(None, config, None).expect("datos de demostración");
+    let harness = Harness::open(&setup, CaptureView::Gallery, Theme::Dark);
+    let undo = harness
+        .find(Role::Button, "Deshacer último movimiento")
+        .expect("botón");
+    assert!(
+        harness.nodes[&undo].is_disabled(),
+        "todavía no hay nada que deshacer"
+    );
+
+    let db = app::settings::db_dest_path(&setup.data_dir, &[]).expect("ruta del catálogo");
+    let cat = catalog::Catalog::open(&db).expect("catálogo");
+    // A logged move of a file that is in no library: only the log changes.
+    let nowhere = setup.data_dir.join("no-existe");
+    let id = cat
+        .begin_move(&catalog::NewMove {
+            batch: 1,
+            src_path: &nowhere,
+            src_root: &nowhere,
+            dst_path: &nowhere,
+            sha256: "0",
+            size: 0,
+            mtime_ns: None,
+            method: catalog::MoveMethod::Rename,
+        })
+        .expect("registro");
+    cat.finish_move(id, catalog::MoveState::Done, None)
+        .expect("hecho");
+
+    let mut harness = Harness::open(&setup, CaptureView::Gallery, Theme::Dark);
+    harness.assert_all_named("barra de la galería");
+    let stops = tab_stops(&mut harness);
+    for wanted in ["Recargar", "Deshacer último movimiento"] {
+        assert!(
+            stops.iter().any(|s| s == wanted),
+            "Tab no llega a «{wanted}»: {stops:#?}"
+        );
+    }
 }
 
 #[test]
@@ -583,7 +644,7 @@ fn names_that_egui_gives_are_in_spanish() {
             .find(Role::Splitter, "Cambiar el tamaño del panel")
             .is_some()
     );
-    harness.click("Exportar…");
+    harness.click("Copiar o mover…");
     assert!(harness.find(Role::Button, "Cerrar ventana").is_some());
     for english in ["Close window", "Resize panel"] {
         assert!(!harness.has_name_containing(english), "{english}");

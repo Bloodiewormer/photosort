@@ -12,6 +12,7 @@ use app::ui::PhotosortApp;
 use app::worker::{ThumbPool, ThumbRequest};
 use catalog::{Catalog, DetectedFace, Entry, Filter, Sort};
 use eframe::App as _;
+use eframe::egui::accesskit::{Action, ActionRequest, Node, NodeId, Role, TreeId};
 use eframe::egui::{self, Pos2, RawInput, Rect, Vec2};
 use export::ExportItem;
 use fsguard::{DestPath, LibraryRoot, ensure_writable};
@@ -276,6 +277,139 @@ fn the_export_preview_reports_the_sources_that_are_gone() {
     }
     assert_eq!(wizard.take_gone(), [deleted]);
     assert!(!Path::new(&library.root.as_path().join("a.png")).exists());
+}
+
+/// The whole application on a synthetic library, with no window, driven as a screen reader does.
+struct Headless {
+    ctx: egui::Context,
+    app: PhotosortApp,
+    frame: eframe::Frame,
+    nodes: Vec<(NodeId, Node)>,
+}
+
+impl Headless {
+    fn open(library: &Library) -> Self {
+        let settings = Settings {
+            library_roots: vec![library.root.as_path().to_path_buf()],
+            ..Settings::default()
+        };
+        settings::save(&library.data, &settings).unwrap();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        // Not the demo: the real folder review is what «Recargar» asks.
+        let app = PhotosortApp::new_with_mode(&cc, library.data.clone(), false, open_thumbnails);
+        let mut headless = Self {
+            ctx,
+            app,
+            frame: eframe::Frame::_new_kittest(),
+            nodes: Vec::new(),
+        };
+        headless.run(Vec::new());
+        headless.run(Vec::new());
+        headless
+    }
+
+    fn run(&mut self, events: Vec<egui::Event>) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 820.0))),
+            events,
+            ..Default::default()
+        };
+        let (app, frame) = (&mut self.app, &mut self.frame);
+        let mut out = self.ctx.run_ui(input, |ui| app.ui(ui, frame));
+        out.textures_delta.clear();
+        self.nodes = out.platform_output.accesskit_update.expect("tree").nodes;
+    }
+
+    fn button(&self, name: &str) -> Option<&(NodeId, Node)> {
+        self.nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button && n.label() == Some(name))
+    }
+
+    fn click(&mut self, name: &str) {
+        let (id, node) = self.button(name).unwrap_or_else(|| panic!("no «{name}»"));
+        assert!(!node.is_disabled(), "«{name}» is disabled");
+        let target = *id;
+        self.run(vec![egui::Event::AccessKitActionRequest(ActionRequest {
+            action: Action::Click,
+            target_tree: TreeId::ROOT,
+            target_node: target,
+            data: None,
+        })]);
+    }
+
+    fn shows(&self, file: &str) -> bool {
+        self.nodes
+            .iter()
+            .any(|(_, n)| n.label().is_some_and(|l| l.contains(file)))
+    }
+
+    fn wait_for(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(self) {
+            assert!(Instant::now() < deadline, "never: {what}");
+            thread::sleep(Duration::from_millis(20));
+            self.run(Vec::new());
+        }
+    }
+}
+
+#[test]
+fn reload_removes_photos_moved_outside_the_app() {
+    let library = Library::new();
+    let mut app = Headless::open(&library);
+    assert!(app.shows("a.png") && app.shows("b.png"));
+
+    fs::rename(
+        library.root.as_path().join("a.png"),
+        library.tmp.path().join("a.png"),
+    )
+    .unwrap();
+    app.click("Recargar");
+
+    app.wait_for("a.png leaves the gallery", |app| !app.shows("a.png"));
+    assert!(app.shows("b.png"));
+    assert_eq!(names(&library.entries()), ["b.png"]);
+}
+
+#[test]
+fn the_gallery_button_undoes_the_last_move() {
+    let library = Library::new();
+    let out = library.tmp.path().join("out");
+    {
+        let cat = library.catalog();
+        let roots = [LibraryRoot::new(library.root.as_path()).unwrap()];
+        let item = ExportItem::new(library.entries().remove(0).path);
+        let no_recycle_bin =
+            |_: &fsguard::MoveSource| -> std::io::Result<bool> { panic!("same disk") };
+        let context = export::MoveContext {
+            catalog: &cat,
+            roots: &roots,
+            retire: &no_recycle_bin,
+            force_cross_volume: false,
+            before_retire: None,
+        };
+        let dest = fsguard::ensure_move_dir(&out, &library.data).unwrap();
+        export::move_with_options(&[item], &dest, Default::default(), &context, &mut |_| {
+            export::Control::Continue
+        })
+        .unwrap();
+    }
+    assert!(out.join("a.png").exists());
+    let mut app = Headless::open(&library);
+    assert!(!app.shows("a.png"));
+
+    app.click("Deshacer último movimiento");
+
+    app.wait_for("a.png comes back", |app| app.shows("a.png"));
+    assert!(library.root.as_path().join("a.png").exists());
+    assert!(!out.join("a.png").exists());
+    assert_eq!(names(&library.entries()), ["a.png", "b.png"]);
+    // With nothing left to undo the button is off.
+    let (_, undo) = app.button("Deshacer último movimiento").expect("button");
+    assert!(undo.is_disabled());
 }
 
 #[test]

@@ -105,10 +105,10 @@ fn build_photo_menu_items(ctx: PhotoMenuContext) -> Vec<MenuItem> {
         });
     }
 
-    // Group 2: export & selection
+    // Group 2: copy or move & selection
     items.push(MenuItem {
         action: PhotoMenuAction::Export,
-        label: "Exportar…".into(),
+        label: "Copiar o mover…".into(),
         group: 2,
     });
     items.push(MenuItem {
