@@ -1,7 +1,9 @@
 mod jpeg;
+mod moves;
 mod xmp;
 
 pub use jpeg::{embed_xmp_in_jpeg, extract_xmp_from_jpeg, is_jpeg};
+pub use moves::{MoveContext, UndoReport, move_with_options, undo_last_move};
 pub use xmp::{XmpData, generate_xmp, xml_escape};
 
 use catalog::{AssetWork, Assignment, LabelKind, Status};
@@ -55,12 +57,32 @@ pub enum Layout {
     PreserveFolders,
 }
 
+/// Whether the originals stay where they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Operation {
+    #[default]
+    Copy,
+    Move,
+}
+
+impl Operation {
+    /// The word the manifest uses.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Copy => "copiar",
+            Self::Move => "mover",
+        }
+    }
+}
+
 /// Configuration options for export operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExportOptions {
     pub layout: Layout,
     pub write_xmp_sidecars: bool,
     pub embed_jpeg_tags: bool,
+    /// What [`preview_with_options`] counts. Moving is only done by [`move_with_options`].
+    pub operation: Operation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +102,13 @@ pub enum Outcome {
     Copied(PathBuf),
     /// An identical file (same SHA-256) was already there, so nothing was written.
     AlreadyPresent(PathBuf),
+    /// The original now is at this path.
+    Moved(PathBuf),
+    /// A move left a copy at `dest`, but the original is still where it was.
+    KeptOriginal {
+        dest: PathBuf,
+        reason: String,
+    },
     /// The guard refused to follow a link in the destination. The manifest records it as failed.
     Blocked(String),
     Failed(String),
@@ -97,9 +126,15 @@ pub struct ExportReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
-    /// Files that would be copied.
+    pub operation: Operation,
+    /// Files that would be copied or moved.
     pub files: usize,
     pub bytes: u64,
+    /// Of `files`, how many are on the destination's disk, where moving is instant.
+    pub same_volume: usize,
+    /// Of `files`, how many are on another disk: moving them copies and then recycles.
+    pub other_volume: usize,
+    pub bytes_other_volume: u64,
     /// Of `files`, how many would get a numbered name because the name is taken by different bytes.
     pub renamed: usize,
     pub already_present: usize,
@@ -112,9 +147,14 @@ pub struct Preview {
 }
 
 impl Preview {
-    /// True when the bytes to copy fit in the destination volume's free space (or when unknown).
+    /// True when the bytes to write fit in the destination volume's free space (or when unknown).
+    /// Moving within a disk writes nothing.
     pub fn fits(&self) -> bool {
-        self.free_bytes.is_none_or(|free| self.bytes <= free)
+        let needed = match self.operation {
+            Operation::Copy => self.bytes,
+            Operation::Move => self.bytes_other_volume,
+        };
+        self.free_bytes.is_none_or(|free| needed <= free)
     }
 
     fn count_refused(&mut self, e: &GuardError) {
@@ -432,10 +472,8 @@ fn resolve_target_dir(dest: &DestPath, comps: &[OsString]) -> Result<DestPath, G
     Ok(cur)
 }
 
-/// Writes `part`, checks it against `sha`, gives it the original's dates and renames it to `target`.
-/// Both paths are in the destination. A failed copy leaves nothing behind.
-// shortcut: checking that `target` is free and renaming are two steps, so another program creating the same
-// name in between could be overwritten; fine for one user on one machine, use a link-based rename if not.
+/// Writes `part`, checks it against `sha`, gives it the original's dates and renames it to `target`
+/// without replacing anything. Both paths are in the destination. A failed copy leaves nothing behind.
 #[allow(clippy::disallowed_methods)] // the only place that creates files: every path is a DestPath
 fn write_verified(
     source: &Path,
@@ -462,20 +500,26 @@ fn write_verified(
         }
         out.set_times(times_of(md)?)?;
         drop(out);
-        // A long copy gives time for the folder to change under us.
-        target.verify().map_err(io::Error::other)?;
-        if fs::symlink_metadata(target.as_path()).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "otro archivo ocupó el nombre mientras se copiaba",
-            ));
-        }
-        fs::rename(part.as_path(), target.as_path())
+        // A long copy gives time for the folder to change under us: both paths are checked again.
+        fsguard::rename_no_replace(part, target).map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                io::Error::new(e.kind(), "otro archivo ocupó el nombre mientras se copiaba")
+            } else {
+                e
+            }
+        })
     })();
     if result.is_err() && created {
         let _ = fs::remove_file(part.as_path()); // our own temporary file, in the destination
     }
     result
+}
+
+/// The temporary file a copy to `target` is written to.
+fn part_of(dir: &DestPath, target: &DestPath) -> io::Result<DestPath> {
+    let mut name = target.as_path().file_name().unwrap().to_owned();
+    name.push(".part");
+    dir.join_name(&name).map_err(io::Error::other)
 }
 
 /// Inserts or replaces XMP metadata in an already verified JPEG copy located at `target`.
@@ -592,11 +636,13 @@ struct Done {
     size: u64,
 }
 
+/// Copies one item, or moves it when there is a `mover` (its context and batch number).
 fn copy_one(
     item: &ExportItem,
     dest: &DestPath,
     options: ExportOptions,
     root_folders: &HashMap<&Path, OsString>,
+    mover: Option<(&MoveContext, i64)>,
 ) -> io::Result<Done> {
     let (md, sha) = read_source(&item.source).map_err(io::Error::other)?;
     let name = item
@@ -614,7 +660,7 @@ fn copy_one(
     };
     let resolved = resolve(&target_dir, name, &sha, &HashMap::new(), tagged.as_deref())
         .map_err(io::Error::other)?;
-    let path = resolved.target.as_path().to_path_buf();
+    let mut path = resolved.target.as_path().to_path_buf();
     let mut tagged_sha = None;
     let mut warnings: Vec<String> = Vec::new();
 
@@ -627,10 +673,19 @@ fn copy_one(
             }
         }
         Outcome::AlreadyPresent(path.clone())
+    } else if let Some((ctx, batch)) = mover {
+        let place = moves::Place {
+            dir: &target_dir,
+            target: &resolved.target,
+        };
+        let (outcome, log_warning) = moves::move_one(&item.source, place, &sha, &md, ctx, batch)?;
+        warnings.extend(log_warning);
+        if let Outcome::Moved(moved) | Outcome::KeptOriginal { dest: moved, .. } = &outcome {
+            path.clone_from(moved);
+        }
+        outcome
     } else {
-        let mut part_name = resolved.target.as_path().file_name().unwrap().to_owned();
-        part_name.push(".part");
-        let part = target_dir.join_name(&part_name).map_err(io::Error::other)?;
+        let part = part_of(&target_dir, &resolved.target)?;
         write_verified(&item.source, &part, &resolved.target, &sha, &md)?;
         Outcome::Copied(path.clone())
     };
@@ -704,6 +759,7 @@ pub fn export_with(
             layout,
             write_xmp_sidecars: false,
             embed_jpeg_tags: false,
+            operation: Operation::Copy,
         },
         progress,
     )
@@ -711,11 +767,26 @@ pub fn export_with(
 
 /// Copies the originals byte for byte into `dest` using `options`, verifies every copy against its
 /// SHA-256, optionally writes XMP sidecars and embeds tags in JPEG copies, and writes a manifest.
-#[allow(clippy::disallowed_methods)] // creating the destination folder: `dest` is a DestPath
 pub fn export_with_options(
     items: &[ExportItem],
     dest: &DestPath,
     options: ExportOptions,
+    progress: &mut dyn FnMut(&ExportProgress) -> Control,
+) -> io::Result<ExportReport> {
+    let options = ExportOptions {
+        operation: Operation::Copy,
+        ..options
+    };
+    run(items, dest, options, None, progress)
+}
+
+/// The loop and manifest that copying and moving share.
+#[allow(clippy::disallowed_methods)] // creating the destination folder: `dest` is a DestPath
+fn run(
+    items: &[ExportItem],
+    dest: &DestPath,
+    options: ExportOptions,
+    mover: Option<(&MoveContext, i64)>,
     progress: &mut dyn FnMut(&ExportProgress) -> Control,
 ) -> io::Result<ExportReport> {
     // Checked on both sides: the folder may have become a link since it was chosen.
@@ -727,23 +798,22 @@ pub fn export_with_options(
     let mut all_warnings = Vec::new();
     let mut files: Vec<Value> = Vec::with_capacity(total);
     let has_tagged_hashes = options.embed_jpeg_tags;
-    let mut csv = if has_tagged_hashes {
-        String::from(
-            "source_path,dest_path,sha256,size,status,labels,belongs_to_work,belongs_to_chapter,belongs_to_page,sha256_after_tagging\n",
-        )
-    } else {
-        String::from(
-            "source_path,dest_path,sha256,size,status,labels,belongs_to_work,belongs_to_chapter,belongs_to_page\n",
-        )
-    };
+    let mut csv = String::from(
+        "source_path,dest_path,sha256,size,status,labels,belongs_to_work,belongs_to_chapter,belongs_to_page",
+    );
+    if has_tagged_hashes {
+        csv.push_str(",sha256_after_tagging");
+    }
+    csv.push_str(",operacion\n");
     let (mut copied, mut present, mut failed, mut bytes) = (0u64, 0u64, 0u64, 0u64);
+    let (mut moved, mut kept) = (0u64, 0u64);
     let mut stopped = false;
 
     let root_folders = root_folders(items);
 
     for (idx, item) in items.iter().enumerate() {
         let (outcome, dest_path, sha, tagged_sha, warning, size) =
-            match copy_one(item, dest, options, &root_folders) {
+            match copy_one(item, dest, options, &root_folders, mover) {
                 Ok(Done {
                     outcome,
                     sha,
@@ -752,7 +822,10 @@ pub fn export_with_options(
                     size,
                 }) => {
                     let path = match &outcome {
-                        Outcome::Copied(p) | Outcome::AlreadyPresent(p) => Some(p.clone()),
+                        Outcome::Copied(p)
+                        | Outcome::AlreadyPresent(p)
+                        | Outcome::Moved(p)
+                        | Outcome::KeptOriginal { dest: p, .. } => Some(p.clone()),
                         Outcome::Blocked(_) | Outcome::Failed(_) => None,
                     };
                     (outcome, path, Some(sha), tagged_sha, warning, Some(size))
@@ -768,6 +841,15 @@ pub fn export_with_options(
             Outcome::AlreadyPresent(_) => {
                 present += 1;
                 "already_present".to_string()
+            }
+            Outcome::Moved(_) => {
+                moved += 1;
+                bytes += size.unwrap_or(0);
+                "moved".to_string()
+            }
+            Outcome::KeptOriginal { reason, .. } => {
+                kept += 1;
+                format!("kept_original: {reason}")
             }
             Outcome::Blocked(msg) | Outcome::Failed(msg) => {
                 failed += 1;
@@ -803,6 +885,7 @@ pub fn export_with_options(
             "sha256": sha,
             "size": size,
             "status": status,
+            "operacion": options.operation.name(),
             "labels": applied.iter().map(|l| json!({
                 "kind": lower(l.kind),
                 "name": l.name,
@@ -849,6 +932,7 @@ pub fn export_with_options(
         if has_tagged_hashes {
             fields.push(tagged_sha.unwrap_or_default());
         }
+        fields.push(options.operation.name().to_string());
         csv.push_str(
             &fields
                 .iter()
@@ -873,6 +957,8 @@ pub fn export_with_options(
         "summary": {
             "copied": copied,
             "already_present": present,
+            "moved": moved,
+            "kept_original": kept,
             "failed": failed,
             "bytes": bytes,
             "stopped": stopped,
@@ -909,6 +995,7 @@ pub fn preview_with(items: &[ExportItem], dest: &DestPath, layout: Layout) -> io
             layout,
             write_xmp_sidecars: false,
             embed_jpeg_tags: false,
+            operation: Operation::Copy,
         },
     )
 }
@@ -920,8 +1007,12 @@ pub fn preview_with_options(
     options: ExportOptions,
 ) -> io::Result<Preview> {
     let mut p = Preview {
+        operation: options.operation,
         files: 0,
         bytes: 0,
+        same_volume: 0,
+        other_volume: 0,
+        bytes_other_volume: 0,
         renamed: 0,
         already_present: 0,
         unreadable: 0,
@@ -930,6 +1021,7 @@ pub fn preview_with_options(
     };
     let mut reserved: HashMap<Option<String>, HashMap<String, String>> = HashMap::new();
     let root_folders = root_folders(items);
+    let dest_volume = volume(dest.as_path());
 
     for item in items {
         let Ok((md, sha)) = read_source(&item.source) else {
@@ -985,12 +1077,31 @@ pub fn preview_with_options(
         let chosen = resolved.target.as_path().file_name().unwrap();
         p.files += 1;
         p.bytes += md.len();
+        if volume(&item.source) == dest_volume {
+            p.same_volume += 1;
+        } else {
+            p.other_volume += 1;
+            p.bytes_other_volume += md.len();
+        }
         if chosen != name {
             p.renamed += 1;
         }
         folder_reserved.insert(key(chosen), sha);
     }
     Ok(p)
+}
+
+/// The drive or share a path is on.
+// shortcut: un punto de montaje o subst cuenta como el disco de su letra; mover cae solo al camino entre discos
+fn volume(path: &Path) -> Option<String> {
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return None;
+    };
+    let text = prefix.as_os_str().to_string_lossy().to_lowercase();
+    Some(match text.strip_prefix(r"\\?\unc\") {
+        Some(share) => format!(r"\\{share}"),
+        None => text.trim_start_matches(r"\\?\").to_string(),
+    })
 }
 
 #[cfg(windows)]
@@ -1092,6 +1203,17 @@ mod tests {
             ),
             Some(PathBuf::from("x.jpg"))
         );
+    }
+
+    #[test]
+    fn volumes_are_told_apart_by_drive_or_share() {
+        if cfg!(windows) {
+            let of = |p: &str| volume(Path::new(p));
+            assert_eq!(of(r"C:\a\b.jpg"), of(r"\\?\c:\z"));
+            assert_ne!(of(r"C:\a"), of(r"E:\a"));
+            assert_eq!(of(r"\\nas\fotos\a"), of(r"\\?\UNC\NAS\fotos\b"));
+            assert_ne!(of(r"\\nas\fotos\a"), of(r"\\nas\otras\a"));
+        }
     }
 
     #[test]

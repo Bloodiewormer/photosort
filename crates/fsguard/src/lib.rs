@@ -18,6 +18,11 @@ impl LibraryRoot {
     pub fn as_path(&self) -> &Path {
         &self.0
     }
+
+    /// True when `path` is this library or lies below it, compared as the guard compares.
+    pub fn contains(&self, path: &Path) -> bool {
+        key(path).starts_with(&key(&self.0))
+    }
 }
 
 /// A path proven to lie outside every protected folder: the library roots for [`ensure_writable`], the

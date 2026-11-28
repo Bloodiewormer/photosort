@@ -3,8 +3,8 @@
 
 use catalog::{Assignment, LabelId, LabelKind, Source, Status};
 use export::{
-    Control, ExportItem, ExportOptions, ExportProgress, Layout, Outcome, Preview, export,
-    export_with, export_with_options, preview, preview_with, sanitize_folder_name,
+    Control, ExportItem, ExportOptions, ExportProgress, Layout, Operation, Outcome, Preview,
+    export, export_with, export_with_options, preview, preview_with, sanitize_folder_name,
 };
 use fsguard::{DestPath, LibraryRoot, ensure_export_dir};
 use std::fs::{self, FileTimes};
@@ -302,16 +302,17 @@ fn the_csv_manifest_quotes_fields_that_contain_commas() {
             "labels",
             "belongs_to_work",
             "belongs_to_chapter",
-            "belongs_to_page"
+            "belongs_to_page",
+            "operacion"
         ]
     );
     let a = csv_fields(lines[1]);
     assert_eq!(
         (a.len(), a[4].as_str(), a[5].as_str()),
-        (9, "copied", "tag:meme")
+        (10, "copied", "tag:meme")
     );
     let b = csv_fields(lines[2]);
-    assert_eq!(b.len(), 9, "{}", lines[2]);
+    assert_eq!(b.len(), 10, "{}", lines[2]);
     assert!(b[0].ends_with("one, two.jpg"));
 }
 
@@ -334,8 +335,12 @@ fn the_preview_counts_files_and_bytes_without_writing_anything() {
     assert_eq!(
         p,
         Preview {
+            operation: Operation::Copy,
             files: 2,
             bytes: 10,
+            same_volume: 2,
+            other_volume: 0,
+            bytes_other_volume: 0,
             renamed: 0,
             already_present: 0,
             unreadable: 0,
@@ -367,8 +372,12 @@ fn the_preview_predicts_renames_present_files_and_unreadable_sources() {
     assert_eq!(
         p,
         Preview {
+            operation: Operation::Copy,
             files: 2,
             bytes: 10,
+            same_volume: 2,
+            other_volume: 0,
+            bytes_other_volume: 0,
             renamed: 2,
             already_present: 1,
             unreadable: 1,
@@ -397,8 +406,12 @@ fn the_preview_reports_free_space_from_nearest_existing_ancestor_for_nested_miss
 #[test]
 fn preview_fits_compares_bytes_against_free_bytes_when_known() {
     let fits_exact = Preview {
+        operation: Operation::Copy,
         files: 1,
         bytes: 100,
+        same_volume: 1,
+        other_volume: 0,
+        bytes_other_volume: 0,
         renamed: 0,
         already_present: 0,
         unreadable: 0,
@@ -406,6 +419,20 @@ fn preview_fits_compares_bytes_against_free_bytes_when_known() {
         free_bytes: Some(100),
     };
     assert!(fits_exact.fits());
+    let moving = Preview {
+        operation: Operation::Move,
+        bytes: 1_000,
+        bytes_other_volume: 100,
+        ..fits_exact.clone()
+    };
+    assert!(moving.fits());
+    assert!(
+        !Preview {
+            bytes_other_volume: 101,
+            ..moving
+        }
+        .fits()
+    );
 
     let too_big = Preview {
         bytes: 101,
@@ -737,6 +764,7 @@ fn preview_with_matches_export_with_for_all_four_layouts() {
                 Outcome::AlreadyPresent(_) => present += 1,
                 Outcome::Blocked(reason) => panic!("no links here: {reason}"),
                 Outcome::Failed(_) => failed += 1,
+                Outcome::Moved(_) | Outcome::KeptOriginal { .. } => panic!("copying never moves"),
             }
         }
 
@@ -874,6 +902,7 @@ fn xmp_sidecar_escapes_xml_and_handles_collisions() {
         layout: Layout::Flat,
         write_xmp_sidecars: true,
         embed_jpeg_tags: false,
+        operation: Default::default(),
     };
     let report =
         export_with_options(&[item], &s.dest, options, &mut |_| Control::Continue).unwrap();
@@ -910,6 +939,7 @@ fn preserve_folders_single_root_does_not_prefix_root_name() {
         layout: Layout::PreserveFolders,
         write_xmp_sidecars: false,
         embed_jpeg_tags: false,
+        operation: Default::default(),
     };
     export_with_options(&[item_a, item_b], &s.dest, options, &mut |_| {
         Control::Continue
@@ -958,6 +988,7 @@ fn preserve_folders_multiple_roots_prefixes_each_root_name() {
         layout: Layout::PreserveFolders,
         write_xmp_sidecars: false,
         embed_jpeg_tags: false,
+        operation: Default::default(),
     };
     export_with_options(&items, &dest, options, &mut |_| Control::Continue).unwrap();
 
@@ -977,6 +1008,7 @@ fn preserve_folders_rejects_escaping_components() {
         layout: Layout::PreserveFolders,
         write_xmp_sidecars: false,
         embed_jpeg_tags: false,
+        operation: Default::default(),
     };
     let report =
         export_with_options(&[item], &s.dest, options, &mut |_| Control::Continue).unwrap();
@@ -1033,6 +1065,7 @@ fn an_xmp_too_large_to_embed_leaves_the_verified_copy_and_is_reported() {
     item.labels = vec![label(LabelKind::Tag, &"x".repeat(70_000), Status::Accepted)];
     let options = ExportOptions {
         embed_jpeg_tags: true,
+        operation: Default::default(),
         ..Default::default()
     };
     let report =

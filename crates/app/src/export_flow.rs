@@ -190,6 +190,8 @@ impl ExportSummary {
                 Outcome::AlreadyPresent(_) => already_present += 1,
                 Outcome::Blocked(reason) => blocked.push((src, reason)),
                 Outcome::Failed(reason) => failed.push((src, reason)),
+                // This window only copies.
+                Outcome::Moved(_) | Outcome::KeptOriginal { .. } => {}
             }
         }
         Self {
@@ -425,6 +427,7 @@ impl ExportWizard {
             layout: self.layout,
             write_xmp_sidecars: self.write_xmp,
             embed_jpeg_tags: self.embed_jpeg_tags,
+            operation: Default::default(),
         }
     }
 

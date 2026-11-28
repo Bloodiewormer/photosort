@@ -1531,6 +1531,7 @@ name = "export"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "dunce",
  "fsguard",
  "scanner",
  "serde_json",
