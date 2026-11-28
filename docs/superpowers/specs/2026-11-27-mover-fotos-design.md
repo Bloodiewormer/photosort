@@ -58,9 +58,11 @@ Si algo falla, el original se queda donde estaba y solo se limpia el temporal de
 
 1. Copia verificada, como la exportación actual:
    - se escribe en un `.part` en el destino y se compara su SHA-256 con el del original;
-   - se le ponen las fechas del original y se renombra dentro del destino sin sobrescribir.
+   - se le ponen las fechas del original y se renombra dentro del destino sin sobrescribir, con
+     `MOVEFILE_WRITE_THROUGH`. Si un corte dejó un `.part`, se usa `nombre.1.part`, `.2.part`… sin borrarlo.
 2. Se vuelve a comprobar el original: mismo tamaño, misma fecha de modificación y mismo SHA-256 que al empezar.
-   Si cambió, no se toca y se informa «copiado, original conservado».
+   Si cambió, no se toca y se informa «copiado, original conservado». También se comprueba que la copia está en
+   su nombre final con el tamaño esperado.
 3. El original va a la Papelera con `SHFileOperationW` (`FO_DELETE`), como `Supr` en el Explorador:
    - antes se comprueba con `GetVolumePathNameW` y `GetDriveTypeW` que el volumen es un disco fijo
      (`DRIVE_FIXED`). En memorias USB y otras unidades extraíbles, en red o en un CD **no se toca el original**;

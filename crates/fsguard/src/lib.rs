@@ -339,14 +339,15 @@ pub fn ensure_move_dir(path: &Path, app_data: &Path) -> Result<DestPath, GuardEr
 /// [`io::ErrorKind::AlreadyExists`].
 pub fn move_no_replace(src: &MoveSource, dst: &DestPath) -> io::Result<()> {
     dst.verify().map_err(io::Error::other)?;
-    rename_without_replacing(&src.0, &dst.path)
+    rename_without_replacing(&src.0, &dst.path, false)
 }
 
 /// Gives a finished temporary file its final name inside a destination, never over an existing file.
+/// It returns once the new name is on disk: an original may be retired right after.
 pub fn rename_no_replace(from: &DestPath, to: &DestPath) -> io::Result<()> {
     from.verify().map_err(io::Error::other)?;
     to.verify().map_err(io::Error::other)?;
-    rename_without_replacing(&from.path, &to.path)
+    rename_without_replacing(&from.path, &to.path, true)
 }
 
 /// The `\\?\` form, which has no length limit and keeps names exactly as written. Only the folder is
@@ -362,11 +363,16 @@ fn verbatim_wide(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 #[cfg(windows)]
-fn rename_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+fn rename_without_replacing(from: &Path, to: &Path, write_through: bool) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
     let (from, to) = (verbatim_wide(from)?, verbatim_wide(to)?);
-    // SAFETY: both are null-terminated UTF-16. Flags 0: no replacing and no copying across volumes.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+    let flags = if write_through {
+        MOVEFILE_WRITE_THROUGH
+    } else {
+        0
+    };
+    // SAFETY: both are null-terminated UTF-16. Never replacing, never copying across volumes.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), flags) } == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -375,7 +381,7 @@ fn rename_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
 // shortcut: comprobar y renombrar no es atómico fuera de Windows, solo afecta al CI de Linux
 #[cfg(not(windows))]
 #[allow(clippy::disallowed_methods)] // único lugar que mueve o manda a la Papelera un original; nunca borra
-fn rename_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+fn rename_without_replacing(from: &Path, to: &Path, _write_through: bool) -> io::Result<()> {
     if std::fs::symlink_metadata(to).is_ok() {
         return Err(io::Error::from(io::ErrorKind::AlreadyExists));
     }

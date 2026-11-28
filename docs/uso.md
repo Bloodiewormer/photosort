@@ -129,6 +129,7 @@ La vista **Duplicados** es de solo lectura: nunca borra, mueve ni renombra archi
 - Entre discos se conservan las fechas y los atributos de solo lectura, oculto y sistema, pero no los flujos alternativos ni los permisos de Windows (el original de la Papelera los mantiene).
 - Si en el destino ya hay un archivo idéntico, el original **no se toca**. Si el nombre lo ocupa otro archivo distinto, se usa `nombre (1)`.
 - Si el resumen dice **Copiado, original conservado**, hay una copia en el destino y el original sigue en su sitio, con el motivo.
+- Si un corte de luz deja un archivo `.part` en el destino, photosort no lo borra ni lo reutiliza. El original sigue en su sitio, así que puedes borrar ese `.part` tú mismo.
 - Al mover no se incrustan etiquetas en los JPEG. El archivo `.xmp` al lado es opcional.
 - Las etiquetas siguen con la foto. Si la mueves fuera de tus bibliotecas, deja de verse en la galería; si añades esa carpeta como biblioteca, reaparece con todo.
 - Si una foto tiene duplicados exactos en otras rutas, solo se mueve la que ves en la galería.

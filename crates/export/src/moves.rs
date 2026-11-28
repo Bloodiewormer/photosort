@@ -148,6 +148,7 @@ pub(crate) fn move_one(
             hook(source);
         }
         check_unchanged(source, sha, md)?;
+        check_copy(place.target.as_path(), md.len())?;
         retire(ctx, &original)
     });
     Ok(match retired {
@@ -167,6 +168,17 @@ fn check_unchanged(path: &Path, sha: &str, md: &fs::Metadata) -> io::Result<()> 
         return Err(io::Error::other("el archivo cambió mientras se copiaba"));
     }
     Ok(())
+}
+
+/// The last look before a file is retired: the copy that replaces it is at its final name, whole.
+fn check_copy(copy: &Path, size: u64) -> io::Result<()> {
+    if fs::symlink_metadata(copy).is_ok_and(|md| md.is_file() && md.len() == size) {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "la copia ya no está completa en el destino",
+        ))
+    }
 }
 
 fn retire(ctx: &MoveContext, file: &MoveSource) -> io::Result<()> {
@@ -336,7 +348,10 @@ fn restore(row: &MoveRow, ctx: &MoveContext, app_data: &Path) -> io::Result<Rest
             io_reason(&e)
         ));
     }
-    if let Err(e) = check_unchanged(moved.as_path(), &sha, &md).and_then(|()| retire(ctx, &moved)) {
+    let retired = check_unchanged(moved.as_path(), &sha, &md)
+        .and_then(|()| check_copy(target.as_path(), md.len()))
+        .and_then(|()| retire(ctx, &moved));
+    if let Err(e) = retired {
         warnings.push(format!("la copia sigue en «{at}»: {}", io_reason(&e)));
     }
     Ok(Restored::Back(warnings))

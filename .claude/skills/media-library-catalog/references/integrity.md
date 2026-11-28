@@ -26,7 +26,7 @@ pub fn ensure_writable(path: &Path, roots: &[LibraryRoot]) -> Result<DestPath, G
 
 1. `src_hash`: `sha2::Sha256` sobre `File::open(src)` (solo lectura), en bloques de 1 MiB. Se puede reutilizar el hash del catálogo si `size` y `mtime` no cambiaron, pero la copia siempre se vuelve a verificar.
 2. `dst = ensure_writable(resolve_name(dest_dir, name))?`. Si `dst` existe y tiene el mismo hash, se omite y se anota `already_present`. Si tiene otro hash, se usa `nombre (1).ext`, `nombre (2).ext`, etc.
-3. Se copia con `io::copy` a `dst.part` (con `OpenOptions::create_new(true)`, que falla si ya existe) y se llama a `File::sync_all`.
+3. Se copia con `io::copy` a `dst.part` (con `OpenOptions::create_new(true)`, que falla si ya existe; si ya hay uno de un corte anterior se usa `dst.1.part`, `dst.2.part`… y el huérfano nunca se borra) y se llama a `File::sync_all`.
 4. Se calcula el SHA-256 del `.part` y debe ser igual a `src_hash`. Si no, se borra el temporal (está en el destino y pasa por el guardián), se registra el error y se sigue con el siguiente archivo.
 5. Fechas, sobre el archivo abierto y antes del renombrado:
    ```rust
@@ -78,7 +78,7 @@ Es un renombrado del sistema de archivos: atómico, sin tocar los bytes; conserv
 Si algo falla, el original se queda donde estaba y solo se limpia el temporal del destino.
 
 1. Copia verificada, como al copiar: se escribe en un `.part` en el destino, se compara su SHA-256 con el del original, se le ponen las fechas del original y se renombra dentro del destino sin sobrescribir. Al mover se copian además los atributos de solo lectura, oculto y sistema.
-2. Se vuelve a comprobar el original: mismo tamaño, misma fecha de modificación y mismo SHA-256 que al empezar. Si cambió, no se toca y se informa «copiado, original conservado».
+2. Se vuelve a comprobar el original: mismo tamaño, misma fecha de modificación y mismo SHA-256 que al empezar. Si cambió, no se toca y se informa «copiado, original conservado». También se comprueba que la copia está en su nombre final con el tamaño completo. El renombrado del temporal usa `MOVEFILE_WRITE_THROUGH`: no vuelve hasta que el nombre está en el disco.
 3. El original va a la Papelera con `SHFileOperationW` (`FO_DELETE`) y las banderas `FOF_ALLOWUNDO | FOF_SILENT | FOF_WANTNUKEWARNING`, como `Supr` en el Explorador: con la configuración por defecto recicla sin preguntar y **siempre pregunta** antes de borrar para siempre. **Nunca** se añaden `FOF_NOCONFIRMATION` (respondería que sí a ese borrado) ni `FOF_NOERRORUI`. Si el usuario cancela o la llamada falla, el resultado es «copiado, original conservado». Tampoco se retira (se conserva el original) lo que no está en un disco fijo según `GetDriveTypeW` de la raíz de su volumen (memorias USB y otras unidades extraíbles, red, CD) ni una ruta que la Papelera no puede recibir tal cual (demasiado larga, de red o con un nombre que Windows reinterpretaría). La Papelera **no es duradera** (Windows la vacía al llenarse o con el Sensor de almacenamiento): la protección real es la copia verificada.
 
 No se conservan entre discos los flujos alternativos (ADS), la ACL ni el propietario; el original en la Papelera los mantiene.

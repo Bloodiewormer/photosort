@@ -515,11 +515,21 @@ fn write_verified(
     result
 }
 
-/// The temporary file a copy to `target` is written to.
+/// A free name for the temporary file a copy to `target` is written to: `name.part`, or
+/// `name.1.part`, `name.2.part`... One left behind by a power cut stays as it is.
 fn part_of(dir: &DestPath, target: &DestPath) -> io::Result<DestPath> {
-    let mut name = target.as_path().file_name().unwrap().to_owned();
-    name.push(".part");
-    dir.join_name(&name).map_err(io::Error::other)
+    for n in 0u32.. {
+        let mut name = target.as_path().file_name().unwrap().to_owned();
+        if n > 0 {
+            name.push(format!(".{n}"));
+        }
+        name.push(".part");
+        let part = dir.join_name(&name).map_err(io::Error::other)?;
+        if fs::symlink_metadata(part.as_path()).is_err() {
+            return Ok(part);
+        }
+    }
+    unreachable!("the counter never ends before a free name is found")
 }
 
 /// Inserts or replaces XMP metadata in an already verified JPEG copy located at `target`.
@@ -1021,6 +1031,9 @@ pub fn preview_with_options(
     };
     let mut reserved: HashMap<Option<String>, HashMap<String, String>> = HashMap::new();
     let root_folders = root_folders(items);
+    #[cfg(windows)]
+    let dest_volume = nearest_existing_dir(dest.as_path()).and_then(|dir| volume(&dir));
+    #[cfg(not(windows))]
     let dest_volume = volume(dest.as_path());
 
     for item in items {
@@ -1077,7 +1090,8 @@ pub fn preview_with_options(
         let chosen = resolved.target.as_path().file_name().unwrap();
         p.files += 1;
         p.bytes += md.len();
-        if volume(&item.source) == dest_volume {
+        // Unknown counts as another disk: that is the case that needs free space.
+        if volume(&item.source).is_some_and(|v| Some(v) == dest_volume) {
             p.same_volume += 1;
         } else {
             p.other_volume += 1;
@@ -1091,17 +1105,35 @@ pub fn preview_with_options(
     Ok(p)
 }
 
-/// The drive or share a path is on.
-// shortcut: un punto de montaje o subst cuenta como el disco de su letra; mover cae solo al camino entre discos
+/// What tells one volume from another: the one mounted where `path` lies, which a folder with
+/// another disk mounted on it does not share with its drive letter. `None` when Windows cannot say.
+#[cfg(windows)]
 fn volume(path: &Path) -> Option<String> {
-    let Some(Component::Prefix(prefix)) = path.components().next() else {
-        return None;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
     };
-    let text = prefix.as_os_str().to_string_lossy().to_lowercase();
-    Some(match text.strip_prefix(r"\\?\unc\") {
-        Some(share) => format!(r"\\{share}"),
-        None => text.trim_start_matches(r"\\?\").to_string(),
-    })
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut mount = vec![0u16; wide.len().max(261)];
+    // SAFETY: `wide` is null-terminated UTF-16 and `mount` is as long as stated.
+    if unsafe { GetVolumePathNameW(wide.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) } == 0 {
+        return None;
+    }
+    // `\\?\Volume{GUID}\` is 49 characters long.
+    let mut guid = [0u16; 64];
+    // SAFETY: `mount` was null-terminated by the call above and `guid` is as long as stated.
+    let named = unsafe {
+        GetVolumeNameForVolumeMountPointW(mount.as_ptr(), guid.as_mut_ptr(), guid.len() as u32)
+    } != 0;
+    // Network shares have no such name: their mount point is what tells them apart.
+    let name: &[u16] = if named { &guid } else { &mount };
+    let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    Some(String::from_utf16_lossy(&name[..end]).to_lowercase())
+}
+
+#[cfg(not(windows))]
+fn volume(_path: &Path) -> Option<String> {
+    Some(String::new())
 }
 
 #[cfg(windows)]
@@ -1205,15 +1237,16 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn volumes_are_told_apart_by_drive_or_share() {
-        if cfg!(windows) {
-            let of = |p: &str| volume(Path::new(p));
-            assert_eq!(of(r"C:\a\b.jpg"), of(r"\\?\c:\z"));
-            assert_ne!(of(r"C:\a"), of(r"E:\a"));
-            assert_eq!(of(r"\\nas\fotos\a"), of(r"\\?\UNC\NAS\fotos\b"));
-            assert_ne!(of(r"\\nas\fotos\a"), of(r"\\nas\otras\a"));
-        }
+    fn a_volume_is_the_same_however_the_path_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = dunce::canonicalize(tmp.path()).unwrap();
+        // With the `\\?\` prefix.
+        let verbatim = fs::canonicalize(tmp.path()).unwrap();
+        assert!(volume(&plain).is_some());
+        assert_eq!(volume(&plain), volume(&verbatim));
+        assert_eq!(volume(&plain), volume(&plain.join("no").join("existe")));
     }
 
     #[test]

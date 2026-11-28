@@ -249,6 +249,47 @@ fn an_original_changed_during_the_copy_is_never_retired() {
 }
 
 #[test]
+fn a_copy_that_is_no_longer_whole_never_retires_the_original() {
+    let s = setup();
+    let copy = s.outside.join("a.jpg");
+    let shorten = |_: &Path| fs::write(&copy, b"pho").unwrap();
+    let mut ctx = s.context(&never, true);
+    ctx.before_retire = Some(&shorten);
+
+    let report = run(&s.items(&["a.jpg"]), &s.dest(&s.outside), &ctx);
+
+    assert!(
+        matches!(report.outcomes[0].1, Outcome::KeptOriginal { .. }),
+        "{:?}",
+        report.outcomes
+    );
+    assert_eq!(fs::read(s.library.join("a.jpg")).unwrap(), b"photo a");
+}
+
+/// A temporary file left by a power cut is neither reused nor deleted.
+#[test]
+fn a_leftover_temporary_file_does_not_block_the_move_and_is_left_alone() {
+    let s = setup();
+    let first = write(&s.outside.join("a.jpg.part"), b"half a copy");
+    let second = write(&s.outside.join("a.jpg.1.part"), b"another half");
+    let to_bin = s.to_bin();
+
+    let report = run(
+        &s.items(&["a.jpg"]),
+        &s.dest(&s.outside),
+        &s.context(&to_bin, true),
+    );
+
+    assert_eq!(
+        report.outcomes[0].1,
+        Outcome::Moved(s.outside.join("a.jpg"))
+    );
+    assert_eq!(fs::read(first).unwrap(), b"half a copy");
+    assert_eq!(fs::read(second).unwrap(), b"another half");
+    assert!(!s.outside.join("a.jpg.2.part").exists());
+}
+
+#[test]
 fn an_original_that_disappears_before_moving_is_never_retired() {
     let s = setup();
     let items = s.items(&["a.jpg"]);
