@@ -247,6 +247,19 @@ pub fn draw_photo_menu(
                         // Real focus on the highlighted item, so a screen reader announces it.
                         if is_focused {
                             resp.request_focus();
+                            // Or egui also moves the focus with these keys, from the last order
+                            // to a photo behind, and the gallery scrolls to show it.
+                            ui.memory_mut(|m| {
+                                m.set_focus_lock_filter(
+                                    resp.id,
+                                    egui::EventFilter {
+                                        tab: true,
+                                        horizontal_arrows: true,
+                                        vertical_arrows: true,
+                                        escape: false,
+                                    },
+                                );
+                            });
                         }
                         if resp.hovered() {
                             current.focus_idx = idx;

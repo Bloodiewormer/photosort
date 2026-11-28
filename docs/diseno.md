@@ -60,7 +60,9 @@ La interfaz publica su árbol de accesibilidad con AccessKit, que en Windows lo 
 - la tecla de menú y Mayús+F10 abren el menú de la foto, con el foco en su primera orden. Sobre una miniatura enfocada, el menú es el de esa foto;
 - Escape cierra el menú (y devuelve el foco) y la ventana de exportación, sin quitar la selección;
 - el foco empieza dentro de la ventana de exportación;
-- el borde de foco se dibuja en los dos temas.
+- el borde de foco se dibuja en los dos temas;
+- recorrer todo el menú de la foto con las flechas o con Tab no desplaza la galería, y al cerrarlo el foco vuelve a la miniatura;
+- «Renombrar» una persona deja el foco en el campo del nombre.
 
 Solo revisado en el código: Escape en las ventanas de etiquetas y de propuestas de obras, en el visor y en las listas desplegables. Mientras hay una ventana o un menú abiertos, los atajos de la galería no actúan. En la exportación, Intro solo vale como acción por defecto si ningún control tiene el foco, para que Intro sobre «Cerrar» no inicie una exportación, y solo cuenta una pulsación nueva: Intro mantenido no la inicia al repetirse.
 
@@ -68,20 +70,27 @@ Límites conocidos:
 
 - Las ventanas (exportar, etiquetas, propuestas de obras) y el visor no retienen el foco: con Tab se puede salir a lo que hay detrás.
 - El menú contextual de los filtros de la barra lateral solo se abre con el ratón. Con teclado, pulsar el filtro cambia su modo, y las órdenes sobre etiquetas están en «Acciones», en la vista Etiquetas.
+- Algunos botones se repiten sin decir sobre qué actúan: «Confirmar», «No es esta», «Aceptar», «Rechazar», «Probar», «Acciones», «Renombrar», «Ocultar», «Ver fotos» y «Elegir carpeta…».
+- Las órdenes del menú de la foto se exponen como botones, no como elementos de menú. Los grupos plegables no dicen si están abiertos.
+- Al cerrar con Escape el menú «Acciones» o la ventana de exportación, el foco no vuelve al botón que los abrió.
 - egui pone en inglés el nombre de algunos de sus controles. «Close window» y «Resize panel» se traducen antes de llegar al lector de pantalla; si una versión nueva de egui añade otro, hay que sumarlo a `theme::SpanishNames`.
 - Las pruebas leen el árbol de AccessKit, no lo que dice un lector de pantalla.
 
-### Comprobación pendiente con Narrador
+### Comprobación para Narrador
 
-Solo se puede hacer a mano. Con `photosort --demo`:
+Se hizo con `photosort --demo` y Windows UI Automation, que es lo que lee Narrador: después de cada tecla se anotó el nombre, el tipo y el estado del control con foco. Las teclas se enviaron como mensajes a la ventana, sin teclado físico.
 
-1. Activar Narrador (Ctrl+Windows+Intro) y recorrer la ventana con Tab: cada parada debe decir un nombre en español y su tipo (botón, interruptor, campo de edición).
-2. Pulsar una flecha en la galería: la primera foto queda seleccionada. Ir con Tab a una miniatura: debe oírse el archivo, su estado y si está seleccionada. Comprobar si al mover la selección con las flechas, sin foco en ningún control, Narrador dice algo (se espera que no).
-3. Con una foto seleccionada, pulsar la tecla de menú y Mayús+F10: Narrador debe leer cada orden al moverse con las flechas. Escape cierra el menú.
-4. En Configuración, comprobar que cada interruptor dice qué controla y si está activado, y que Tema y Dispositivo dicen cuál está elegido.
-5. Abrir «Exportar…»: el foco debe empezar en «Carpeta de destino». Escape cierra la ventana.
-6. En Personas y Etiquetas, comprobar que los campos de texto y el umbral se anuncian con su nombre.
-7. Repetir el recorrido con Tab en los temas claro y oscuro y comprobar a la vista que el borde de foco se distingue, también sobre el botón ocre.
+| Paso | Qué se comprobó | Resultado |
+|---|---|---|
+| 1 | Recorrido con Tab: galería, con y sin selección, Configuración, Personas y parte de Etiquetas | Cada parada tiene nombre y tipo |
+| 2 | Flechas sin foco, y Tab hasta una miniatura | Las flechas cambian la selección sin mover el foco. La miniatura dice archivo y estado; la selección se expone como botón de alternancia activado |
+| 3 | Tecla de menú y Mayús+F10, flechas, Tab y Escape | Cada orden recibe el foco con su nombre. Escape cierra el menú |
+| 4 | Interruptores, Tema y Dispositivo | Dicen qué controlan y si están activados o elegidos. No se anuncia el nombre del grupo («Tema», «Dispositivo») |
+| 5 | «Exportar…» | El foco empieza en «Carpeta de destino» y Escape cierra la ventana |
+| 6 | Campos de Personas y Etiquetas, y umbral | Todos se exponen con su nombre |
+| 7 | Capturas con el foco en un botón normal y en el ocre, en los dos temas | El borde se distingue. En el tema oscuro, sobre el botón ocre, lo separa la franja oscura que queda entre los dos |
+
+Queda para hacer de oído, con Narrador activado (Ctrl+Windows+Intro): cómo pronuncia los nombres, en qué orden y en qué idioma dice el tipo y el estado (dependen del idioma de Windows), si anuncia algo al mover la selección sin foco y si la repetición de nombres molesta.
 
 ## Paleta
 

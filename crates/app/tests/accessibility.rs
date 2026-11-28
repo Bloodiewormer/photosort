@@ -370,6 +370,52 @@ fn menu_keys_open_the_photo_menu_and_escape_closes_menus_and_dialogs() {
 }
 
 #[test]
+fn walking_the_whole_photo_menu_leaves_the_gallery_where_it_was() {
+    let mut harness = Harness::new(CaptureView::Gallery, Theme::Dark);
+    harness.press(Key::ArrowRight, Modifiers::NONE);
+    for _ in 0..200 {
+        harness.press(Key::Tab, Modifiers::NONE);
+        if is_photo(&harness.focused_name()) {
+            break;
+        }
+    }
+    let thumbnail = harness.focused_name();
+    let place = |h: &Harness| {
+        h.find(Role::Button, &thumbnail)
+            .and_then(|id| h.nodes[&id].bounds())
+    };
+    let before = place(&harness);
+    harness.press(Key::Menu, Modifiers::NONE);
+    // Past the last order and round to the first one again, and sideways.
+    for key in [Key::ArrowDown, Key::Tab, Key::ArrowRight, Key::ArrowLeft] {
+        for _ in 0..12 {
+            harness.press(key, Modifiers::NONE);
+            assert_eq!(
+                place(&harness),
+                before,
+                "{key:?}: la galería se movió con el foco en «{}»",
+                harness.focused_name()
+            );
+        }
+    }
+    harness.press(Key::Escape, Modifiers::NONE);
+    assert_eq!(harness.focused_name(), thumbnail);
+}
+
+#[test]
+fn renaming_a_person_puts_the_focus_in_the_name_field() {
+    let mut harness = Harness::new(CaptureView::Persons, Theme::Dark);
+    for _ in 0..200 {
+        harness.press(Key::Tab, Modifiers::NONE);
+        if harness.focused_name() == "Renombrar" {
+            break;
+        }
+    }
+    harness.press(Key::Enter, Modifiers::NONE);
+    assert_eq!(harness.focused_name(), "Nombre de la persona");
+}
+
+#[test]
 fn keyboard_focus_ring_is_drawn_in_both_themes() {
     for (preference, palette) in [
         (Theme::Dark, &theme::DARK_PALETTE),

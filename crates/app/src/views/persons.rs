@@ -14,6 +14,8 @@ pub struct PersonsViewState {
     pub filter: String,
     pub show_hidden: bool,
     pub renaming: Option<(PersonId, String)>,
+    /// «Renombrar» goes away when pressed; the focus moves to the name field.
+    focus_rename: bool,
     /// Cards marked as the same person, in the order they were marked.
     pub selected: Vec<PersonId>,
     pub naming_input: String,
@@ -541,6 +543,9 @@ fn draw_person_card(
                                 ),
                                 "Nombre de la persona",
                             );
+                            if std::mem::take(&mut state.focus_rename) {
+                                edit.request_focus();
+                            }
                             if (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                                 || ui.button("OK").clicked()
                             {
@@ -579,6 +584,7 @@ fn draw_person_card(
                         if ui.button("Renombrar").clicked() {
                             state.renaming =
                                 Some((person.id, person.name.clone().unwrap_or_default()));
+                            state.focus_rename = true;
                         }
 
                         let hide_label = if person.hidden { "Mostrar" } else { "Ocultar" };
