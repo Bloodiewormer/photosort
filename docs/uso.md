@@ -34,6 +34,10 @@ En **Configuración → Revisión en segundo plano** puedes encender **Revisar f
 
 En la barra superior verás el progreso de la revisión y los botones **Pausar** y **Reanudar**. Una foto pasa a **Revisadas** (y muestra la marca ocre en la esquina superior derecha) cuando completa todas las etapas que tengas activadas.
 
+## Seleccionar fotos
+
+Cada miniatura tiene un círculo en la esquina superior derecha: aparece al pasar el ratón y, mientras haya algo seleccionado, se ve en todas. Un clic en el círculo añade o quita esa foto sin soltar las demás, como `Ctrl`+clic. Una foto seleccionada lleva el círculo ocre con `✓`, un borde grueso y un velo sobre la miniatura; si además está revisada, la marca de lápiz graso rodea el círculo. Un clic en el resto de la miniatura selecciona solo esa foto, y un clic en un espacio vacío de la cuadrícula quita la selección. Con teclado, `Ctrl`+`Espacio` sobre una miniatura enfocada hace lo mismo que el círculo.
+
 ## Revisar sugerencias
 
 Todo lo que detecta la aplicación entra como sugerencia. Lo que aceptas o rechazas queda guardado y ningún análisis posterior lo sobrescribe.
@@ -154,6 +158,7 @@ El botón **Recargar** de la galería vuelve a revisar tus carpetas y quita las 
 | En toda la app | `Tab` / `Mayús+Tab` | Recorre los controles con borde de foco visible |
 | Galería | Flechas (`Mayús` + flechas) | Mueve la selección (o la amplía) |
 | Galería | `Ctrl+A` | Selecciona todas las fotos visibles |
+| Galería | `Ctrl`+`Espacio` sobre una miniatura enfocada | Añade o quita esa foto sin quitar las demás |
 | Galería | `Intro` o `Espacio` | Abre o cierra el visor |
 | Galería | `Tecla de menú` o `Mayús+F10` | Abre el menú contextual de la foto |
 | Galería | `Esc` | Cierra el visor, el menú o quita la selección |

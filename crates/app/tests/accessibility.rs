@@ -5,6 +5,7 @@ use app::screenshot::CaptureView;
 use app::settings::Theme;
 use app::theme;
 use app::ui::PhotosortApp;
+use app::views::gallery;
 use app::worker::NoThumbnails;
 use eframe::App as _;
 use eframe::egui::accesskit::{Action, ActionRequest, Node, NodeId, Role, TreeId};
@@ -891,4 +892,54 @@ fn a_click_on_the_empty_grid_drops_the_selection() {
     // Left of the inspector and below the single row of photos.
     h.click_at(Pos2::new(SCREEN.x / 2.0, SCREEN.y - 30.0));
     assert!(h.find(Role::Button, "Quitar selección").is_none());
+}
+
+#[test]
+fn the_corner_circle_adds_and_removes_one_photo_and_keeps_the_others() {
+    let mut h = Harness::new(CaptureView::Gallery, Theme::Dark);
+    // The thumbnails in reading order, with whether each is selected.
+    let cells = |h: &Harness| {
+        let mut cells: Vec<(Rect, bool, String)> = h
+            .nodes
+            .values()
+            .filter(|n| n.role() == Role::Button && is_photo(&h.name(n)))
+            .filter_map(|n| {
+                let b = n.bounds()?;
+                let rect = Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                );
+                let selected = n.toggled() == Some(egui::accesskit::Toggled::True);
+                Some((rect, selected, h.name(n)))
+            })
+            .collect();
+        cells.sort_by(|a, b| {
+            a.0.min
+                .y
+                .total_cmp(&b.0.min.y)
+                .then(a.0.min.x.total_cmp(&b.0.min.x))
+        });
+        cells
+    };
+    let selected = |h: &Harness| cells(h).iter().take(2).map(|c| c.1).collect::<Vec<_>>();
+
+    h.click_at(cells(&h)[0].0.center());
+    assert_eq!(selected(&h), [true, false]);
+    // The inspector has just opened and moved the grid, so each place is asked for again.
+    h.click_at(gallery::check_rect(cells(&h)[1].0).center());
+    assert_eq!(selected(&h), [true, true]);
+    h.click_at(gallery::check_rect(cells(&h)[1].0).center());
+    assert_eq!(selected(&h), [true, false]);
+    assert!(
+        !h.has_name_containing("Siguiente"),
+        "el círculo abrió el visor"
+    );
+
+    // With the keyboard, Ctrl+Space on a focused thumbnail does the same.
+    let name = cells(&h)[1].2.clone();
+    h.focus_on(Role::Button, &name);
+    // The window reports a held key on its own, apart from the key that follows.
+    h.run(vec![Event::ModifiersChanged(Modifiers::COMMAND)]);
+    h.press(Key::Space, Modifiers::COMMAND);
+    assert_eq!(selected(&h), [true, true]);
 }

@@ -23,6 +23,18 @@ pub struct SimilarityView {
     pub scores: HashMap<AssetId, f32>,
 }
 
+/// The selection circle of a cell, in its thumbnail's top-right corner.
+pub fn check_rect(cell: Rect) -> Rect {
+    let size = 24.0;
+    Rect::from_min_size(
+        Pos2::new(
+            cell.max.x - theme::SPACE_SM - theme::SPACE_XS - size,
+            cell.min.y + theme::SPACE_SM + theme::SPACE_XS,
+        ),
+        Vec2::splat(size),
+    )
+}
+
 #[derive(Default)]
 pub struct GalleryOutcome {
     pub selection_changed: bool,
@@ -345,6 +357,17 @@ pub fn draw(
                                 if is_primary {
                                     outcome.primary_cell_pos = Some(rect.center());
                                 }
+                                // After the cell, so it takes the clicks on its corner. Pointer
+                                // only: with the keyboard it is Ctrl+Space on the thumbnail.
+                                let check = ui.interact(
+                                    check_rect(rect),
+                                    resp.id.with("check"),
+                                    Sense::CLICK,
+                                );
+                                if check.clicked() {
+                                    selection.ctrl_click(idx, entries.len());
+                                    outcome.selection_changed = true;
+                                }
                                 if resp.clicked() {
                                     let mods = ui.input(|i| i.modifiers);
                                     if mods.shift {
@@ -356,7 +379,7 @@ pub fn draw(
                                     }
                                     outcome.selection_changed = true;
                                 }
-                                if resp.secondary_clicked() {
+                                if resp.secondary_clicked() || check.secondary_clicked() {
                                     any_cell_secondary_clicked = true;
                                     selection.right_click(idx, entries.len());
                                     outcome.selection_changed = true;
@@ -379,18 +402,20 @@ pub fn draw(
 
                                 let bg = if selected {
                                     palette.accent_bg.color32()
-                                } else if resp.hovered() {
+                                } else if ui.rect_contains_pointer(rect) {
                                     palette.bg_elevated.color32()
                                 } else {
                                     palette.bg_card.color32()
                                 };
-                                let border = if is_primary || resp.has_focus() {
+                                let border = if is_primary {
+                                    Stroke::new(4.0, palette.accent.color32())
+                                } else if selected {
+                                    Stroke::new(3.0, palette.accent.color32())
+                                } else if resp.has_focus() {
                                     Stroke::new(
                                         theme::FOCUS_STROKE_WIDTH,
                                         palette.accent.color32(),
                                     )
-                                } else if selected {
-                                    Stroke::new(1.5, palette.accent.color32())
                                 } else {
                                     Stroke::new(1.0, palette.border.color32())
                                 };
@@ -442,6 +467,15 @@ pub fn draw(
                                     );
                                 }
 
+                                if selected {
+                                    // A veil, so what is selected shows at a glance.
+                                    painter.rect_filled(
+                                        thumb_rect,
+                                        CornerRadius::same(theme::RADIUS_SM),
+                                        palette.mark_ochre.color32().gamma_multiply(0.22),
+                                    );
+                                }
+
                                 // Top-left: pending suggestions badge (renamed from "Revisar")
                                 let badge_rect = has_suggestions.then(|| {
                                     let r = Rect::from_min_size(
@@ -463,18 +497,23 @@ pub fn draw(
                                     r
                                 });
 
-                                // Top-right: signature ochre grease-pencil loop for reviewed photos
-                                let reviewed_rect = is_reviewed.then(|| {
-                                    let r = Rect::from_min_size(
-                                        Pos2::new(
-                                            thumb_rect.max.x - 24.0 - theme::SPACE_XS,
-                                            thumb_rect.min.y + theme::SPACE_XS,
-                                        ),
-                                        Vec2::splat(24.0),
+                                // Top-right: the selection circle. A reviewed photo has the
+                                // grease-pencil loop there, around the circle when both show.
+                                if is_reviewed {
+                                    theme::paint_reviewed_mark(painter, check.rect, palette);
+                                }
+                                if selected
+                                    || !selection.is_empty()
+                                    || ui.rect_contains_pointer(rect)
+                                {
+                                    paint_check(
+                                        painter,
+                                        check.rect.center(),
+                                        if is_reviewed { 6.5 } else { 10.0 },
+                                        selected,
+                                        palette,
                                     );
-                                    theme::paint_reviewed_mark(painter, r, palette);
-                                    r
-                                });
+                                }
 
                                 // Bottom-left: video badge with duration
                                 if entry.media_type == catalog::MediaType::Video {
@@ -597,9 +636,18 @@ pub fn draw(
                                     )
                                 });
 
-                                if reviewed_rect.is_some_and(|r| ui.rect_contains_pointer(r)) {
-                                    resp.on_hover_text("Revisada");
-                                } else if badge_rect.is_some_and(|r| ui.rect_contains_pointer(r)) {
+                                let action = if selected {
+                                    "Quitar de la selección"
+                                } else {
+                                    "Seleccionar sin quitar las demás"
+                                };
+                                check.on_hover_text(if is_reviewed {
+                                    format!("Revisada. {action}")
+                                } else {
+                                    action.to_string()
+                                });
+
+                                if badge_rect.is_some_and(|r| ui.rect_contains_pointer(r)) {
                                     resp.on_hover_text(SUGGESTIONS_BADGE_TOOLTIP);
                                 } else {
                                     let entry_path = &entry.path;
@@ -641,6 +689,38 @@ pub fn draw(
         thumb_pool.request(req);
     }
     outcome
+}
+
+/// The selection circle: hollow, or filled with the accent and ticked. Its dark halo keeps it
+/// legible over any photo.
+fn paint_check(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    selected: bool,
+    palette: &Palette,
+) {
+    painter.circle_stroke(
+        center,
+        radius + 1.0,
+        Stroke::new(1.0, Color32::from_black_alpha(190)),
+    );
+    if !selected {
+        painter.circle(
+            center,
+            radius,
+            Color32::from_black_alpha(90),
+            Stroke::new(1.5, Color32::WHITE),
+        );
+        return;
+    }
+    // The primary button's pair: the same contrast in both themes.
+    painter.circle_filled(center, radius, palette.primary_btn_bg.color32());
+    let at = |x: f32, y: f32| center + Vec2::new(x, y) * radius;
+    painter.add(egui::Shape::line(
+        vec![at(-0.5, 0.02), at(-0.14, 0.38), at(0.52, -0.34)],
+        Stroke::new(2.0, palette.primary_btn_fg.color32()),
+    ));
 }
 
 /// Fullscreen read-only image viewer overlay.

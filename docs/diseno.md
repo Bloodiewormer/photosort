@@ -27,6 +27,7 @@
 ### Estilo
 
 - **Superficies neutras** de grafito, apenas cálidas. Sin degradados, brillos ni sombras de color.
+- **Selector de cada miniatura:** un círculo arriba a la derecha, hueco al pasar el ratón o mientras hay selección, y relleno de ocre con `✓` si la foto está seleccionada. La foto seleccionada lleva además borde grueso y un velo. La marca de revisada rodea el círculo, así que se distinguen las dos cosas por la forma.
 - **Un acento**, el ocre del lápiz graso, para la acción principal, la selección, el foco y la marca de revisada. Ni azul ni violeta.
 - **Color con significado:** oliva para aceptado y óxido para rechazado, siempre acompañado de texto o forma.
 - **Espaciado** en múltiplos de 4. Mismo elemento, mismo tamaño.
@@ -47,6 +48,15 @@
 - El borde de foco no se dibuja en cada control: `theme::paint_focus_ring` lo pinta por fuera del que tenga el foco, con el color de acento y 2 px. Así se ve también en los botones con borde propio o sin marco. Como el acento cumple 4,5:1 sobre las cuatro superficies en los dos temas, supera el 3:1 que se pide a un borde de foco.
 - egui no desplaza la vista al control enfocado: lo hace `theme::scroll_focus_into_view`.
 
+### Atajos
+
+La lista completa está en [la guía de uso](uso.md#atajos-de-teclado). Los que sustituyen a una zona que solo reacciona al ratón:
+
+| Atajo | Sustituye a |
+|---|---|
+| `Ctrl`+`Espacio` sobre una miniatura enfocada | Clic en el círculo de selección |
+| `Esc` | Clic en un espacio vacío de la cuadrícula |
+
 ### Qué se comprobó y cómo
 
 La interfaz publica su árbol de accesibilidad con AccessKit, que en Windows lo expone por UI Automation. Va en las características predeterminadas de `eframe` (`accesskit`), que están activas.
@@ -56,6 +66,7 @@ La interfaz publica su árbol de accesibilidad con AccessKit, que en Windows lo 
 - en galería, sugerencias, duplicados, obras, personas, etiquetas, errores, configuración, bienvenida, galería con selección (barra de selección e inspector), visor y ventana «Copiar o mover»: todo control o parada de Tab tiene un nombre con letras o cifras;
 - cada miniatura se llama como su archivo, más «revisada» y «con sugerencias» cuando corresponde, e indica si está seleccionada;
 - los interruptores de Configuración se llaman como lo que controlan, y las opciones excluyentes dicen cuál está elegida;
+- un clic en un espacio vacío de la cuadrícula quita la selección; el círculo de una miniatura, y `Ctrl+Espacio` sobre ella, la añaden o quitan sin soltar las demás;
 - con Tab se llega a la búsqueda, la navegación, las miniaturas, la barra de selección, el inspector y Configuración, y el control enfocado queda a la vista;
 - la tecla de menú y Mayús+F10 abren el menú de la foto, con el foco en su primera orden. Sobre una miniatura enfocada, el menú es el de esa foto;
 - Escape cierra el menú (y devuelve el foco) y la ventana «Copiar o mover», sin quitar la selección;
