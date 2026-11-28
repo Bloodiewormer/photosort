@@ -579,7 +579,9 @@ impl PhotosortApp {
     }
 
     fn foreground_heavy_task(&self) -> Option<&'static str> {
-        if self.works_worker.is_some() {
+        if self.export_wizard.as_ref().is_some_and(|w| w.is_moving()) {
+            Some("el movimiento de fotos")
+        } else if self.works_worker.is_some() {
             Some("la búsqueda de obras")
         } else if self.tags_apply_worker.is_some() {
             Some("la aplicación de etiquetas")
@@ -1514,6 +1516,32 @@ impl PhotosortApp {
         }
     }
 
+    /// The «Copiar o mover» window, opened from the selection bar or the photo menu.
+    fn draw_export_window(&mut self, ctx: &egui::Context, palette: &theme::Palette) {
+        let moving_before = self.export_wizard.as_ref().is_some_and(|w| w.is_moving());
+        views::export::draw_window(
+            ctx,
+            palette,
+            &mut self.export_wizard,
+            &self.data_dir,
+            &mut self.settings,
+            &mut self.banner_error,
+        );
+        let moving = self.export_wizard.as_ref().is_some_and(|w| w.is_moving());
+        if moving != moving_before {
+            // The background review waits: it must not read files while they change place.
+            self.sync_engine_yield();
+        }
+        if self
+            .export_wizard
+            .as_mut()
+            .is_some_and(|w| w.take_finished_move())
+        {
+            self.reload_catalog();
+            ctx.request_repaint();
+        }
+    }
+
     fn open_export_for_capture(&mut self, ctx: &egui::Context) {
         let Some(cat) = self.catalog.as_ref() else {
             self.export_open_failed = true;
@@ -1531,7 +1559,10 @@ impl PhotosortApp {
             let roots = self.settings.valid_roots();
             let ctx_clone = ctx.clone();
             let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
-            if wizard.request_preview(&roots, Some(notify)).is_err() {
+            if wizard
+                .request_preview(&roots, &self.data_dir, Some(notify))
+                .is_err()
+            {
                 self.export_open_failed = true;
             }
         }
@@ -2374,15 +2405,7 @@ impl PhotosortApp {
             self.reload_catalog();
         }
 
-        // Export wizard modal (when opened from selection bar or photo context menu)
-        views::export::draw_window(
-            &ctx,
-            palette,
-            &mut self.export_wizard,
-            &self.data_dir,
-            &mut self.settings,
-            &mut self.banner_error,
-        );
+        self.draw_export_window(&ctx, palette);
 
         self.step_screenshot(&ctx);
     }

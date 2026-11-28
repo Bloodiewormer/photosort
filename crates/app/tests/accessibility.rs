@@ -129,6 +129,13 @@ impl Harness {
         self.nodes.values().any(|n| self.name(n).contains(text))
     }
 
+    /// What a screen reader reads out of plain text, which is a value rather than a name.
+    fn has_text_containing(&self, text: &str) -> bool {
+        self.nodes
+            .values()
+            .any(|n| self.name(n).contains(text) || n.value().is_some_and(|v| v.contains(text)))
+    }
+
     /// Activates a control the way a screen reader does.
     fn click(&mut self, name: &str) {
         self.activate(Role::Button, name);
@@ -491,7 +498,7 @@ impl Harness {
         self.press(Key::A, Modifiers::COMMAND);
         self.run(vec![Event::Text(dest.display().to_string())]);
         self.run(vec![enter_key(true)]);
-        let ready = self.wait_for(hold, |h| h.find(Role::Button, "Exportar").is_some());
+        let ready = self.wait_for(hold, |h| h.find(Role::Button, "Copiar").is_some());
         assert!(ready, "la vista previa no terminó");
         if hold {
             for _ in 0..10 {
@@ -518,7 +525,7 @@ fn enter_on_close_or_back_never_starts_an_export() {
         harness.export_preview(&dest, false);
         harness.focus_on(Role::Button, button);
         harness.press(Key::Enter, Modifiers::NONE);
-        assert!(harness.find(Role::Button, "Exportar").is_none(), "{button}");
+        assert!(harness.find(Role::Button, "Copiar").is_none(), "{button}");
         assert!(is_empty_dir(out.path()), "Intro en «{button}» exportó");
         // «Volver» leaves the window open on the first step.
         let open = harness.has_name_containing("Calcular vista previa");
@@ -530,13 +537,41 @@ fn enter_on_close_or_back_never_starts_an_export() {
 
     // Enter held from the destination field repeats into the ready preview: no export.
     harness.export_preview(&dest, true);
-    assert!(harness.find(Role::Button, "Exportar").is_some());
+    assert!(harness.find(Role::Button, "Copiar").is_some());
     assert!(is_empty_dir(out.path()), "Intro mantenido exportó");
 
     // A fresh Enter with no control focused is still the default action.
     harness.press(Key::Enter, Modifiers::NONE);
     let done = harness.wait_for(false, |h| h.has_name_containing("Abrir carpeta"));
     assert!(done && !is_empty_dir(&dest), "Intro sin foco no exportó");
+}
+
+/// Moving asks twice, and Enter never answers the second question.
+#[test]
+fn enter_never_confirms_a_move() {
+    let out = tempfile::tempdir().expect("carpeta temporal");
+    let mut harness = Harness::new(CaptureView::Gallery, Theme::Dark);
+    harness.press(Key::ArrowRight, Modifiers::NONE);
+    harness.click("Exportar…");
+    harness.activate(Role::RadioButton, "Mover (cortar)");
+    harness.assert_all_named("mover");
+    harness.focus_on(Role::TextInput, "Carpeta de destino");
+    harness.press(Key::A, Modifiers::COMMAND);
+    harness.run(vec![Event::Text(out.path().display().to_string())]);
+    harness.press(Key::Enter, Modifiers::NONE);
+    assert!(harness.wait_for(false, |h| h.find(Role::Button, "Mover…").is_some()));
+
+    harness.press(Key::Enter, Modifiers::NONE);
+    assert!(harness.has_text_containing("Puedes deshacerlo."));
+    harness.assert_all_named("confirmar el movimiento");
+    for _ in 0..3 {
+        harness.press(Key::Enter, Modifiers::NONE);
+    }
+    assert!(harness.find(Role::Button, "Mover").is_some());
+    assert!(is_empty_dir(out.path()), "Intro movió la foto");
+
+    harness.click("Volver");
+    assert!(harness.find(Role::Button, "Mover…").is_some());
 }
 
 #[test]

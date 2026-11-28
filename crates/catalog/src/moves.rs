@@ -164,6 +164,9 @@ fn finish(
 impl Catalog {
     /// Fails when another move or undo is running, in this process or any other.
     pub fn lock_moves(&self) -> Result<MoveLock, CatalogError> {
+        // The folder review may hold the catalog while it hashes a batch of new files: waiting
+        // for it beats failing photo after photo.
+        self.conn.busy_timeout(Duration::from_secs(60))?;
         self.try_lock_moves()?.ok_or_else(|| {
             CatalogError::InvalidOperation("ya hay un movimiento de fotos en curso".into())
         })

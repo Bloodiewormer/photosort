@@ -255,7 +255,7 @@ fn the_export_preview_reports_the_sources_that_are_gone() {
     fs::remove_file(&deleted).unwrap();
     let mut wizard = ExportWizard::from_items(items, false, Some(library.tmp.path().join("out")));
     wizard
-        .request_preview(std::slice::from_ref(&library.root), None)
+        .request_preview(std::slice::from_ref(&library.root), &library.data, None)
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     while !matches!(wizard.phase(), ExportPhase::Preview(PreviewState::Ready(_))) {
@@ -266,7 +266,9 @@ fn the_export_preview_reports_the_sources_that_are_gone() {
     assert_eq!(wizard.take_gone(), std::slice::from_ref(&deleted));
 
     // The export itself reports it too.
-    wizard.start_export(None).unwrap();
+    wizard
+        .start_export(None, library.db(), Vec::new(), library.data.clone())
+        .unwrap();
     while !matches!(wizard.phase(), ExportPhase::Done(_)) {
         assert!(Instant::now() < deadline, "no export");
         wizard.poll();
