@@ -1,10 +1,10 @@
-# Guía de uso de photosort
+# Guía de uso de Hojeo
 
-photosort cataloga tus fotos y vídeos en tu propio equipo. Nunca borra ni modifica los archivos originales, y solo los mueve si tú lo pides. Todas las etiquetas, categorías, obras y personas viven en el catálogo de la aplicación, y solo se copian o se mueven archivos si tú lo decides.
+Hojeo cataloga tus fotos y vídeos en tu propio equipo. Nunca borra ni modifica los archivos originales, y solo los mueve si tú lo pides. Todas las etiquetas, categorías, obras y personas viven en el catálogo de la aplicación, y solo se copian o se mueven archivos si tú lo decides.
 
 ## Primeros pasos
 
-Al abrir photosort por primera vez aparece la pantalla «Elige las carpetas con tus fotos». Pulsa **Añadir carpeta…** y elige una carpeta de tu biblioteca. Más adelante puedes añadir o quitar carpetas desde **Configuración → Carpetas con fotos**.
+Al abrir Hojeo por primera vez aparece la pantalla «Elige las carpetas con tus fotos». Pulsa **Añadir carpeta…** y elige una carpeta de tu biblioteca. Más adelante puedes añadir o quitar carpetas desde **Configuración → Carpetas con fotos**.
 
 Cuando añades una carpeta o pulsas **Buscar cambios ahora** en Configuración, la aplicación indexa su contenido en modo de solo lectura:
 
@@ -15,7 +15,7 @@ Cuando añades una carpeta o pulsas **Buscar cambios ahora** en Configuración, 
 
 ## Activar los modelos
 
-photosort no incluye ni descarga modelos de reconocimiento. Para usar el análisis visual o la lectura de texto, descarga primero los archivos indicados en el [README](../README.md#modelos) y guárdalos en una carpeta fuera de tu biblioteca (por ejemplo, con las subcarpetas `siglip2`, `yunet`, `sface` y `ocr`).
+Hojeo no incluye ni descarga modelos de reconocimiento. Para usar el análisis visual o la lectura de texto, descarga primero los archivos indicados en el [README](../README.md#modelos) y guárdalos en una carpeta fuera de tu biblioteca (por ejemplo, con las subcarpetas `siglip2`, `yunet`, `sface` y `ocr`).
 
 En **Configuración → Modelos y dispositivo**:
 
@@ -115,7 +115,7 @@ La vista **Duplicados** es de solo lectura: nunca borra, mueve ni renombra archi
 **Copiar** crea copias nuevas en la carpeta que elijas y deja los originales donde están. **Mover (cortar)** se lleva el único ejemplar a esa carpeta, para separar y ordenar. Ninguna de las dos borra, sobrescribe ni vuelve a codificar un archivo.
 
 1. En la galería, selecciona las fotos (o pulsa `Ctrl+A` para seleccionar todos los resultados visibles) y pulsa **Copiar o mover…** en la barra de selección o en el menú contextual.
-2. En la ventana **Copiar o mover**, elige **Copiar** o **Mover (cortar)** y la **Carpeta de destino** con **Elegir carpeta…**. Para copiar debe estar fuera de todas tus bibliotecas registradas. Para mover puede estar dentro de una (para ordenar carpetas) o fuera, pero no en la carpeta de datos de photosort.
+2. En la ventana **Copiar o mover**, elige **Copiar** o **Mover (cortar)** y la **Carpeta de destino** con **Elegir carpeta…**. Para copiar debe estar fuera de todas tus bibliotecas registradas. Para mover puede estar dentro de una (para ordenar carpetas) o fuera, pero no en la carpeta de datos de Hojeo.
 3. Elige la **Estructura de carpetas**:
    - **Plana:** todas las copias directamente en la carpeta de destino.
    - **Por categoría:** una subcarpeta por la primera categoría de cada imagen (o «Sin categoría»).
@@ -137,7 +137,7 @@ La vista **Duplicados** es de solo lectura: nunca borra, mueve ni renombra archi
 - Entre discos se conservan las fechas y los atributos de solo lectura, oculto y sistema, pero no los flujos alternativos ni los permisos de Windows (el original de la Papelera los mantiene).
 - Si en el destino ya hay un archivo idéntico, el original **no se toca**. Si el nombre lo ocupa otro archivo distinto, se usa `nombre (1)`.
 - Si el resumen dice **Copiado, original conservado**, hay una copia en el destino y el original sigue en su sitio, con el motivo.
-- Si un corte de luz deja un archivo `.part` en el destino, photosort no lo borra ni lo reutiliza. El original sigue en su sitio, así que puedes borrar ese `.part` tú mismo.
+- Si un corte de luz deja un archivo `.part` en el destino, Hojeo no lo borra ni lo reutiliza. El original sigue en su sitio, así que puedes borrar ese `.part` tú mismo.
 - Al mover no se incrustan etiquetas en los JPEG. El archivo `.xmp` al lado es opcional.
 - Las etiquetas siguen con la foto. Si la mueves fuera de tus bibliotecas, deja de verse en la galería; si añades esa carpeta como biblioteca, reaparece con todo.
 - Si una foto tiene duplicados exactos en otras rutas, solo se mueve la que ves en la galería.
@@ -150,7 +150,7 @@ La vista **Duplicados** es de solo lectura: nunca borra, mueve ni renombra archi
 
 ## Recargar
 
-El botón **Recargar** de la galería vuelve a revisar tus carpetas y quita las fotos que ya no están (por ejemplo, las que moviste o borraste fuera de photosort). Sus etiquetas se conservan. Mientras trabaja dice **Recargando…**; si la revisión está en pausa, se hará al reanudarla.
+El botón **Recargar** de la galería vuelve a revisar tus carpetas y quita las fotos que ya no están (por ejemplo, las que moviste o borraste fuera de Hojeo). Sus etiquetas se conservan. Mientras trabaja dice **Recargando…**; si la revisión está en pausa, se hará al reanudarla.
 
 ## Teclado y accesibilidad
 
@@ -175,7 +175,7 @@ El botón **Recargar** de la galería vuelve a revisar tus carpetas y quita las 
 
 ### Probar con Narrador de Windows
 
-La interfaz expone sus controles mediante AccessKit y UI Automation. Para comprobarla con Narrador usando los datos de demostración (`photosort --demo`):
+La interfaz expone sus controles mediante AccessKit y UI Automation. Para comprobarla con Narrador usando los datos de demostración (`hojeo --demo`):
 
 1. Activa Narrador (`Ctrl+Windows+Intro`) y recorre la ventana con `Tab`: cada parada debe anunciar su nombre en español y su tipo (botón, interruptor, campo de edición).
 2. Pulsa una flecha en la galería para seleccionar la primera foto y llega con `Tab` a una miniatura: debe oírse el nombre del archivo, su estado y si está seleccionada.
@@ -187,7 +187,7 @@ La interfaz expone sus controles mediante AccessKit y UI Automation. Para compro
 
 ## Privacidad
 
-Todo el análisis se ejecuta en tu equipo. photosort no envía fotos, texto leído, rutas, fechas ni rostros fuera del PC, no usa APIs de pago y no incluye telemetría.
+Todo el análisis se ejecuta en tu equipo. Hojeo no envía fotos, texto leído, rutas, fechas ni rostros fuera del PC, no usa APIs de pago y no incluye telemetría.
 
 Los datos de la aplicación se guardan en `%LOCALAPPDATA%\photosort` (puedes abrirla desde **Configuración → Acerca de → Mostrar en el Explorador**):
 

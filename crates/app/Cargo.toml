@@ -4,13 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "photosort"
+name = "hojeo"
 path = "src/main.rs"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 catalog = { path = "../catalog" }
 eframe = "0.37.0"
-export = { version = "0.1.0", path = "../export" }
+export = { path = "../export" }
 fsguard = { path = "../fsguard" }
 image = "0.25.10"
 ocr = { path = "../ocr" }
@@ -21,7 +24,7 @@ scanner = { path = "../scanner" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tempfile = "3.27.0"
-thumbs = { version = "0.1.0", path = "../thumbs" }
+thumbs = { path = "../thumbs" }
 vision = { path = "../vision" }
 
 [target."cfg(windows)".dependencies]

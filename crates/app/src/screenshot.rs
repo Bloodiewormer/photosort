@@ -70,7 +70,7 @@ impl Default for CliArgs {
 }
 
 pub fn usage_text() -> &'static str {
-    "Uso: photosort [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
+    "Uso: hojeo [--data-dir <carpeta>] [--self-test] [--demo] [--demo-count <N>] \
      [--screenshot <salida.png>] [--screenshot-delay-frames <N>] \
      [--window-size <Ancho>x<Alto>] [--theme dark|light] \
      [--view gallery|settings|welcome|suggestions|duplicates|works|personas|tags|errors|export|menu]"

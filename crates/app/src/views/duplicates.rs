@@ -20,7 +20,7 @@ const DUP_CARD_WIDTH: f32 = 260.0;
 const DUP_THUMB_HEIGHT: f32 = 132.0;
 const DUP_PATH_MAX_CHARS: usize = 38;
 
-pub const READ_ONLY_NOTE: &str = "Nota: photosort solo muestra duplicados para revisión. Este programa nunca borra, mueve ni renombra ningún archivo.";
+pub const READ_ONLY_NOTE: &str = "Nota: esta vista solo muestra duplicados para que los revises. Hojeo nunca borra ningún archivo.";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DuplicatesSummary {

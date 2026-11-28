@@ -181,7 +181,7 @@ pub fn draw(
                                                 .show(ui, |ui| {
                                                     ui.label(
                                                         RichText::new(format!(
-                                                            "¿Quitar «{name}» de photosort? Solo deja de mostrarse en la aplicación; ningún archivo se borra ni se modifica. Si la vuelves a añadir, tus etiquetas y decisiones se conservarán."
+                                                            "¿Quitar «{name}» de Hojeo? Solo deja de mostrarse en la aplicación; ningún archivo se borra ni se modifica. Si la vuelves a añadir, tus etiquetas y decisiones se conservarán."
                                                         ))
                                                         .size(theme::FONT_SMALL)
                                                         .color(palette.chip_exclude_fg.color32()),
@@ -610,7 +610,7 @@ pub fn draw(
                             section_heading(ui, palette, "Acerca de");
                             section_card(ui, palette, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("photosort").strong());
+                                    ui.label(RichText::new("Hojeo").strong());
                                     ui.label(
                                         RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                             .size(theme::FONT_SMALL)

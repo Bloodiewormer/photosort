@@ -166,7 +166,7 @@ impl fmt::Display for GuardError {
                 short(path)
             ),
             Self::InsideAppData { .. } => {
-                f.write_str("la carpeta está dentro de los datos de photosort; elige otra")
+                f.write_str("la carpeta está dentro de los datos de Hojeo; elige otra")
             }
             Self::Io(e) => write!(f, "no se pudo comprobar la ruta: {}", io_reason(e)),
         }

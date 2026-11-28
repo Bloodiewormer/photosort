@@ -7,13 +7,13 @@
 Compila y ejecuta siempre en modo `--release`:
 
 ```powershell
-cargo run --release -p app --bin photosort -- --bench
+cargo run --release -p app --bin hojeo -- --bench
 ```
 
 Para probar otros tamaños (entre `1` y `100000`; por defecto `35000`):
 
 ```powershell
-cargo run --release -p app --bin photosort -- --bench --bench-count 5000
+cargo run --release -p app --bin hojeo -- --bench --bench-count 5000
 ```
 
 Qué hace cada ejecución:

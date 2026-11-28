@@ -277,7 +277,7 @@ fn moving_allows_a_library_but_not_the_app_data_or_the_folder_the_photos_are_in(
     validate_destination(&m.lib.join("ordenadas"), &roots, Operation::Move, &m.data).unwrap();
     let inside =
         validate_destination(&m.data.join("x"), &roots, Operation::Move, &m.data).unwrap_err();
-    assert!(inside.contains("datos de photosort"), "{inside}");
+    assert!(inside.contains("datos de Hojeo"), "{inside}");
 
     m.wizard.set_dest(m.lib.clone());
     let error = m
