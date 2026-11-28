@@ -943,3 +943,66 @@ fn the_corner_circle_adds_and_removes_one_photo_and_keeps_the_others() {
     h.press(Key::Space, Modifiers::COMMAND);
     assert_eq!(selected(&h), [true, true]);
 }
+
+#[test]
+fn back_returns_from_a_persons_photos_to_persons() {
+    const BACK: &str = "Volver a la vista anterior";
+    let mut h = Harness::new(CaptureView::Persons, Theme::Dark);
+    let on_persons = |h: &Harness| h.find(Role::Button, "Renombrar").is_some();
+    assert!(on_persons(&h) && h.find(Role::Button, BACK).is_none());
+
+    h.mouse_click("Ver fotos");
+    assert!(!on_persons(&h));
+    h.mouse_click(BACK);
+    assert!(on_persons(&h) && h.find(Role::Button, BACK).is_none());
+
+    // The same with Alt+←.
+    h.mouse_click("Ver fotos");
+    h.press(Key::ArrowLeft, Modifiers::ALT);
+    assert!(on_persons(&h));
+
+    // A section opened from the sidebar has nothing to go back to.
+    h.mouse_click("Ver fotos");
+    h.click("Configuración");
+    assert!(h.find(Role::Button, BACK).is_none());
+
+    // From the gallery to the similar ones and back: the same photos, selected and scrolled.
+    let mut h = Harness::new(CaptureView::Gallery, Theme::Dark);
+    h.press(Key::ArrowRight, Modifiers::NONE);
+    let wheel = |h: &mut Harness, points: f32| {
+        h.run(vec![
+            Event::PointerMoved(Pos2::new(SCREEN.x / 2.0, SCREEN.y / 2.0)),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, points),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        for _ in 0..40 {
+            h.run(Vec::new());
+        }
+    };
+    wheel(&mut h, -90.0);
+    let shown = |h: &Harness| {
+        let mut photos: Vec<String> = h
+            .nodes
+            .values()
+            .filter(|n| n.role() == Role::Button && is_photo(&h.name(n)))
+            .map(|n| format!("{} {:?} {:?}", h.name(n), n.toggled(), n.bounds()))
+            .collect();
+        photos.sort();
+        photos
+    };
+    let before = shown(&h);
+    h.press(Key::Menu, Modifiers::NONE);
+    h.click("Buscar parecidas");
+    assert_ne!(shown(&h), before);
+    // Another selection and another place, so that only «Volver» can bring them back.
+    h.press(Key::ArrowRight, Modifiers::NONE);
+    wheel(&mut h, 2000.0);
+    h.click(BACK);
+    h.settle();
+    assert_eq!(shown(&h), before);
+}

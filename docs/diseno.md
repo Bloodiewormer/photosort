@@ -17,6 +17,8 @@
 - **Lo contextual aparece cuando hace falta:** la barra de selección solo existe con algo seleccionado, y el inspector, solo con una foto elegida.
 - **Configuración** es una pantalla propia, con pocas opciones agrupadas por tema y valores por defecto sensatos. No contiene acciones del trabajo diario. Interruptores para sí/no, opciones excluyentes visibles para elegir una, y «Acerca de» al final.
 
+- **← Volver** solo existe en una pantalla a la que se llegó por un enlace desde otra. Las secciones de la barra lateral son raíces y vacían el camino de vuelta.
+
 ### Menú contextual
 
 - Solo órdenes que se aplican a lo seleccionado, en tres grupos como máximo.
@@ -56,6 +58,8 @@ La lista completa está en [la guía de uso](uso.md#atajos-de-teclado). Los que 
 |---|---|
 | `Ctrl`+`Espacio` sobre una miniatura enfocada | Clic en el círculo de selección |
 | `Esc` | Clic en un espacio vacío de la cuadrícula |
+
+Y el de **← Volver**: `Alt+←`. El botón se llama «Volver a la vista anterior» para el lector de pantalla.
 
 ### Qué se comprobó y cómo
 

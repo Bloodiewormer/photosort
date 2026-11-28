@@ -17,6 +17,7 @@ pub const UNDOING_EXPORT: &str = "Podrás copiar o mover cuando termine de desha
 
 pub const SUGGESTIONS_BADGE_TOOLTIP: &str = "Tiene sugerencias pendientes";
 
+#[derive(Clone)]
 pub struct SimilarityView {
     pub title: String,
     pub threshold: Option<f32>,
@@ -49,6 +50,7 @@ pub struct GalleryOutcome {
     pub thumbs_ready: bool,
     pub last_columns: usize,
     pub primary_cell_pos: Option<Pos2>,
+    pub scroll_offset: f32,
 }
 
 /// What «Recargar» and «Deshacer último movimiento» can do right now.
@@ -70,6 +72,7 @@ pub fn draw(
     sort: &mut Sort,
     similarity_view: Option<&SimilarityView>,
     work_order_banner: Option<&str>,
+    scroll_to: Option<f32>,
     top_banner: Option<impl FnOnce(&mut egui::Ui)>,
     reviewed_assets: &HashSet<AssetId>,
     pending_suggestions_assets: &HashSet<AssetId>,
@@ -324,7 +327,11 @@ pub fn draw(
             let mut any_cell_secondary_clicked = false;
 
             ui.spacing_mut().item_spacing = Vec2::splat(theme::CELL_SPACING);
-            ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+            let mut grid = ScrollArea::vertical().auto_shrink([false, false]);
+            if let Some(offset) = scroll_to {
+                grid = grid.vertical_scroll_offset(offset);
+            }
+            let shown = grid.show_rows(
                 ui,
                 theme::CELL_HEIGHT,
                 layout.row_count,
@@ -660,6 +667,7 @@ pub fn draw(
                     }
                 },
             );
+            outcome.scroll_offset = shown.state.clamped_offset().y;
 
             // The cells sit on top, so only a click on the empty space gets here.
             if bg_resp.clicked() && !selection.is_empty() {

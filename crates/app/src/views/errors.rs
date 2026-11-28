@@ -16,7 +16,6 @@ const ROW_HEIGHT: f32 = ROW_CONTENT_HEIGHT + 2.0 * theme::SPACE_MD + 2.0;
 
 #[derive(Default)]
 pub struct ErrorsViewOutcome {
-    pub back: bool,
     pub retry_all: bool,
     pub retry_asset: Option<AssetId>,
     pub thumbs_ready: bool,
@@ -66,9 +65,6 @@ pub fn draw(
                         .clicked()
                     {
                         outcome.retry_all = true;
-                    }
-                    if ui.button("Volver").clicked() {
-                        outcome.back = true;
                     }
                 });
             });
