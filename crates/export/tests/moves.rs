@@ -347,14 +347,13 @@ fn two_sources_with_the_same_name_get_numbered_and_none_is_lost() {
 }
 
 #[test]
-fn undo_restores_identical_files_and_skips_an_occupied_path() {
+fn undo_restores_identical_files_and_sets_aside_what_it_cannot() {
     for cross_volume in [false, true] {
         let s = setup();
         let a = s.library.join("a.jpg");
         let one = s.library.join("uno").join("igual.jpg");
         let two = s.library.join("dos").join("igual.jpg");
         let (hash, before) = (sha(&a), dates(&a));
-        let original_gallery = s.gallery();
         let to_bin = s.to_bin();
         let ctx = s.context(&to_bin, cross_volume);
         run(
@@ -371,29 +370,116 @@ fn undo_restores_identical_files_and_skips_an_occupied_path() {
         let report = undo_last_move(&ctx, &s.app_data).unwrap().unwrap();
 
         assert_eq!(report.restored, std::slice::from_ref(&a));
-        let skipped: Vec<&PathBuf> = report.skipped.iter().map(|(p, _)| p).collect();
-        assert_eq!(skipped, [&two, &one]);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        let lost: Vec<&PathBuf> = report.lost.iter().map(|(p, _)| p).collect();
+        assert_eq!(lost, [&two, &one]);
+        // The report says where each one was left.
+        let numbered = s.outside.join("igual (1).jpg");
+        assert!(report.lost[0].1.contains(&*numbered.to_string_lossy()));
+        assert!(report.lost[1].1.contains(&*edited.to_string_lossy()));
         assert_eq!((sha(&a), dates(&a)), (hash, before));
         assert!(!s.outside.join("a.jpg").exists());
         assert_eq!(s.labels_of(&a), ["viaje"]);
         assert_eq!(fs::read(&two).unwrap(), b"a newer file");
-        assert_eq!(
-            fs::read(s.outside.join("igual (1).jpg")).unwrap(),
-            b"photo number two"
-        );
+        assert_eq!(fs::read(&numbered).unwrap(), b"photo number two");
         assert_eq!(fs::read(&edited).unwrap(), b"edited after the move");
         assert!(!one.exists());
-
-        // Once the obstacles are gone, the rest of the batch can still be undone.
-        fs::remove_file(&two).unwrap();
-        fs::write(&edited, b"photo one").unwrap();
-        let rest = undo_last_move(&ctx, &s.app_data).unwrap().unwrap();
-        assert_eq!(rest.restored, [two.clone(), one.clone()]);
-        assert_eq!(fs::read(&one).unwrap(), b"photo one");
-        assert_eq!(fs::read(&two).unwrap(), b"photo number two");
-        assert_eq!(s.gallery(), original_gallery);
         assert!(undo_last_move(&ctx, &s.app_data).unwrap().is_none());
     }
+}
+
+#[test]
+fn a_file_that_cannot_come_back_does_not_hold_back_the_batch_before_it() {
+    let s = setup();
+    let ctx = s.context(&never, false);
+    let dest = s.dest(&s.outside);
+    run(&s.items(&["a.jpg"]), &dest, &ctx);
+    run(&s.items(&["uno/igual.jpg"]), &dest, &ctx);
+    let gone = s.outside.join("igual.jpg");
+    fs::remove_file(&gone).unwrap();
+
+    let first = undo_last_move(&ctx, &s.app_data).unwrap().unwrap();
+    assert_eq!(first.lost.len(), 1, "{first:?}");
+    let second = undo_last_move(&ctx, &s.app_data).unwrap().unwrap();
+
+    assert_eq!(second.restored, [s.library.join("a.jpg")]);
+    assert!(undo_last_move(&ctx, &s.app_data).unwrap().is_none());
+}
+
+/// A file that cannot be read right now is not lost.
+#[cfg(windows)]
+#[test]
+fn a_locked_file_can_be_undone_later() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let s = setup();
+    let ctx = s.context(&never, false);
+    run(&s.items(&["a.jpg"]), &s.dest(&s.outside), &ctx);
+    {
+        let _held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(s.outside.join("a.jpg"))
+            .unwrap();
+        let report = undo_last_move(&ctx, &s.app_data).unwrap().unwrap();
+        assert_eq!(
+            (report.skipped.len(), report.lost.len()),
+            (1, 0),
+            "{report:?}"
+        );
+    }
+
+    let report = undo_last_move(&ctx, &s.app_data).unwrap().unwrap();
+    assert_eq!(report.restored, [s.library.join("a.jpg")]);
+}
+
+/// An undo cut after the file was back, but before the log said so.
+#[test]
+fn undoing_a_file_that_is_already_back_only_settles_the_catalog() {
+    for copy_left in [false, true] {
+        let s = setup();
+        let a = s.library.join("a.jpg");
+        let original_gallery = s.gallery();
+        let ctx = s.context(&never, false);
+        run(&s.items(&["a.jpg"]), &s.dest(&s.outside), &ctx);
+        let moved = s.outside.join("a.jpg");
+        if copy_left {
+            fs::copy(&moved, &a).unwrap();
+        } else {
+            fs::rename(&moved, &a).unwrap();
+        }
+
+        let report = undo_last_move(&ctx, &s.app_data).unwrap().unwrap();
+
+        assert_eq!(report.restored, std::slice::from_ref(&a));
+        assert_eq!(report.warnings.len(), usize::from(copy_left));
+        assert_eq!(moved.exists(), copy_left);
+        assert_eq!(s.gallery(), original_gallery);
+        assert_eq!(s.labels_of(&a), ["viaje"]);
+        assert!(undo_last_move(&ctx, &s.app_data).unwrap().is_none());
+    }
+}
+
+/// What was moved by renaming comes back by copying when the two places are no longer one disk.
+#[test]
+fn undoing_a_rename_across_disks_copies_back_and_recycles_the_copy() {
+    let s = setup();
+    let a = s.library.join("a.jpg");
+    let (hash, before) = (sha(&a), dates(&a));
+    run(
+        &s.items(&["a.jpg"]),
+        &s.dest(&s.outside),
+        &s.context(&never, false),
+    );
+    let to_bin = s.to_bin();
+
+    let report = undo_last_move(&s.context(&to_bin, true), &s.app_data)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.restored, std::slice::from_ref(&a));
+    assert_eq!((sha(&a), dates(&a)), (hash.clone(), before));
+    assert_eq!(s.bin_hashes(), [hash]);
+    assert!(!s.outside.join("a.jpg").exists());
 }
 
 #[test]

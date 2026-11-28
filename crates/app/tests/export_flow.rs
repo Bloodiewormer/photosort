@@ -2,9 +2,9 @@
 #![allow(clippy::disallowed_methods)]
 
 use app::export_flow::{
-    ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, build_export_items,
-    layout_description, layout_label, move_confirmation_text, remember_export_dir, select_entries,
-    undo_messages, validate_destination,
+    ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, UndoWorker,
+    build_export_items, layout_description, layout_label, move_confirmation_text,
+    remember_export_dir, select_entries, undo_messages, validate_destination,
 };
 use app::model::Selection;
 use app::settings::{self, Settings};
@@ -188,11 +188,65 @@ fn the_undo_message_counts_what_came_back_and_says_why_the_rest_did_not() {
     assert!(problems.ends_with("y 2 más"), "{problems}");
 
     report.skipped.clear();
+    report.lost = vec![(PathBuf::from("a.jpg"), "ya no está en «b»".into())];
+    assert_eq!(
+        undo_messages(&report).1.as_deref(),
+        Some("1 ya no se puede deshacer: a.jpg (ya no está en «b»)")
+    );
+
+    report.lost.clear();
     report.warnings = vec![(PathBuf::from("a.jpg"), "la copia sigue ahí".into())];
     assert_eq!(
         undo_messages(&report).1.as_deref(),
         Some("Aviso: a.jpg (la copia sigue ahí)")
     );
+}
+
+/// A move to another disk is undone through the Recycle Bin the worker was given, never the real one.
+#[test]
+fn the_undo_worker_uses_the_recycle_bin_it_is_given() {
+    let m = Moving::new(1);
+    let photo = m.lib.join("file_00.jpg");
+    {
+        let cat = m.catalog();
+        let roots = [LibraryRoot::new(&m.lib).unwrap()];
+        // Leaves the file where it is: only the log needs to say it went to another disk.
+        let retire = |file: &MoveSource| -> std::io::Result<bool> {
+            fs::rename(file.as_path(), file.as_path().with_extension("papelera"))?;
+            Ok(true)
+        };
+        let context = export::MoveContext {
+            catalog: &cat,
+            roots: &roots,
+            retire: &retire,
+            force_cross_volume: true,
+            before_retire: None,
+        };
+        let dest = fsguard::ensure_move_dir(&m.out, &m.data).unwrap();
+        let items = [ExportItem::new(photo.clone())];
+        export::move_with_options(&items, &dest, Default::default(), &context, &mut |_| {
+            export::Control::Continue
+        })
+        .unwrap();
+    }
+    fn declines(_: &MoveSource) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    let roots = vec![LibraryRoot::new(&m.lib).unwrap()];
+    let worker = UndoWorker::start(m.db(), roots, m.data.clone(), declines, None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let report = loop {
+        if let Some(result) = worker.try_recv() {
+            break result.unwrap().unwrap();
+        }
+        assert!(Instant::now() < deadline, "the undo never ended");
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    assert_eq!(report.restored, std::slice::from_ref(&photo));
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(photo.exists() && m.out.join("file_00.jpg").exists());
 }
 
 #[test]

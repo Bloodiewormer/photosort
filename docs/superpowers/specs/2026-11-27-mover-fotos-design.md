@@ -102,7 +102,7 @@ Tabla nueva `move_log` en el catálogo:
 
 ```
 id, batch, src_path, src_root, dst_path, dst_root, sha256, size, mtime_ns,
-method ('rename' | 'copy_recycle'), state ('pending' | 'done' | 'kept_original' | 'undone'), at_ns
+method ('rename' | 'copy_recycle'), state ('pending' | 'done' | 'kept_original' | 'undone' | 'lost'), at_ns
 ```
 
 - **Antes** de tocar un archivo se escribe la fila en `pending`. Después se cambia a `done` (o
@@ -116,11 +116,16 @@ method ('rename' | 'copy_recycle'), state ('pending' | 'done' | 'kept_original' 
   - en cualquier otro caso la fila sigue `pending`.
 - Si un movimiento falla antes de que cambie nada en el disco, su fila se descarta.
 - **Deshacer** revierte el lote más reciente que tenga filas `done`, en orden inverso. Por cada archivo:
-  - el archivo del destino tiene que tener el mismo SHA-256 y la ruta original tiene que estar libre. Si no,
-    se salta y se informa;
+  - si la ruta original ya tiene el mismo SHA-256 (un deshacer cortado a medias), la fila pasa a `undone` y se
+    arregla `location`; si en el destino queda además una copia, se avisa y no se toca;
+  - el archivo del destino tiene que tener el mismo SHA-256 y la ruta original tiene que estar libre;
+  - si el destino ya no está, cambió, o la ruta original la ocupa otro contenido, la fila pasa a `lost`: deja de
+    ser deshacible, no bloquea el lote anterior y el informe dice dónde quedó el archivo. No se toca ningún archivo;
+  - si no se puede comprobar (unidad desconectada, archivo bloqueado), se salta y se puede reintentar;
   - si la carpeta original ya no existe, se vuelve a crear;
-  - `rename` vuelve con `MoveFileExW`; `copy_recycle` vuelve con el mismo procedimiento entre discos: la copia
-    del destino va a la Papelera y el original sigue en la Papelera por si acaso;
+  - `rename` vuelve con `MoveFileExW` (si ahora son discos distintos, por el camino entre discos); `copy_recycle`
+    vuelve con el mismo procedimiento entre discos: la copia del destino va a la Papelera y el original sigue en
+    la Papelera por si acaso;
   - la fila pasa a `undone` y `location` vuelve a la ruta original.
 - Se puede deshacer varias veces seguidas: cada vez, el lote anterior.
 

@@ -300,7 +300,7 @@ fn a_pending_move_inside_a_library_keeps_the_photo_in_the_gallery() {
     assert_eq!(reopened.asset_of(&dst).unwrap(), Some(asset));
 }
 
-/// A log written before the destination's library was kept.
+/// A log written before the destination's library was kept and before rows could be lost.
 #[test]
 fn an_older_move_log_is_upgraded_without_losing_rows() {
     let s = setup();
@@ -308,16 +308,31 @@ fn an_older_move_log_is_upgraded_without_losing_rows() {
     s.cat.finish_move(id, MoveState::Done, None).unwrap();
     rusqlite::Connection::open(s.db.as_path())
         .unwrap()
-        .execute_batch("ALTER TABLE move_log DROP COLUMN dst_root;")
+        .execute_batch(
+            "ALTER TABLE move_log RENAME TO newer;
+             DROP INDEX move_log_state_batch;
+             CREATE TABLE move_log (
+                 id INTEGER PRIMARY KEY, batch INTEGER NOT NULL, src_path TEXT NOT NULL,
+                 src_root TEXT NOT NULL, dst_path TEXT NOT NULL, sha256 TEXT NOT NULL,
+                 size INTEGER NOT NULL, mtime_ns INTEGER,
+                 method TEXT NOT NULL CHECK (method IN ('rename', 'copy_recycle')),
+                 state TEXT NOT NULL
+                     CHECK (state IN ('pending', 'done', 'kept_original', 'undone')),
+                 at_ns INTEGER NOT NULL
+             );
+             INSERT INTO move_log SELECT id, batch, src_path, src_root, dst_path, sha256, size,
+                 mtime_ns, method, state, at_ns FROM newer;
+             DROP TABLE newer;",
+        )
         .unwrap();
 
-    let rows = Catalog::open(&s.db)
-        .unwrap()
-        .last_undoable_batch()
-        .unwrap()
-        .unwrap();
-
+    let reopened = Catalog::open(&s.db).unwrap();
+    let rows = reopened.last_undoable_batch().unwrap().unwrap();
     assert_eq!((rows[0].id, &rows[0].dst_root), (id, &None));
+    reopened.finish_move(id, MoveState::Lost, None).unwrap();
+
+    assert_eq!(s.log(), vec![(id, "lost".to_string())]);
+    assert!(reopened.last_undoable_batch().unwrap().is_none());
 }
 
 /// Other threads open the catalog while a move runs: its pending rows are not theirs to resolve.

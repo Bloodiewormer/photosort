@@ -298,7 +298,9 @@ impl Headless {
         ctx.enable_accesskit();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         // Not the demo: the real folder review is what «Recargar» asks.
-        let app = PhotosortApp::new_with_mode(&cc, library.data.clone(), false, open_thumbnails);
+        let mut app =
+            PhotosortApp::new_with_mode(&cc, library.data.clone(), false, open_thumbnails);
+        app.set_retire(|_| panic!("tests never reach the Recycle Bin"));
         let mut headless = Self {
             ctx,
             app,

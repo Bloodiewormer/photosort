@@ -118,6 +118,8 @@ pub struct PhotosortApp {
     /// Asked of the catalog at startup and after each move or undo, not every frame.
     can_undo_move: bool,
     undo_worker: Option<crate::export_flow::UndoWorker>,
+    /// `fsguard::recycle`, except in tests.
+    retire: crate::export_flow::Retire,
     screenshot: Option<crate::screenshot::ScreenshotController>,
     last_thumbs_ready: bool,
 }
@@ -272,6 +274,7 @@ impl PhotosortApp {
             export_open_failed: false,
             can_undo_move: false,
             undo_worker: None,
+            retire: fsguard::recycle,
             screenshot: None,
             last_thumbs_ready: false,
         };
@@ -331,6 +334,11 @@ impl PhotosortApp {
         }
         self.preset_export_dir = preset_export_dir;
         self
+    }
+
+    /// Replaces the Recycle Bin. For tests: they must never reach the real one.
+    pub fn set_retire(&mut self, retire: crate::export_flow::Retire) {
+        self.retire = retire;
     }
 
     pub fn with_screenshot(mut self, controller: crate::screenshot::ScreenshotController) -> Self {
@@ -652,6 +660,7 @@ impl PhotosortApp {
                     db,
                     roots,
                     self.data_dir.clone(),
+                    self.retire,
                     Some(notify),
                 ));
                 self.status_notice = Some("Deshaciendo el último movimiento…".into());
@@ -1511,20 +1520,25 @@ impl PhotosortApp {
             PhotoMenuAction::FindSimilar => {
                 self.find_similar_to(&primary_entry);
             }
-            PhotoMenuAction::Export => {
-                if let Some(cat) = &self.catalog {
-                    self.export_wizard = Some(crate::export_flow::ExportWizard::open(
-                        cat,
-                        &self.entries,
-                        &self.selection,
-                        self.settings.last_export_dir.clone(),
-                    ));
-                }
-            }
+            PhotoMenuAction::Export => self.open_export(),
             PhotoMenuAction::ClearSelection => {
                 self.selection.clear();
                 self.sync_inspector(false);
             }
+        }
+    }
+
+    /// Opens «Copiar o mover» for the selection, or for what is shown when nothing is selected.
+    fn open_export(&mut self) {
+        if let Some(cat) = &self.catalog {
+            let mut wizard = crate::export_flow::ExportWizard::open(
+                cat,
+                &self.entries,
+                &self.selection,
+                self.settings.last_export_dir.clone(),
+            );
+            wizard.set_retire(self.retire);
+            self.export_wizard = Some(wizard);
         }
     }
 
@@ -1645,6 +1659,7 @@ impl PhotosortApp {
                 self.export_open_failed = true;
             }
         }
+        wizard.set_retire(self.retire);
         self.export_wizard = Some(wizard);
     }
 }
@@ -1929,15 +1944,8 @@ impl PhotosortApp {
                 if let Some(asset) = insp_out.review_asset {
                     self.request_review_assets(vec![asset]);
                 }
-                if gal_out.open_export
-                    && let Some(cat) = &self.catalog
-                {
-                    self.export_wizard = Some(crate::export_flow::ExportWizard::open(
-                        cat,
-                        &self.entries,
-                        &self.selection,
-                        self.settings.last_export_dir.clone(),
-                    ));
+                if gal_out.open_export {
+                    self.open_export();
                 }
 
                 // Apply inspector catalog mutations

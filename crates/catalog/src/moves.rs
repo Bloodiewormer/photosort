@@ -29,6 +29,8 @@ pub enum MoveState {
     Done,
     KeptOriginal,
     Undone,
+    /// It can no longer be undone: the file is not what or where it was. Nothing on disk is touched.
+    Lost,
 }
 
 impl MoveState {
@@ -38,6 +40,7 @@ impl MoveState {
             Self::Done => "done",
             Self::KeptOriginal => "kept_original",
             Self::Undone => "undone",
+            Self::Lost => "lost",
         }
     }
 }

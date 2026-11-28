@@ -416,6 +416,7 @@ impl UndoWorker {
         db: DestPath,
         roots: Vec<LibraryRoot>,
         app_data: PathBuf,
+        retire: Retire,
         notify: Option<Notify>,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
@@ -426,7 +427,7 @@ impl UndoWorker {
                     let context = MoveContext {
                         catalog: &catalog,
                         roots: &roots,
-                        retire: &fsguard::recycle,
+                        retire: &retire,
                         force_cross_volume: false,
                         before_retire: None,
                     };
@@ -489,6 +490,14 @@ pub fn undo_messages(report: &UndoReport) -> (String, Option<String>) {
             "{k} no se {} restaurar: {}",
             plural_word(k, "pudo", "pudieron"),
             list(&report.skipped)
+        ));
+    }
+    if !report.lost.is_empty() {
+        let k = report.lost.len();
+        problems.push(format!(
+            "{k} ya no se {} deshacer: {}",
+            plural_word(k, "puede", "pueden"),
+            list(&report.lost)
         ));
     }
     if !report.warnings.is_empty() {

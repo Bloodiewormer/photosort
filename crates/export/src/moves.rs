@@ -31,6 +31,9 @@ pub struct UndoReport {
     pub restored: Vec<PathBuf>,
     /// Files left as they are, by original path, with the reason. They can be tried again.
     pub skipped: Vec<(PathBuf, String)>,
+    /// Files that can no longer be undone, by original path, with the reason and where they were
+    /// left. Nothing on disk was touched.
+    pub lost: Vec<(PathBuf, String)>,
     /// Restored files with something else to know, such as a copy that could not be recycled.
     pub warnings: Vec<(PathBuf, String)>,
 }
@@ -209,8 +212,9 @@ fn keep_attributes(_md: &fs::Metadata, _copy: &DestPath) -> io::Result<()> {
 }
 
 /// Brings back the most recent batch of moves that is still done, newest first. A file is only brought
-/// back when it is still the one that was moved and its original path is free. `None` when there is
-/// nothing to undo.
+/// back when it is still the one that was moved and its original path is free; one that no longer
+/// can be is set aside, so it does not hold back the batches before it. `None` when there is nothing
+/// to undo.
 pub fn undo_last_move(ctx: &MoveContext, app_data: &Path) -> io::Result<Option<UndoReport>> {
     let _lock = ctx.catalog.lock_moves().map_err(db_error)?;
     let Some(rows) = ctx.catalog.last_undoable_batch().map_err(db_error)? else {
@@ -219,7 +223,7 @@ pub fn undo_last_move(ctx: &MoveContext, app_data: &Path) -> io::Result<Option<U
     let mut report = UndoReport::default();
     for row in rows {
         match restore(&row, ctx, app_data) {
-            Ok(mut warnings) => {
+            Ok(Restored::Back(mut warnings)) => {
                 if let Err(e) = ctx.catalog.undo_done(row.id) {
                     warnings.push(format!("no se actualizó el catálogo: {e}"));
                 }
@@ -229,28 +233,82 @@ pub fn undo_last_move(ctx: &MoveContext, app_data: &Path) -> io::Result<Option<U
                 }
                 report.restored.push(row.src_path);
             }
+            Ok(Restored::Lost(why)) => {
+                match ctx.catalog.finish_move(row.id, MoveState::Lost, None) {
+                    Ok(()) => report.lost.push((row.src_path, why)),
+                    Err(e) => report
+                        .skipped
+                        .push((row.src_path, format!("{why}; no se pudo anotar: {e}"))),
+                }
+            }
             Err(e) => report.skipped.push((row.src_path, io_reason(&e))),
         }
     }
     Ok(Some(report))
 }
 
-/// Puts one file back. An error means nothing at the original path or the destination changed.
+/// How far an undo of one file got.
+enum Restored {
+    /// The file is at its original path, with anything else there is to know.
+    Back(Vec<String>),
+    /// It can never be brought back: why, and where the moved file was left.
+    Lost(String),
+}
+
+/// True only when the system says there is nothing at `path`, not even a broken link.
+fn is_absent(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+}
+
+/// Puts one file back. An error means nothing at the original path or the destination changed, and
+/// that it can be tried again.
 #[allow(clippy::disallowed_methods)] // recreates the folder an original was in, checked as a DestPath
-fn restore(row: &MoveRow, ctx: &MoveContext, app_data: &Path) -> io::Result<Vec<String>> {
-    if !matches!(
-        fs::symlink_metadata(&row.src_path),
-        Err(e) if e.kind() == io::ErrorKind::NotFound
-    ) {
-        return Err(io::Error::other("la ruta original está ocupada"));
+fn restore(row: &MoveRow, ctx: &MoveContext, app_data: &Path) -> io::Result<Restored> {
+    let at = row.dst_path.display();
+    match fs::symlink_metadata(&row.src_path) {
+        Ok(md) => {
+            // Already back: an undo that was cut short, or the user put it there.
+            return Ok(
+                if md.is_file() && scanner::sha256_file(&row.src_path)? == row.sha256 {
+                    let left = !is_absent(&row.dst_path);
+                    Restored::Back(
+                        left.then(|| format!("en «{at}» sigue otra copia"))
+                            .into_iter()
+                            .collect(),
+                    )
+                } else {
+                    Restored::Lost(format!(
+                        "otro contenido ocupa la ruta original; el archivo se había movido a «{at}»"
+                    ))
+                },
+            );
+        }
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {}
+    }
+    match fs::symlink_metadata(&row.dst_path) {
+        Ok(md) if md.is_file() => {}
+        Ok(_) => {
+            return Ok(Restored::Lost(format!(
+                "en «{at}» ya no hay un archivo normal; no se toca"
+            )));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // On a drive that is not there everything looks deleted: that can be tried again.
+            if !row.dst_path.ancestors().last().is_some_and(Path::is_dir) {
+                return Err(io::Error::other(format!("no se ve la unidad de «{at}»")));
+            }
+            return Ok(Restored::Lost(format!("ya no está en «{at}»")));
+        }
+        Err(e) => return Err(e),
     }
     let moved = ensure_move_source(&row.dst_path)
         .map_err(|e| io::Error::other(format!("ya no se puede leer en el destino: {e}")))?;
     let (md, sha) = read_source(moved.as_path()).map_err(io::Error::other)?;
     if sha != row.sha256 {
-        return Err(io::Error::other(
-            "el archivo del destino cambió después de moverlo",
-        ));
+        return Ok(Restored::Lost(format!(
+            "el archivo cambió después de moverlo; se queda en «{at}»"
+        )));
     }
     let (Some(parent), Some(name)) = (row.src_path.parent(), row.src_path.file_name()) else {
         return Err(io::Error::other("la ruta original no es válida"));
@@ -260,29 +318,26 @@ fn restore(row: &MoveRow, ctx: &MoveContext, app_data: &Path) -> io::Result<Vec<
     dir.verify().map_err(io::Error::other)?;
     let target = dir.join_name(name).map_err(io::Error::other)?;
 
-    let mut warnings = Vec::new();
-    match row.method {
-        MoveMethod::Rename => move_no_replace(&moved, &target)?,
-        MoveMethod::CopyRecycle => {
-            let part = part_of(&dir, &target)?;
-            write_verified(moved.as_path(), &part, &target, &sha, &md)?;
-            // The original is back from here on: what is left is tidying up the destination.
-            if let Err(e) = keep_attributes(&md, &target) {
-                warnings.push(format!(
-                    "no se restauraron los atributos: {}",
-                    io_reason(&e)
-                ));
-            }
-            if let Err(e) =
-                check_unchanged(moved.as_path(), &sha, &md).and_then(|()| retire(ctx, &moved))
-            {
-                warnings.push(format!(
-                    "la copia sigue en «{}»: {}",
-                    row.dst_path.display(),
-                    io_reason(&e)
-                ));
-            }
+    if row.method == MoveMethod::Rename && !ctx.force_cross_volume {
+        match move_no_replace(&moved, &target) {
+            Ok(()) => return Ok(Restored::Back(Vec::new())),
+            // What was one disk when it moved no longer is.
+            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(e) => return Err(e),
         }
     }
-    Ok(warnings)
+    let part = part_of(&dir, &target)?;
+    write_verified(moved.as_path(), &part, &target, &sha, &md)?;
+    // The original is back from here on: what is left is tidying up the destination.
+    let mut warnings = Vec::new();
+    if let Err(e) = keep_attributes(&md, &target) {
+        warnings.push(format!(
+            "no se restauraron los atributos: {}",
+            io_reason(&e)
+        ));
+    }
+    if let Err(e) = check_unchanged(moved.as_path(), &sha, &md).and_then(|()| retire(ctx, &moved)) {
+        warnings.push(format!("la copia sigue en «{at}»: {}", io_reason(&e)));
+    }
+    Ok(Restored::Back(warnings))
 }
