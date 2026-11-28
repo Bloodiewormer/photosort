@@ -1126,6 +1126,24 @@ fn draw_persons_filter_group(
     ui.add_space(theme::SPACE_XS);
 }
 
+/// «← Volver», on a screen reached through a link. Returns `true` if clicked.
+pub fn draw_back_bar(ui: &mut egui::Ui, palette: &Palette) -> bool {
+    egui::Panel::top("back_bar")
+        .frame(
+            Frame::new()
+                .fill(palette.bg_canvas.color32())
+                .inner_margin(Margin::symmetric(
+                    theme::SPACE_LG as i8,
+                    theme::SPACE_SM as i8,
+                )),
+        )
+        .show(ui, |ui| {
+            let back = ui.button("← Volver").on_hover_text("Alt+←");
+            theme::named(back, "Volver a la vista anterior").clicked()
+        })
+        .inner
+}
+
 /// First-run welcome screen when no library folders are registered.
 /// Returns `true` if the user clicked the primary "Añadir carpeta…" button.
 pub fn draw_welcome(ui: &mut egui::Ui, palette: &Palette, logo: Option<&TextureHandle>) -> bool {

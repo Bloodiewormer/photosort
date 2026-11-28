@@ -5,6 +5,7 @@ use app::screenshot::CaptureView;
 use app::settings::Theme;
 use app::theme;
 use app::ui::PhotosortApp;
+use app::views::gallery;
 use app::worker::NoThumbnails;
 use eframe::App as _;
 use eframe::egui::accesskit::{Action, ActionRequest, Node, NodeId, Role, TreeId};
@@ -848,4 +849,160 @@ fn removing_the_only_folder_of_a_filtered_person_drops_the_filter() {
         copy_shown(&h),
         "el filtro de una persona que ya no se ve sigue activo"
     );
+}
+
+impl Harness {
+    fn click_at(&mut self, at: Pos2) {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        self.run(vec![Event::PointerMoved(at)]);
+        self.run(vec![button(true)]);
+        self.run(vec![button(false)]);
+        self.settle();
+    }
+}
+
+#[test]
+fn a_click_on_the_empty_grid_drops_the_selection() {
+    // Two photos leave most of the grid empty. Its own data: nothing else needs so few.
+    let config = DemoConfig {
+        count: 2,
+        seed: demo::DEFAULT_SEED,
+    };
+    let setup = demo::prepare_demo(None, config, None).expect("datos de demostración");
+    let mut h = Harness::open(&setup, CaptureView::Gallery, Theme::Dark);
+    h.press(Key::A, Modifiers::COMMAND);
+    assert!(h.find(Role::Button, "Quitar selección").is_some());
+
+    // The selection bar is not empty space.
+    let bar = h
+        .find(Role::Button, "Quitar selección")
+        .and_then(|id| h.nodes[&id].bounds())
+        .expect("barra");
+    h.click_at(Pos2::new(
+        bar.x1 as f32 + 40.0,
+        ((bar.y0 + bar.y1) / 2.0) as f32,
+    ));
+    assert!(h.find(Role::Button, "Quitar selección").is_some());
+
+    // Left of the inspector and below the single row of photos.
+    h.click_at(Pos2::new(SCREEN.x / 2.0, SCREEN.y - 30.0));
+    assert!(h.find(Role::Button, "Quitar selección").is_none());
+}
+
+#[test]
+fn the_corner_circle_adds_and_removes_one_photo_and_keeps_the_others() {
+    let mut h = Harness::new(CaptureView::Gallery, Theme::Dark);
+    // The thumbnails in reading order, with whether each is selected.
+    let cells = |h: &Harness| {
+        let mut cells: Vec<(Rect, bool, String)> = h
+            .nodes
+            .values()
+            .filter(|n| n.role() == Role::Button && is_photo(&h.name(n)))
+            .filter_map(|n| {
+                let b = n.bounds()?;
+                let rect = Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                );
+                let selected = n.toggled() == Some(egui::accesskit::Toggled::True);
+                Some((rect, selected, h.name(n)))
+            })
+            .collect();
+        cells.sort_by(|a, b| {
+            a.0.min
+                .y
+                .total_cmp(&b.0.min.y)
+                .then(a.0.min.x.total_cmp(&b.0.min.x))
+        });
+        cells
+    };
+    let selected = |h: &Harness| cells(h).iter().take(2).map(|c| c.1).collect::<Vec<_>>();
+
+    h.click_at(cells(&h)[0].0.center());
+    assert_eq!(selected(&h), [true, false]);
+    // The inspector has just opened and moved the grid, so each place is asked for again.
+    h.click_at(gallery::check_rect(cells(&h)[1].0).center());
+    assert_eq!(selected(&h), [true, true]);
+    h.click_at(gallery::check_rect(cells(&h)[1].0).center());
+    assert_eq!(selected(&h), [true, false]);
+    assert!(
+        !h.has_name_containing("Siguiente"),
+        "el círculo abrió el visor"
+    );
+
+    // With the keyboard, Ctrl+Space on a focused thumbnail does the same.
+    let name = cells(&h)[1].2.clone();
+    h.focus_on(Role::Button, &name);
+    // The window reports a held key on its own, apart from the key that follows.
+    h.run(vec![Event::ModifiersChanged(Modifiers::COMMAND)]);
+    h.press(Key::Space, Modifiers::COMMAND);
+    assert_eq!(selected(&h), [true, true]);
+}
+
+#[test]
+fn back_returns_from_a_persons_photos_to_persons() {
+    const BACK: &str = "Volver a la vista anterior";
+    let mut h = Harness::new(CaptureView::Persons, Theme::Dark);
+    let on_persons = |h: &Harness| h.find(Role::Button, "Renombrar").is_some();
+    assert!(on_persons(&h) && h.find(Role::Button, BACK).is_none());
+
+    h.mouse_click("Ver fotos");
+    assert!(!on_persons(&h));
+    h.mouse_click(BACK);
+    assert!(on_persons(&h) && h.find(Role::Button, BACK).is_none());
+
+    // The same with Alt+←.
+    h.mouse_click("Ver fotos");
+    h.press(Key::ArrowLeft, Modifiers::ALT);
+    assert!(on_persons(&h));
+
+    // A section opened from the sidebar has nothing to go back to.
+    h.mouse_click("Ver fotos");
+    h.click("Configuración");
+    assert!(h.find(Role::Button, BACK).is_none());
+
+    // From the gallery to the similar ones and back: the same photos, selected and scrolled.
+    let mut h = Harness::new(CaptureView::Gallery, Theme::Dark);
+    h.press(Key::ArrowRight, Modifiers::NONE);
+    let wheel = |h: &mut Harness, points: f32| {
+        h.run(vec![
+            Event::PointerMoved(Pos2::new(SCREEN.x / 2.0, SCREEN.y / 2.0)),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, points),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        for _ in 0..40 {
+            h.run(Vec::new());
+        }
+    };
+    wheel(&mut h, -90.0);
+    let shown = |h: &Harness| {
+        let mut photos: Vec<String> = h
+            .nodes
+            .values()
+            .filter(|n| n.role() == Role::Button && is_photo(&h.name(n)))
+            .map(|n| format!("{} {:?} {:?}", h.name(n), n.toggled(), n.bounds()))
+            .collect();
+        photos.sort();
+        photos
+    };
+    let before = shown(&h);
+    h.press(Key::Menu, Modifiers::NONE);
+    h.click("Buscar parecidas");
+    assert_ne!(shown(&h), before);
+    // Another selection and another place, so that only «Volver» can bring them back.
+    h.press(Key::ArrowRight, Modifiers::NONE);
+    wheel(&mut h, 2000.0);
+    h.click(BACK);
+    h.settle();
+    assert_eq!(shown(&h), before);
 }

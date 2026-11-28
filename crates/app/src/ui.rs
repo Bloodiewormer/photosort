@@ -35,6 +35,18 @@ use std::time::{Duration, Instant};
 
 const MAX_THUMB_TEXTURES: usize = 1024;
 const ENGINE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_BACK_POINTS: usize = 20;
+
+/// What «← Volver» restores: the screen a link was followed from.
+struct BackPoint {
+    view: ActiveView,
+    filter: FilterState,
+    entries: Vec<Entry>,
+    selection: Selection,
+    similarity_view: Option<SimilarityView>,
+    work_order_view: Option<(LabelId, String)>,
+    gallery_scroll: f32,
+}
 
 pub struct PhotosortApp {
     data_dir: PathBuf,
@@ -62,6 +74,10 @@ pub struct PhotosortApp {
     tags_view: TagsViewState,
     similarity_view: Option<SimilarityView>,
     work_order_view: Option<(LabelId, String)>,
+    back_stack: Vec<BackPoint>,
+    gallery_scroll: f32,
+    /// Set by «← Volver», for the next time the gallery is drawn.
+    restore_gallery_scroll: Option<f32>,
     pending_suggestions_assets: HashSet<AssetId>,
     review_flow: ReviewFlow,
     duplicate_groups: Vec<DuplicateGroup>,
@@ -227,6 +243,9 @@ impl PhotosortApp {
             tags_view: TagsViewState::default(),
             similarity_view: None,
             work_order_view: None,
+            back_stack: Vec::new(),
+            gallery_scroll: 0.0,
+            restore_gallery_scroll: None,
             pending_suggestions_assets: HashSet::new(),
             review_flow: ReviewFlow::new(),
             duplicate_groups: Vec::new(),
@@ -515,6 +534,63 @@ impl PhotosortApp {
         }
         if self.filter.reviewed != ReviewedFilter::All && self.similarity_view.is_none() {
             self.reload_entries();
+        }
+    }
+
+    /// Remembers the screen a link is about to leave. Call it before changing anything.
+    fn push_back_point(&mut self) {
+        // shortcut: each point keeps its own list of photos, hence the cap.
+        if self.back_stack.len() == MAX_BACK_POINTS {
+            self.back_stack.remove(0);
+        }
+        self.back_stack.push(BackPoint {
+            view: self.active_view,
+            filter: self.filter.clone(),
+            entries: self.entries.clone(),
+            selection: self.selection.clone(),
+            similarity_view: self.similarity_view.clone(),
+            work_order_view: self.work_order_view.clone(),
+            gallery_scroll: self.gallery_scroll,
+        });
+    }
+
+    /// A link to a screen that needs nothing but to be shown.
+    fn follow_link(&mut self, view: ActiveView) {
+        if self.active_view != view {
+            self.push_back_point();
+            self.active_view = view;
+        }
+    }
+
+    fn go_back(&mut self) {
+        let Some(point) = self.back_stack.pop() else {
+            return;
+        };
+        self.active_view = point.view;
+        self.filter = point.filter;
+        self.entries = point.entries;
+        self.selection = point.selection;
+        self.similarity_view = point.similarity_view;
+        self.work_order_view = point.work_order_view;
+        self.restore_gallery_scroll = Some(point.gallery_scroll);
+        self.viewer_open = false;
+        self.photo_menu = None;
+        // The catalog may have changed since: this reads it again, and the selection follows
+        // each photo by its path.
+        self.reload_catalog();
+    }
+
+    /// A deleted label must not come back as a filter, or as a list of pages, with «← Volver».
+    fn forget_label_in_back_points(&mut self, label: LabelId) {
+        for point in &mut self.back_stack {
+            point.filter.set_chip(label, None);
+            if point
+                .work_order_view
+                .as_ref()
+                .is_some_and(|(id, _)| *id == label)
+            {
+                point.work_order_view = None;
+            }
         }
     }
 
@@ -874,9 +950,7 @@ impl PhotosortApp {
             }
         }
 
-        if let Some(worker) = &self.vision_rank_worker
-            && let Some(res) = worker.try_recv()
-        {
+        if let Some(res) = self.vision_rank_worker.as_ref().and_then(|w| w.try_recv()) {
             finished_rank = true;
             match res {
                 VisionRankResult::Ready {
@@ -888,6 +962,8 @@ impl PhotosortApp {
                     let scores: HashMap<AssetId, f32> =
                         ranked.iter().map(|r| (r.entry.asset, r.score)).collect();
                     let next_entries: Vec<Entry> = ranked.into_iter().map(|r| r.entry).collect();
+                    self.push_back_point();
+                    self.work_order_view = None;
                     self.selection.reconcile(&self.entries, &next_entries);
                     self.entries = next_entries;
                     self.similarity_view = Some(SimilarityView {
@@ -1219,6 +1295,8 @@ impl PhotosortApp {
                 let scores: HashMap<AssetId, f32> =
                     ranked.iter().map(|r| (r.entry.asset, r.score)).collect();
                 let next_entries: Vec<Entry> = ranked.into_iter().map(|r| r.entry).collect();
+                self.push_back_point();
+                self.work_order_view = None;
                 self.selection.reconcile(&self.entries, &next_entries);
                 self.entries = next_entries;
                 self.similarity_view = Some(SimilarityView {
@@ -1409,8 +1487,17 @@ impl PhotosortApp {
         }
         let wants_text = ctx.egui_wants_keyboard_input();
         let mut selection_changed = false;
+        let mut back = false;
 
         ctx.input_mut(|i| {
+            // Before the arrows of the gallery, which would take it too.
+            if !wants_text
+                && !self.back_stack.is_empty()
+                && i.consume_key(Modifiers::ALT, Key::ArrowLeft)
+            {
+                back = true;
+                return;
+            }
             if i.consume_key(Modifiers::COMMAND, Key::F) {
                 self.focus_search_next_frame = true;
             }
@@ -1477,6 +1564,9 @@ impl PhotosortApp {
             }
         });
 
+        if back {
+            self.go_back();
+        }
         if selection_changed {
             self.sync_inspector(false);
         }
@@ -1747,6 +1837,10 @@ impl PhotosortApp {
         if let Some(action) = sidebar_out.label_action {
             self.label_modal.open(action, &self.all_labels);
         }
+        // The sidebar goes to a section of its own: there is nothing to go back to.
+        if sidebar_out.switch_view.is_some() || sidebar_out.filter_changed {
+            self.back_stack.clear();
+        }
         if let Some(view) = sidebar_out.switch_view {
             if view != ActiveView::Gallery {
                 self.viewer_open = false;
@@ -1773,14 +1867,17 @@ impl PhotosortApp {
             self.status_notice.as_deref(),
         );
         if top_out.search_changed {
+            if self.active_view != ActiveView::Gallery {
+                self.back_stack.clear();
+            }
             self.active_view = ActiveView::Gallery;
             self.reload_entries();
         }
         if top_out.open_settings {
-            self.active_view = ActiveView::Settings;
+            self.follow_link(ActiveView::Settings);
         }
         if top_out.open_errors {
-            self.active_view = ActiveView::Errors;
+            self.follow_link(ActiveView::Errors);
         }
         if top_out.toggle_pause {
             if self.demo_mode {
@@ -1808,6 +1905,10 @@ impl PhotosortApp {
         }
         if top_out.dismiss_notice {
             self.status_notice = None;
+        }
+
+        if !self.back_stack.is_empty() && views::shell::draw_back_bar(ui, palette) {
+            self.go_back();
         }
 
         // 3. Main view
@@ -1864,6 +1965,7 @@ impl PhotosortApp {
                     &mut self.filter.sort,
                     self.similarity_view.as_ref(),
                     work_banner,
+                    self.restore_gallery_scroll.take(),
                     top_banner,
                     &self.reviewed_assets,
                     &self.pending_suggestions_assets,
@@ -1929,11 +2031,16 @@ impl PhotosortApp {
                 }
                 self.last_thumbs_ready = gal_out.thumbs_ready;
                 self.last_columns = gal_out.last_columns;
+                self.gallery_scroll = gal_out.scroll_offset;
                 if gal_out.primary_cell_pos.is_some() {
                     self.last_primary_cell_pos = gal_out.primary_cell_pos;
                 }
                 if gal_out.open_viewer || insp_out.open_viewer {
                     self.viewer_open = true;
+                }
+                if gal_out.exit_similarity {
+                    // «Volver a la galería» goes to the gallery itself, not one step back.
+                    self.back_stack.clear();
                 }
                 if gal_out.sort_changed || gal_out.exit_similarity {
                     self.reload_entries();
@@ -2093,7 +2200,7 @@ impl PhotosortApp {
                     self.reload_catalog();
                 }
                 if insp_out.open_persons {
-                    self.active_view = ActiveView::Persons;
+                    self.follow_link(ActiveView::Persons);
                 }
 
                 // Viewer overlay
@@ -2199,6 +2306,7 @@ impl PhotosortApp {
                         .iter()
                         .map(|e| (e.asset, group.similarity))
                         .collect();
+                    self.push_back_point();
                     self.work_order_view = None;
                     self.selection.reconcile(&self.entries, &group.entries);
                     self.entries = group.entries;
@@ -2239,6 +2347,7 @@ impl PhotosortApp {
                 }
                 if let Some(work_id) = outcome.deleted {
                     self.filter.set_chip(work_id, None);
+                    self.forget_label_in_back_points(work_id);
                     if self
                         .work_order_view
                         .as_ref()
@@ -2288,6 +2397,7 @@ impl PhotosortApp {
                     self.start_works_match(&ctx);
                 }
                 if let Some(work_id) = outcome.open_in_gallery {
+                    self.push_back_point();
                     self.filter.clear_filters();
                     self.filter.set_chip(work_id, Some(ChipMode::Require));
                     self.active_view = ActiveView::Gallery;
@@ -2299,6 +2409,7 @@ impl PhotosortApp {
                     match cat.entries_belonging_to_work(work_id, Some(&self.settings.library_roots))
                     {
                         Ok(next) => {
+                            self.push_back_point();
                             self.similarity_view = None;
                             self.work_order_view = Some((work_id, work_name));
                             self.selection.reconcile(&self.entries, &next);
@@ -2393,6 +2504,7 @@ impl PhotosortApp {
                 );
 
                 if let Some(pid) = outcome.open_in_gallery {
+                    self.push_back_point();
                     self.filter.clear_filters();
                     self.filter.persons.insert(pid);
                     self.active_view = ActiveView::Gallery;
@@ -2467,7 +2579,7 @@ impl PhotosortApp {
                     self.remove_library(&root);
                 }
                 if outcome.open_errors {
-                    self.active_view = ActiveView::Errors;
+                    self.follow_link(ActiveView::Errors);
                 }
                 if outcome.scan_changes_now {
                     if let Some(task) = self.foreground_heavy_task() {
@@ -2495,6 +2607,9 @@ impl PhotosortApp {
                     match cat.clear_face_grouping_data() {
                         Ok(()) => {
                             self.filter.persons.clear();
+                            for point in &mut self.back_stack {
+                                point.filter.persons.clear();
+                            }
                             self.persons_view.postponed_persons.clear();
                             self.status_notice = Some(
                                 "Se han borrado los datos de rostros, grupos y nombres".into(),
@@ -2526,9 +2641,6 @@ impl PhotosortApp {
                     &self.thumb_failed,
                 );
                 self.last_thumbs_ready = outcome.thumbs_ready;
-                if outcome.back {
-                    self.active_view = ActiveView::Gallery;
-                }
                 if outcome.retry_all {
                     self.retry_all_failed();
                 }
@@ -2544,6 +2656,7 @@ impl PhotosortApp {
                 .draw(&ctx, palette, self.catalog.as_mut(), &self.all_labels);
         if let Some(removed) = modal_out.removed_label {
             self.filter.set_chip(removed, None);
+            self.forget_label_in_back_points(removed);
         }
         if let Some(notice) = modal_out.status_notice {
             self.status_notice = Some(notice);

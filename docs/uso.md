@@ -34,6 +34,14 @@ En **Configuración → Revisión en segundo plano** puedes encender **Revisar f
 
 En la barra superior verás el progreso de la revisión y los botones **Pausar** y **Reanudar**. Una foto pasa a **Revisadas** (y muestra la marca ocre en la esquina superior derecha) cuando completa todas las etapas que tengas activadas.
 
+## Seleccionar fotos
+
+Cada miniatura tiene un círculo en la esquina superior derecha: aparece al pasar el ratón y, mientras haya algo seleccionado, se ve en todas. Un clic en el círculo añade o quita esa foto sin soltar las demás, como `Ctrl`+clic. Una foto seleccionada lleva el círculo ocre con `✓`, un borde grueso y un velo sobre la miniatura; si además está revisada, la marca de lápiz graso rodea el círculo. Un clic en el resto de la miniatura selecciona solo esa foto, y un clic en un espacio vacío de la cuadrícula quita la selección. Con teclado, `Ctrl`+`Espacio` sobre una miniatura enfocada hace lo mismo que el círculo.
+
+## Volver a la pantalla anterior
+
+Cuando llegas a una pantalla desde otra por un enlace, arriba aparece **← Volver** (o `Alt+←`), que te devuelve a la anterior con sus filtros, la selección y el desplazamiento de la galería. Ocurre con **Ver fotos** en Personas; **Ver en galería** en Duplicados; **Ver páginas por capítulo** y **Ver menciones** en Obras; **Buscar parecidas** en la galería; **Probar**, **Buscar por descripción** y **Buscar similares** en Etiquetas; **Poner nombre** en el inspector; **Configurar** y el contador de errores de la barra superior; y **Ver errores** en Configuración. Si encadenas varios enlaces, vuelves paso a paso. Al entrar en una sección o tocar un filtro desde la barra lateral, o al buscar desde otra pantalla, ya no hay a dónde volver. **Volver a la galería**, en el aviso de parecidos o de páginas de una obra, lleva siempre a la galería.
+
 ## Revisar sugerencias
 
 Todo lo que detecta la aplicación entra como sugerencia. Lo que aceptas o rechazas queda guardado y ningún análisis posterior lo sobrescribe.
@@ -152,11 +160,14 @@ El botón **Recargar** de la galería vuelve a revisar tus carpetas y quita las 
 |---|---|---|
 | En toda la app | `/` o `Ctrl+F` | Enfoca el cuadro de búsqueda |
 | En toda la app | `Tab` / `Mayús+Tab` | Recorre los controles con borde de foco visible |
+| Tras seguir un enlace | `Alt+←` | **← Volver** a la pantalla anterior |
 | Galería | Flechas (`Mayús` + flechas) | Mueve la selección (o la amplía) |
 | Galería | `Ctrl+A` | Selecciona todas las fotos visibles |
+| Galería | `Ctrl`+`Espacio` sobre una miniatura enfocada | Añade o quita esa foto sin quitar las demás |
 | Galería | `Intro` o `Espacio` | Abre o cierra el visor |
 | Galería | `Tecla de menú` o `Mayús+F10` | Abre el menú contextual de la foto |
 | Galería | `Esc` | Cierra el visor, el menú o quita la selección |
+| Galería | Clic en un espacio vacío de la cuadrícula | Quita la selección |
 | Sugerencias | `A` / `R` | Acepta o rechaza la sugerencia actual |
 | Sugerencias | `↑` / `↓` y `←` / `→` | Cambia de fila o de grupo |
 | Sugerencias | `Ctrl+Z` | Deshace la última decisión |
