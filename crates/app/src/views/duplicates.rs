@@ -503,16 +503,6 @@ fn draw_entry_cards(
         egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true),
         |ui| {
             for entry in entries {
-                visible_hashes.insert(entry.sha256.clone());
-                if !thumb_textures.contains_key(&entry.sha256)
-                    && !thumb_failed.contains(&entry.sha256)
-                {
-                    to_request.push(ThumbRequest {
-                        source: entry.path.clone(),
-                        sha256: entry.sha256.clone(),
-                    });
-                }
-
                 Frame::new()
                     .fill(palette.bg_card.color32())
                     .stroke(Stroke::new(1.0, palette.border.color32()))
@@ -526,6 +516,19 @@ fn draw_entry_cards(
                                 Vec2::new(DUP_CARD_WIDTH, DUP_THUMB_HEIGHT),
                                 Sense::hover(),
                             );
+                            // Only on-screen cards ask for a thumbnail: asking for every group's
+                            // outgrows the texture cache and makes the thumbnails flicker.
+                            if ui.is_rect_visible(thumb_rect) {
+                                visible_hashes.insert(entry.sha256.clone());
+                                if !thumb_textures.contains_key(&entry.sha256)
+                                    && !thumb_failed.contains(&entry.sha256)
+                                {
+                                    to_request.push(ThumbRequest {
+                                        source: entry.path.clone(),
+                                        sha256: entry.sha256.clone(),
+                                    });
+                                }
+                            }
                             draw_thumb_box(
                                 ui,
                                 palette,
