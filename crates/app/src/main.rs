@@ -48,7 +48,7 @@ fn main() -> ExitCode {
 
     if args.help {
         println!("{}", screenshot::usage_text());
-        println!("     photosort --bench [--bench-count <N>]");
+        println!("     hojeo --bench [--bench-count <N>]");
         return ExitCode::SUCCESS;
     }
 
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
     let initial_view = args.view;
     let is_demo = args.demo;
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_title("photosort")
+        .with_title("Hojeo")
         .with_inner_size([win_w as f32, win_h as f32])
         .with_min_inner_size([840.0_f32.min(win_w as f32), 560.0_f32.min(win_h as f32)]);
     if let Some(icon) = app::theme::window_icon() {
@@ -138,6 +138,7 @@ fn main() -> ExitCode {
     };
 
     let result = eframe::run_native(
+        // The old name stays as eframe's storage id, so the window keeps its remembered size.
         "photosort",
         native_options,
         Box::new(move |cc| {

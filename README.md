@@ -1,6 +1,6 @@
-<img src="assets/icon.svg" width="72" height="72" alt="Logo de photosort">
+<img src="assets/icon.svg" width="72" height="72" alt="Logo de Hojeo">
 
-# photosort
+# Hojeo
 
 Aplicación de escritorio para **catalogar una biblioteca personal de fotos y vídeos sin tocarla**. Lee las carpetas que elijas, analiza cada archivo en tu equipo y guarda etiquetas, obras y personas en su propia base de datos. Solo copia o mueve archivos cuando tú lo pides.
 
@@ -64,4 +64,4 @@ cargo test --workspace
 
 Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para las reglas de contribución y las pruebas con modelos reales, y [docs/decisiones.md](docs/decisiones.md) y [docs/diseno.md](docs/diseno.md) para el diseño técnico.
 
-El código de photosort se publica bajo la [licencia MIT](LICENSE). Las licencias de las dependencias, ONNX Runtime, `DirectML.dll` y los modelos se resumen en [docs/terceros.md](docs/terceros.md).
+El código de Hojeo se publica bajo la [licencia MIT](LICENSE). Las licencias de las dependencias, ONNX Runtime, `DirectML.dll` y los modelos se resumen en [docs/terceros.md](docs/terceros.md).

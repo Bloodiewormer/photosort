@@ -1820,7 +1820,6 @@ impl PhotosortApp {
         let sidebar_out = views::shell::draw_sidebar(
             ui,
             palette,
-            self.logo_texture.as_ref(),
             self.active_view,
             self.reviewed_counts,
             self.review_flow.total_items(),

@@ -1,6 +1,6 @@
 # Licencias de terceros
 
-El código de photosort es MIT. Lo que se distribuye con él conserva su propia licencia. Esto es un resumen para decidir, no asesoría jurídica: manda siempre el texto de cada licencia.
+El código de Hojeo es MIT. Lo que se distribuye con él conserva su propia licencia. Esto es un resumen para decidir, no asesoría jurídica: manda siempre el texto de cada licencia.
 
 Revisado el 2026-11-27.
 
@@ -8,7 +8,7 @@ Revisado el 2026-11-27.
 
 | Componente | Cómo llega | Licencia | Qué exige al distribuir |
 |---|---|---|---|
-| ONNX Runtime 1.31 (`rel-1.31.0`) | Enlazado de forma estática en `photosort.exe` | MIT | Incluir su aviso de copyright y el texto MIT. Incluir también su `ThirdPartyNotices.txt` de esa versión, porque la biblioteca estática lleva componentes de terceros (entre ellos Eigen, con MPL-2.0: basta indicar dónde obtener su código, que no se modifica). |
+| ONNX Runtime 1.31 (`rel-1.31.0`) | Enlazado de forma estática en `hojeo.exe` | MIT | Incluir su aviso de copyright y el texto MIT. Incluir también su `ThirdPartyNotices.txt` de esa versión, porque la biblioteca estática lleva componentes de terceros (entre ellos Eigen, con MPL-2.0: basta indicar dónde obtener su código, que no se modifica). |
 | `DirectML.dll` 1.15.4 | Copiada junto al `.exe` | Microsoft Software License Terms, DirectML (propietaria) | Se puede copiar y distribuir dentro de aplicaciones que uno desarrolla, solo para usarse en Windows o Xbox. No se puede ofrecer suelta, quitar ni alterar los avisos de Microsoft, ni hacer ingeniería inversa. No es una licencia de código abierto y no obliga a publicar el código de la app. |
 | 377 crates de Rust | Compiladas en el `.exe` | Permisivas: MIT, Apache-2.0, BSD, Zlib, ISC, BSL-1.0, Unicode-3.0, Unlicense, CC0 | Incluir sus avisos y textos de licencia. Ninguna es solo GPL; la única con opción GPL (`Apache-2.0 OR GPL-2.0-only`) se usa como Apache-2.0. |
 | Fuentes de egui (`epaint_default_fonts`) | Dentro del `.exe` | OFL-1.1 y Ubuntu Font Licence 1.0 | Incluir el texto de ambas licencias. |

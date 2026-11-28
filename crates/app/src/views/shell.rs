@@ -322,7 +322,6 @@ pub fn draw_top_bar(
 pub fn draw_sidebar(
     ui: &mut egui::Ui,
     palette: &Palette,
-    logo: Option<&TextureHandle>,
     active_view: ActiveView,
     reviewed_counts: ReviewedCounts,
     suggestions_count: usize,
@@ -349,14 +348,10 @@ pub fn draw_sidebar(
                 .stroke(Stroke::new(1.0, palette.border.color32())),
         )
         .show(ui, |ui| {
-            // Brand header: logo + wordmark
+            // Wordmark only: the window's title bar already shows the icon.
             ui.horizontal(|ui| {
-                if let Some(tex) = logo {
-                    ui.image((tex.id(), Vec2::splat(24.0)));
-                    ui.add_space(theme::SPACE_XS);
-                }
                 ui.label(
-                    RichText::new("photosort")
+                    RichText::new("Hojeo")
                         .size(theme::FONT_HEADING)
                         .strong()
                         .color(palette.text_primary.color32()),
@@ -1184,7 +1179,7 @@ pub fn draw_welcome(ui: &mut egui::Ui, palette: &Palette, logo: Option<&TextureH
                             ui.add_space(theme::SPACE_LG);
                             ui.label(
                                 RichText::new(
-                                    "photosort solo lee tus carpetas y nunca modifica ni borra los originales",
+                                    "Hojeo nunca borra ni modifica tus originales; solo los mueve si tú se lo pides",
                                 )
                                 .size(theme::FONT_SMALL)
                                 .color(palette.text_secondary.color32()),

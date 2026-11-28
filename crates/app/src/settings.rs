@@ -110,16 +110,16 @@ impl fmt::Display for SettingsError {
             }
             Self::RootContainsDataDir => write!(
                 f,
-                "La carpeta elegida contiene el directorio de datos de photosort; elige otra carpeta."
+                "La carpeta elegida contiene el directorio de datos de Hojeo; elige otra carpeta."
             ),
             Self::RootInsideDataDir => write!(
                 f,
-                "La carpeta elegida está dentro del directorio de datos de photosort; elige otra carpeta."
+                "La carpeta elegida está dentro del directorio de datos de Hojeo; elige otra carpeta."
             ),
             // Only the data folder reaches the guard from here, and the guard's text no longer names it.
             Self::Guard(e) => write!(
                 f,
-                "El guardián de seguridad rechazó la carpeta de datos de photosort: {e}"
+                "El guardián de seguridad rechazó la carpeta de datos de Hojeo: {e}"
             ),
             Self::Io(e) => write!(f, "Error de lectura o escritura de configuración: {e}"),
             Self::Json(e) => write!(f, "Error al serializar la configuración: {e}"),
@@ -161,6 +161,7 @@ pub fn resolve_data_dir(cli_override: Option<&Path>) -> PathBuf {
     if let Some(local) = std::env::var_os("LOCALAPPDATA")
         && !local.is_empty()
     {
+        // Kept from the app's first name: renaming it would hide the existing catalog.
         return PathBuf::from(local).join("photosort");
     }
     if let Some(home) = std::env::var_os("USERPROFILE")
