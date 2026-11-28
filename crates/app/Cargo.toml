@@ -28,7 +28,7 @@ thumbs = { path = "../thumbs" }
 vision = { path = "../vision" }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
 dunce = "1.0.5"

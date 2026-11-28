@@ -1,3 +1,6 @@
+// Release builds open no console window next to the app.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use app::bench;
 use app::demo::{self, DemoConfig};
 use app::model::{ChipMode, FilterState, GridLayout, Selection};
@@ -18,6 +21,16 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 fn main() -> ExitCode {
+    // Started from a terminal with options (--bench, --self-test…): print to that terminal.
+    #[cfg(windows)]
+    if std::env::args_os().len() > 1 {
+        // SAFETY: plain Win32 call; it fails harmlessly when there is no parent console.
+        unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+    }
     match bench::parse_bench_args(std::env::args_os().skip(1)) {
         Ok(Some(cfg)) => {
             return match bench::run_bench(cfg) {
