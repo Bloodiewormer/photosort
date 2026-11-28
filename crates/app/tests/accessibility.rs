@@ -849,3 +849,46 @@ fn removing_the_only_folder_of_a_filtered_person_drops_the_filter() {
         "el filtro de una persona que ya no se ve sigue activo"
     );
 }
+
+impl Harness {
+    fn click_at(&mut self, at: Pos2) {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        self.run(vec![Event::PointerMoved(at)]);
+        self.run(vec![button(true)]);
+        self.run(vec![button(false)]);
+        self.settle();
+    }
+}
+
+#[test]
+fn a_click_on_the_empty_grid_drops_the_selection() {
+    // Two photos leave most of the grid empty. Its own data: nothing else needs so few.
+    let config = DemoConfig {
+        count: 2,
+        seed: demo::DEFAULT_SEED,
+    };
+    let setup = demo::prepare_demo(None, config, None).expect("datos de demostración");
+    let mut h = Harness::open(&setup, CaptureView::Gallery, Theme::Dark);
+    h.press(Key::A, Modifiers::COMMAND);
+    assert!(h.find(Role::Button, "Quitar selección").is_some());
+
+    // The selection bar is not empty space.
+    let bar = h
+        .find(Role::Button, "Quitar selección")
+        .and_then(|id| h.nodes[&id].bounds())
+        .expect("barra");
+    h.click_at(Pos2::new(
+        bar.x1 as f32 + 40.0,
+        ((bar.y0 + bar.y1) / 2.0) as f32,
+    ));
+    assert!(h.find(Role::Button, "Quitar selección").is_some());
+
+    // Left of the inspector and below the single row of photos.
+    h.click_at(Pos2::new(SCREEN.x / 2.0, SCREEN.y - 30.0));
+    assert!(h.find(Role::Button, "Quitar selección").is_none());
+}

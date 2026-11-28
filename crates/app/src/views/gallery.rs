@@ -613,6 +613,12 @@ pub fn draw(
                 },
             );
 
+            // The cells sit on top, so only a click on the empty space gets here.
+            if bg_resp.clicked() && !selection.is_empty() {
+                selection.clear();
+                outcome.selection_changed = true;
+            }
+
             if !any_cell_secondary_clicked {
                 bg_resp.context_menu(|ui| {
                     if ui.button("Seleccionar todo").clicked() {

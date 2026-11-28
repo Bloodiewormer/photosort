@@ -157,6 +157,7 @@ El botón **Recargar** de la galería vuelve a revisar tus carpetas y quita las 
 | Galería | `Intro` o `Espacio` | Abre o cierra el visor |
 | Galería | `Tecla de menú` o `Mayús+F10` | Abre el menú contextual de la foto |
 | Galería | `Esc` | Cierra el visor, el menú o quita la selección |
+| Galería | Clic en un espacio vacío de la cuadrícula | Quita la selección |
 | Sugerencias | `A` / `R` | Acepta o rechaza la sugerencia actual |
 | Sugerencias | `↑` / `↓` y `←` / `→` | Cambia de fila o de grupo |
 | Sugerencias | `Ctrl+Z` | Deshace la última decisión |
