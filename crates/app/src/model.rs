@@ -169,6 +169,31 @@ impl Selection {
     }
 }
 
+/// The photos of `shown`, in their order, as they are in `current` (every photo the catalog still
+/// has): one that changed place takes its new path, and one with no place left is dropped.
+pub fn relocate_entries(shown: &[Entry], current: &[Entry]) -> Vec<Entry> {
+    let by_path: HashMap<&PathBuf, &Entry> = current.iter().map(|e| (&e.path, e)).collect();
+    let still_there = |e: &Entry| by_path.get(&e.path).filter(|c| c.asset == e.asset).copied();
+    // A photo that moved takes a place of its own, not that of an identical one already shown.
+    let mut taken: BTreeSet<&PathBuf> = shown
+        .iter()
+        .filter_map(&still_there)
+        .map(|c| &c.path)
+        .collect();
+    shown
+        .iter()
+        .filter_map(|e| {
+            still_there(e).cloned().or_else(|| {
+                let moved = current
+                    .iter()
+                    .find(|c| c.asset == e.asset && !taken.contains(&c.path))?;
+                taken.insert(&moved.path);
+                Some(moved.clone())
+            })
+        })
+        .collect()
+}
+
 /// Pure grid geometry for virtualized thumbnail rendering.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridLayout {

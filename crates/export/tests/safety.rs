@@ -253,6 +253,7 @@ fn previewing_and_exporting_with_all_options_active_leaves_originals_untouched()
         layout: Layout::PreserveFolders,
         write_xmp_sidecars: true,
         embed_jpeg_tags: true,
+        operation: Default::default(),
     };
 
     // Preview
@@ -460,6 +461,7 @@ fn junctions_in_the_destination_never_lead_a_write_into_the_library() {
             layout,
             write_xmp_sidecars: true,
             embed_jpeg_tags: true,
+            operation: Default::default(),
         };
 
         // The blocked item is counted apart from the unreadable ones.

@@ -1,5 +1,5 @@
 use crate::face_group_worker::{FaceGroupEvent, FaceGroupWorker};
-use crate::model::{ChipMode, FilterState, MoveDir, Selection, count_phrase};
+use crate::model::{ChipMode, FilterState, MoveDir, Selection, count_phrase, relocate_entries};
 use crate::near_dupes_worker::{NearDupesEvent, NearDupesWorker};
 use crate::review_engine::{
     EnginePhase, EngineSnapshot, FolderRecheck, ReviewEngine, ReviewEngineEvent, StageKind,
@@ -115,6 +115,11 @@ pub struct PhotosortApp {
     export_wizard: Option<crate::export_flow::ExportWizard>,
     preset_export_dir: Option<PathBuf>,
     export_open_failed: bool,
+    /// Asked of the catalog at startup and after each move or undo, not every frame.
+    can_undo_move: bool,
+    undo_worker: Option<crate::export_flow::UndoWorker>,
+    /// `fsguard::recycle`, except in tests.
+    retire: crate::export_flow::Retire,
     screenshot: Option<crate::screenshot::ScreenshotController>,
     last_thumbs_ready: bool,
 }
@@ -267,10 +272,14 @@ impl PhotosortApp {
             export_wizard: None,
             preset_export_dir: None,
             export_open_failed: false,
+            can_undo_move: false,
+            undo_worker: None,
+            retire: fsguard::recycle,
             screenshot: None,
             last_thumbs_ready: false,
         };
         app.reload_catalog();
+        app.refresh_can_undo();
         if app.demo_mode {
             app.engine_snapshot.phase = EnginePhase::Running {
                 done: app.reviewed_counts.reviewed,
@@ -325,6 +334,11 @@ impl PhotosortApp {
         }
         self.preset_export_dir = preset_export_dir;
         self
+    }
+
+    /// Replaces the Recycle Bin. For tests: they must never reach the real one.
+    pub fn set_retire(&mut self, retire: crate::export_flow::Retire) {
+        self.retire = retire;
     }
 
     pub fn with_screenshot(mut self, controller: crate::screenshot::ScreenshotController) -> Self {
@@ -448,7 +462,26 @@ impl PhotosortApp {
         } else if self.similarity_view.is_none() {
             self.reload_entries();
         } else {
-            self.sync_inspector(true);
+            self.refresh_shown_entries();
+        }
+    }
+
+    /// A similarity view keeps its photos and their order, but not where they were before a move.
+    fn refresh_shown_entries(&mut self) {
+        let Some(cat) = &self.catalog else {
+            return;
+        };
+        let stages = self.settings.enabled_stage_specs();
+        let everything =
+            FilterState::default().to_catalog_filter_scoped(&self.settings.library_roots, &stages);
+        match cat.entries(&everything, self.filter.sort) {
+            Ok(current) => {
+                let next = relocate_entries(&self.entries, &current);
+                self.selection.reconcile(&self.entries, &next);
+                self.entries = next;
+                self.sync_inspector(true);
+            }
+            Err(e) => self.banner_error = Some(format!("Error al actualizar las fotos: {e}")),
         }
     }
 
@@ -579,7 +612,10 @@ impl PhotosortApp {
     }
 
     fn foreground_heavy_task(&self) -> Option<&'static str> {
-        if self.works_worker.is_some() {
+        if self.undo_worker.is_some() || self.export_wizard.as_ref().is_some_and(|w| w.is_moving())
+        {
+            Some("el movimiento de fotos")
+        } else if self.works_worker.is_some() {
             Some("la búsqueda de obras")
         } else if self.tags_apply_worker.is_some() {
             Some("la aplicación de etiquetas")
@@ -608,6 +644,75 @@ impl PhotosortApp {
             engine.request_index();
         }
         ctx.request_repaint_after(self.folder_recheck.remaining(now));
+    }
+
+    /// «Recargar»: lists the folders again; the gallery reloads when that ends.
+    fn reload_folders(&mut self) {
+        let Some(engine) = &self.review_engine else {
+            self.reload_catalog();
+            return;
+        };
+        if engine.is_paused() {
+            self.status_notice =
+                Some("La revisión está en pausa: las carpetas se revisarán al reanudarla".into());
+        }
+        engine.request_index();
+    }
+
+    fn refresh_can_undo(&mut self) {
+        self.can_undo_move = self
+            .catalog
+            .as_ref()
+            .is_some_and(|c| c.last_undoable_batch().is_ok_and(|b| b.is_some()));
+    }
+
+    fn start_undo(&mut self, ctx: &egui::Context) {
+        if self.undo_worker.is_some() {
+            return;
+        }
+        let roots = self.settings.valid_roots();
+        match settings::db_dest_path(&self.data_dir, &roots) {
+            Ok(db) => {
+                let ctx = ctx.clone();
+                let notify: Notify = Arc::new(move || ctx.request_repaint());
+                self.undo_worker = Some(crate::export_flow::UndoWorker::start(
+                    db,
+                    roots,
+                    self.data_dir.clone(),
+                    self.retire,
+                    Some(notify),
+                ));
+                self.status_notice = Some("Deshaciendo el último movimiento…".into());
+                self.sync_engine_yield();
+            }
+            Err(e) => self.banner_error = Some(e.to_string()),
+        }
+    }
+
+    fn poll_undo(&mut self, ctx: &egui::Context) {
+        let Some(result) = self.undo_worker.as_ref().and_then(|w| w.try_recv()) else {
+            return;
+        };
+        self.undo_worker = None;
+        self.sync_engine_yield();
+        match result {
+            Ok(Some(report)) => {
+                let (done, problems) = crate::export_flow::undo_messages(&report);
+                self.status_notice = Some(done);
+                if problems.is_some() {
+                    self.banner_error = problems;
+                }
+            }
+            Ok(None) => self.status_notice = Some("No hay movimientos que deshacer".into()),
+            Err(e) => {
+                self.status_notice = None;
+                self.banner_error = Some(format!("No se pudo deshacer: {e}"));
+            }
+        }
+        // Even a failed undo may have brought some files back.
+        self.reload_catalog();
+        self.refresh_can_undo();
+        ctx.request_repaint();
     }
 
     /// Flags in the catalog the photos found to be gone, and says whether it flagged any.
@@ -977,7 +1082,7 @@ impl PhotosortApp {
 
     fn pick_and_add_library(&mut self) {
         if let Some(folder) = rfd::FileDialog::new()
-            .set_title("Elegir carpeta con fotos (solo lectura)")
+            .set_title("Elegir carpeta con fotos")
             .pick_folder()
         {
             match self.settings.add_library_root(&folder, &self.data_dir) {
@@ -1434,20 +1539,29 @@ impl PhotosortApp {
             PhotoMenuAction::FindSimilar => {
                 self.find_similar_to(&primary_entry);
             }
-            PhotoMenuAction::Export => {
-                if let Some(cat) = &self.catalog {
-                    self.export_wizard = Some(crate::export_flow::ExportWizard::open(
-                        cat,
-                        &self.entries,
-                        &self.selection,
-                        self.settings.last_export_dir.clone(),
-                    ));
-                }
-            }
+            PhotoMenuAction::Export => self.open_export(),
             PhotoMenuAction::ClearSelection => {
                 self.selection.clear();
                 self.sync_inspector(false);
             }
+        }
+    }
+
+    /// Opens «Copiar o mover» for the selection, or for what is shown when nothing is selected.
+    fn open_export(&mut self) {
+        // An undo is moving files: nothing else may copy or move them meanwhile.
+        if self.undo_worker.is_some() {
+            return;
+        }
+        if let Some(cat) = &self.catalog {
+            let mut wizard = crate::export_flow::ExportWizard::open(
+                cat,
+                &self.entries,
+                &self.selection,
+                self.settings.last_export_dir.clone(),
+            );
+            wizard.set_retire(self.retire);
+            self.export_wizard = Some(wizard);
         }
     }
 
@@ -1514,6 +1628,37 @@ impl PhotosortApp {
         }
     }
 
+    /// The «Copiar o mover» window, opened from the selection bar or the photo menu.
+    fn draw_export_window(&mut self, ctx: &egui::Context, palette: &theme::Palette) {
+        let moving_before = self.export_wizard.as_ref().is_some_and(|w| w.is_moving());
+        let window = views::export::draw_window(
+            ctx,
+            palette,
+            &mut self.export_wizard,
+            &self.data_dir,
+            &mut self.settings,
+            &mut self.banner_error,
+        );
+        let moving = self.export_wizard.as_ref().is_some_and(|w| w.is_moving());
+        if moving != moving_before {
+            // The background review waits: it must not read files while they change place.
+            self.sync_engine_yield();
+        }
+        if !window.gone.is_empty() {
+            let gone = window.gone.into_iter().map(|path| (path, None));
+            self.gone_photos.extend(gone);
+            ctx.request_repaint();
+        }
+        if window.finished_move {
+            self.reload_catalog();
+            self.refresh_can_undo();
+            ctx.request_repaint();
+        }
+        if window.undo_requested {
+            self.start_undo(ctx);
+        }
+    }
+
     fn open_export_for_capture(&mut self, ctx: &egui::Context) {
         let Some(cat) = self.catalog.as_ref() else {
             self.export_open_failed = true;
@@ -1531,17 +1676,32 @@ impl PhotosortApp {
             let roots = self.settings.valid_roots();
             let ctx_clone = ctx.clone();
             let notify: Notify = Arc::new(move || ctx_clone.request_repaint());
-            if wizard.request_preview(&roots, Some(notify)).is_err() {
+            if wizard
+                .request_preview(&roots, &self.data_dir, Some(notify))
+                .is_err()
+            {
                 self.export_open_failed = true;
             }
         }
+        wizard.set_retire(self.retire);
         self.export_wizard = Some(wizard);
     }
 }
 
+/// A question Windows asks while moving, such as before deleting for good, opens over this window.
+fn own_system_dialogs(frame: &eframe::Frame) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = frame.window_handle()
+        && let RawWindowHandle::Win32(window) = handle.as_raw()
+    {
+        fsguard::set_dialog_owner(window.hwnd.get());
+    }
+}
+
 impl eframe::App for PhotosortApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        own_system_dialogs(frame);
         theme::scroll_focus_into_view(&ctx);
         self.draw(ui);
         theme::paint_focus_ring(&ctx);
@@ -1553,6 +1713,7 @@ impl PhotosortApp {
         let ctx = ui.ctx().clone();
         self.recheck_folders(&ctx);
         self.poll_workers(&ctx);
+        self.poll_undo(&ctx);
         self.handle_shortcuts(&ctx);
 
         let palette = theme::palette_for(&ctx);
@@ -1710,7 +1871,24 @@ impl PhotosortApp {
                     &self.thumb_pool,
                     &self.thumb_textures,
                     &self.thumb_failed,
+                    views::gallery::FolderActions {
+                        undoing: self.undo_worker.is_some(),
+                        reloading: matches!(
+                            self.engine_snapshot.phase,
+                            EnginePhase::Indexing { .. }
+                        ),
+                        // With the window open, its summary is the one that offers to undo.
+                        can_undo: self.can_undo_move
+                            && self.undo_worker.is_none()
+                            && self.export_wizard.is_none(),
+                    },
                 );
+                if gal_out.reload {
+                    self.reload_folders();
+                }
+                if gal_out.undo_move {
+                    self.start_undo(&ctx);
+                }
                 if let Some(out) = naming_outcome {
                     if out.postponed.is_some() {
                         self.reload_person_cards();
@@ -1791,15 +1969,8 @@ impl PhotosortApp {
                 if let Some(asset) = insp_out.review_asset {
                     self.request_review_assets(vec![asset]);
                 }
-                if gal_out.open_export
-                    && let Some(cat) = &self.catalog
-                {
-                    self.export_wizard = Some(crate::export_flow::ExportWizard::open(
-                        cat,
-                        &self.entries,
-                        &self.selection,
-                        self.settings.last_export_dir.clone(),
-                    ));
+                if gal_out.open_export {
+                    self.open_export();
                 }
 
                 // Apply inspector catalog mutations
@@ -1952,6 +2123,7 @@ impl PhotosortApp {
                         .and_then(|a| self.catalog.as_ref()?.asset_embedding(a).ok().flatten())
                         .is_some();
                     let menu_ctx = PhotoMenuContext {
+                        undoing: self.undo_worker.is_some(),
                         selected_count: self.selection.len().max(1),
                         all_reviewed,
                         has_ocr_text,
@@ -2374,15 +2546,7 @@ impl PhotosortApp {
             self.reload_catalog();
         }
 
-        // Export wizard modal (when opened from selection bar or photo context menu)
-        views::export::draw_window(
-            &ctx,
-            palette,
-            &mut self.export_wizard,
-            &self.data_dir,
-            &mut self.settings,
-            &mut self.banner_error,
-        );
+        self.draw_export_window(&ctx, palette);
 
         self.step_screenshot(&ctx);
     }

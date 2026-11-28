@@ -24,7 +24,7 @@ Este proyecto trabaja junto a una biblioteca personal de fotos irreemplazable. P
 
 ## Seguridad de los originales (regla innegociable)
 
-- El código no puede borrar, mover, renombrar ni modificar archivos de la biblioteca de origen. `tests/safety.rs` y las reglas de `clippy.toml` lo comprueban.
+- El código no puede borrar ni modificar archivos de la biblioteca de origen. Solo los mueve, por acción expresa del usuario, a través de `fsguard::move_no_replace` y `fsguard::recycle`. `tests/safety.rs` y las reglas de `clippy.toml` lo comprueban.
 - Los originales solo se abren en modo lectura (`File::open`), y toda escritura pasa por el guardián de rutas.
 
 ## Flujo de trabajo

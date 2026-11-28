@@ -44,6 +44,8 @@ pub struct PhotoMenuContext {
     pub all_reviewed: bool,
     pub has_ocr_text: bool,
     pub has_embedding: bool,
+    /// An undo is moving files: copying or moving waits for it.
+    pub undoing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +53,7 @@ struct MenuItem {
     action: PhotoMenuAction,
     label: String,
     group: u8,
+    enabled: bool,
 }
 
 fn build_photo_menu_items(ctx: PhotoMenuContext) -> Vec<MenuItem> {
@@ -61,16 +64,19 @@ fn build_photo_menu_items(ctx: PhotoMenuContext) -> Vec<MenuItem> {
         action: PhotoMenuAction::OpenViewer,
         label: "Abrir en el visor".into(),
         group: 0,
+        enabled: true,
     });
     items.push(MenuItem {
         action: PhotoMenuAction::RevealInExplorer,
         label: "Mostrar en el Explorador".into(),
         group: 0,
+        enabled: true,
     });
     items.push(MenuItem {
         action: PhotoMenuAction::CopyPath,
         label: "Copiar ruta".into(),
         group: 0,
+        enabled: true,
     });
 
     // Group 1: catalog & review actions
@@ -84,17 +90,20 @@ fn build_photo_menu_items(ctx: PhotoMenuContext) -> Vec<MenuItem> {
         action: PhotoMenuAction::ReviewSelected,
         label: review_label,
         group: 1,
+        enabled: true,
     });
     items.push(MenuItem {
         action: PhotoMenuAction::AddTag,
         label: "Añadir etiqueta…".into(),
         group: 1,
+        enabled: true,
     });
     if ctx.has_ocr_text {
         items.push(MenuItem {
             action: PhotoMenuAction::CopyOcrText,
             label: "Copiar texto leído".into(),
             group: 1,
+            enabled: true,
         });
     }
     if ctx.has_embedding {
@@ -102,19 +111,26 @@ fn build_photo_menu_items(ctx: PhotoMenuContext) -> Vec<MenuItem> {
             action: PhotoMenuAction::FindSimilar,
             label: "Buscar parecidas".into(),
             group: 1,
+            enabled: true,
         });
     }
 
-    // Group 2: export & selection
+    // Group 2: copy or move & selection
     items.push(MenuItem {
         action: PhotoMenuAction::Export,
-        label: "Exportar…".into(),
+        label: if ctx.undoing {
+            "Copiar o mover… (espera a que termine de deshacer)".into()
+        } else {
+            "Copiar o mover…".into()
+        },
         group: 2,
+        enabled: !ctx.undoing,
     });
     items.push(MenuItem {
         action: PhotoMenuAction::ClearSelection,
         label: "Quitar selección".into(),
         group: 2,
+        enabled: true,
     });
 
     items
@@ -153,25 +169,31 @@ pub fn draw_photo_menu(
     let mut close = false;
 
     let mut escaped = false;
+    // The next item up or down that can be chosen; «Quitar selección» always can.
+    let step = |from: usize, by: usize| {
+        let mut idx = (from + by) % items.len();
+        while !items[idx].enabled {
+            idx = (idx + by) % items.len();
+        }
+        idx
+    };
+    let (down, up) = (1, items.len() - 1);
     ctx.input_mut(|i| {
         // Shift+Tab first: `consume_key` with no modifiers also matches Shift.
         if i.consume_key(Modifiers::NONE, Key::Escape) {
             close = true;
             escaped = true;
         } else if i.consume_key(Modifiers::SHIFT, Key::Tab) {
-            current.focus_idx = (current.focus_idx + items.len() - 1) % items.len();
+            current.focus_idx = step(current.focus_idx, up);
         } else if i.consume_key(Modifiers::NONE, Key::Tab)
             || i.consume_key(Modifiers::NONE, Key::ArrowDown)
         {
-            current.focus_idx = (current.focus_idx + 1) % items.len();
+            current.focus_idx = step(current.focus_idx, down);
         } else if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
-            current.focus_idx = if current.focus_idx == 0 {
-                items.len() - 1
-            } else {
-                current.focus_idx - 1
-            };
-        } else if i.consume_key(Modifiers::NONE, Key::Enter)
-            || i.consume_key(Modifiers::NONE, Key::Space)
+            current.focus_idx = step(current.focus_idx, up);
+        } else if (i.consume_key(Modifiers::NONE, Key::Enter)
+            || i.consume_key(Modifiers::NONE, Key::Space))
+            && items[current.focus_idx].enabled
         {
             chosen = Some(items[current.focus_idx].action);
             close = true;
@@ -243,7 +265,7 @@ pub fn draw_photo_menu(
                         .fill(bg)
                         .stroke(stroke)
                         .min_size(egui::vec2(est_w - 8.0, 32.0));
-                        let resp = ui.add(btn);
+                        let resp = ui.add_enabled(item.enabled, btn);
                         // Real focus on the highlighted item, so a screen reader announces it.
                         if is_focused {
                             resp.request_focus();
@@ -261,7 +283,7 @@ pub fn draw_photo_menu(
                                 );
                             });
                         }
-                        if resp.hovered() {
+                        if resp.hovered() && item.enabled {
                             current.focus_idx = idx;
                         }
                         if resp.clicked() {
@@ -354,6 +376,7 @@ mod tests {
             all_reviewed: true,
             has_ocr_text: true,
             has_embedding: true,
+            undoing: false,
         };
         for at in [
             Pos2::new(400.0, 300.0),
@@ -413,6 +436,7 @@ mod tests {
             all_reviewed: false,
             has_ocr_text: false,
             has_embedding: false,
+            undoing: false,
         });
         assert!(
             !minimal
@@ -432,6 +456,7 @@ mod tests {
             all_reviewed: true,
             has_ocr_text: true,
             has_embedding: true,
+            undoing: false,
         });
         assert!(
             full.iter()
@@ -442,5 +467,21 @@ mod tests {
                 .any(|i| i.action == PhotoMenuAction::FindSimilar)
         );
         assert!(full.iter().any(|i| i.label == "Volver a revisar (3)"));
+        assert!(full.iter().all(|i| i.enabled));
+    }
+
+    #[test]
+    fn copy_or_move_is_off_and_says_why_while_an_undo_runs() {
+        let items = build_photo_menu_items(PhotoMenuContext {
+            selected_count: 1,
+            all_reviewed: false,
+            has_ocr_text: false,
+            has_embedding: false,
+            undoing: true,
+        });
+        let off: Vec<&MenuItem> = items.iter().filter(|i| !i.enabled).collect();
+        assert_eq!(off.len(), 1);
+        assert_eq!(off[0].action, PhotoMenuAction::Export);
+        assert!(off[0].label.contains("deshacer"), "{}", off[0].label);
     }
 }

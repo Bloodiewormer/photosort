@@ -2,16 +2,22 @@
 #![allow(clippy::disallowed_methods)]
 
 use app::export_flow::{
-    ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, build_export_items,
-    layout_description, layout_label, remember_export_dir, select_entries, validate_destination,
+    ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, UndoWorker,
+    build_export_items, layout_description, layout_label, move_confirmation_text,
+    remember_export_dir, select_entries, undo_messages, validate_destination,
 };
-use app::model::Selection;
+use app::model::{Selection, relocate_entries};
 use app::settings::{self, Settings};
+use app::theme::DARK_PALETTE;
+use app::views::export::draw_window;
+use app::worker::Notify;
 use catalog::{Catalog, Entry, Filter, LabelKind, Sort, Source, Status};
-use export::{ExportItem, ExportReport, Layout, Outcome};
-use fsguard::{LibraryRoot, ensure_writable};
+use eframe::egui;
+use export::{ExportItem, ExportReport, Layout, Operation, Outcome};
+use fsguard::{LibraryRoot, MoveSource, ensure_writable};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,6 +26,445 @@ fn write_file(root: &Path, rel: &str, bytes: &[u8]) -> PathBuf {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(&p, bytes).unwrap();
     p
+}
+
+/// A folder that stands for the app's data in tests that never open a catalog from it.
+fn app_data() -> PathBuf {
+    std::env::temp_dir().join("photosort-test-app-data-that-is-never-created")
+}
+
+/// Starts a copy: the folders only matter when moving.
+fn start(wizard: &mut ExportWizard) -> Result<(), String> {
+    let nowhere = app_data();
+    let db = ensure_writable(&nowhere.join("catalog.sqlite"), &[]).unwrap();
+    wizard.start_export(None, db, Vec::new(), nowhere)
+}
+
+fn no_recycle_bin(_: &MoveSource) -> std::io::Result<bool> {
+    panic!("tests never reach the Recycle Bin")
+}
+
+/// An indexed library with `count` photos, and a wizard set to move them all out of it.
+struct Moving {
+    _tmp: tempfile::TempDir,
+    lib: PathBuf,
+    out: PathBuf,
+    data: PathBuf,
+    root: LibraryRoot,
+    wizard: ExportWizard,
+}
+
+impl Moving {
+    fn new(count: usize) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let (lib, out, data) = (base.join("library"), base.join("out"), base.join("data"));
+        fs::create_dir_all(&data).unwrap();
+        for i in 0..count {
+            write_file(&lib, &format!("file_{i:02}.jpg"), &vec![i as u8; 4096]);
+        }
+        let root = LibraryRoot::new(&lib).unwrap();
+        let mut moving = Self {
+            _tmp: tmp,
+            lib,
+            out: out.clone(),
+            data,
+            root,
+            wizard: ExportWizard::from_items(Vec::new(), false, None),
+        };
+        let mut cat = moving.catalog();
+        cat.index(&moving.root).unwrap();
+        let entries = cat.entries(&Filter::default(), Sort::PathAsc).unwrap();
+        moving.wizard = ExportWizard::open(&cat, &entries, &Selection::default(), Some(out));
+        moving.wizard.set_retire(no_recycle_bin);
+        moving.wizard.set_operation(Operation::Move);
+        moving
+    }
+
+    fn db(&self) -> fsguard::DestPath {
+        ensure_writable(
+            &self.data.join("catalog.sqlite"),
+            std::slice::from_ref(&self.root),
+        )
+        .unwrap()
+    }
+
+    fn catalog(&self) -> Catalog {
+        Catalog::open(&self.db()).unwrap()
+    }
+
+    fn preview(&mut self) {
+        self.wizard
+            .request_preview(std::slice::from_ref(&self.root), &self.data, None)
+            .unwrap();
+        wait_until(&mut self.wizard, |p| {
+            matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
+        });
+    }
+
+    fn start(&mut self) -> Result<(), String> {
+        self.start_notifying(None)
+    }
+
+    /// `notify` runs on the moving thread, after each file.
+    fn start_notifying(&mut self, notify: Option<Notify>) -> Result<(), String> {
+        let roots = vec![LibraryRoot::new(&self.lib).unwrap()];
+        let (db, data) = (self.db(), self.data.clone());
+        self.wizard.start_export(notify, db, roots, data)
+    }
+
+    fn photos_in(dir: &Path) -> usize {
+        fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .filter(|e| {
+                    let name = e.as_ref().unwrap().file_name();
+                    name.to_string_lossy().ends_with(".jpg")
+                })
+                .count()
+        })
+    }
+}
+
+#[test]
+fn move_mode_asks_for_a_second_confirmation_before_touching_anything() {
+    let mut m = Moving::new(2);
+    m.preview();
+
+    assert!(!m.wizard.can_start_export());
+    assert!(m.start().is_err(), "no move without the confirmation");
+    assert_eq!((Moving::photos_in(&m.lib), m.out.exists()), (2, false));
+
+    m.wizard.request_move_confirmation().unwrap();
+    assert!(matches!(m.wizard.phase(), ExportPhase::ConfirmMove(p) if p.files == 2));
+    // Going back drops the confirmation.
+    m.wizard.back_to_preview();
+    assert!(m.start().is_err());
+    assert_eq!(Moving::photos_in(&m.lib), 2);
+
+    m.wizard.request_move_confirmation().unwrap();
+    m.start().unwrap();
+    wait_until(&mut m.wizard, |p| matches!(p, ExportPhase::Done(_)));
+    let ExportPhase::Done(summary) = m.wizard.phase().clone() else {
+        panic!("expected Done");
+    };
+    assert_eq!(summary.operation, Operation::Move);
+    assert_eq!((summary.moved, summary.kept_original.len()), (2, 0));
+    assert_eq!(
+        (Moving::photos_in(&m.lib), Moving::photos_in(&m.out)),
+        (0, 2)
+    );
+    assert!(m.wizard.take_finished_move());
+    assert!(!m.wizard.take_finished_move(), "reported once");
+}
+
+#[test]
+fn the_move_confirmation_says_how_many_go_to_the_recycle_bin() {
+    assert_eq!(
+        move_confirmation_text(5, 2),
+        "Se moverán 5 fotos fuera de sus carpetas. 2 irán a la Papelera después de copiarse y \
+         verificarse; si Windows fuera a borrar alguna para siempre, te preguntará antes. Las de \
+         memorias USB o de red conservan el original. Puedes deshacerlo."
+    );
+    assert_eq!(
+        move_confirmation_text(2, 0),
+        "Se moverán 2 fotos fuera de sus carpetas. Puedes deshacerlo."
+    );
+    assert!(
+        move_confirmation_text(1, 1).starts_with("Se moverá 1 foto fuera de su carpeta. 1 irá")
+    );
+}
+
+#[test]
+fn the_undo_message_counts_what_came_back_and_says_why_the_rest_did_not() {
+    let mut report = export::UndoReport {
+        restored: vec![PathBuf::from("a.jpg"), PathBuf::from("b.jpg")],
+        ..Default::default()
+    };
+    assert_eq!(
+        undo_messages(&report),
+        ("Se restauraron 2 fotos".to_string(), None)
+    );
+    report.restored.truncate(1);
+    report.skipped = (0..5)
+        .map(|i| (PathBuf::from(format!("c{i}.jpg")), "ocupada".to_string()))
+        .collect();
+    let (done, problems) = undo_messages(&report);
+    assert_eq!(done, "Se restauró 1 foto");
+    let problems = problems.unwrap();
+    assert!(
+        problems.starts_with("5 no se pudieron restaurar: c0.jpg (ocupada)"),
+        "{problems}"
+    );
+    assert!(problems.ends_with("y 2 más"), "{problems}");
+
+    report.skipped.clear();
+    report.lost = vec![(PathBuf::from("a.jpg"), "ya no está en «b»".into())];
+    assert_eq!(
+        undo_messages(&report).1.as_deref(),
+        Some("1 ya no se puede deshacer: a.jpg (ya no está en «b»)")
+    );
+
+    report.lost.clear();
+    report.warnings = vec![(PathBuf::from("a.jpg"), "la copia sigue ahí".into())];
+    assert_eq!(
+        undo_messages(&report).1.as_deref(),
+        Some("Aviso: a.jpg (la copia sigue ahí)")
+    );
+}
+
+/// A move to another disk is undone through the Recycle Bin the worker was given, never the real one.
+#[test]
+fn the_undo_worker_uses_the_recycle_bin_it_is_given() {
+    let m = Moving::new(1);
+    let photo = m.lib.join("file_00.jpg");
+    {
+        let cat = m.catalog();
+        let roots = [LibraryRoot::new(&m.lib).unwrap()];
+        // Leaves the file where it is: only the log needs to say it went to another disk.
+        let retire = |file: &MoveSource| -> std::io::Result<bool> {
+            fs::rename(file.as_path(), file.as_path().with_extension("papelera"))?;
+            Ok(true)
+        };
+        let context = export::MoveContext {
+            catalog: &cat,
+            roots: &roots,
+            retire: &retire,
+            force_cross_volume: true,
+            before_retire: None,
+        };
+        let dest = fsguard::ensure_move_dir(&m.out, &m.data).unwrap();
+        let items = [ExportItem::new(photo.clone())];
+        export::move_with_options(&items, &dest, Default::default(), &context, &mut |_| {
+            export::Control::Continue
+        })
+        .unwrap();
+    }
+    fn declines(_: &MoveSource) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    let roots = vec![LibraryRoot::new(&m.lib).unwrap()];
+    let worker = UndoWorker::start(m.db(), roots, m.data.clone(), declines, None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let report = loop {
+        if let Some(result) = worker.try_recv() {
+            break result.unwrap().unwrap();
+        }
+        assert!(Instant::now() < deadline, "the undo never ended");
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    assert_eq!(report.restored, std::slice::from_ref(&photo));
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(photo.exists() && m.out.join("file_00.jpg").exists());
+}
+
+#[test]
+fn move_mode_turns_off_tag_embedding() {
+    let mut wizard = ExportWizard::from_items(Vec::new(), false, None);
+    wizard.set_embed_jpeg_tags(true);
+    wizard.set_operation(Operation::Move);
+    assert!(!wizard.embed_jpeg_tags());
+    wizard.set_embed_jpeg_tags(true);
+    assert!(!wizard.options().embed_jpeg_tags);
+    assert_eq!(wizard.options().operation, Operation::Move);
+}
+
+#[test]
+fn moving_allows_a_library_but_not_the_app_data_or_the_folder_the_photos_are_in() {
+    let mut m = Moving::new(2);
+    let roots = [LibraryRoot::new(&m.lib).unwrap()];
+    validate_destination(&m.lib.join("ordenadas"), &roots, Operation::Move, &m.data).unwrap();
+    let inside =
+        validate_destination(&m.data.join("x"), &roots, Operation::Move, &m.data).unwrap_err();
+    assert!(inside.contains("datos de photosort"), "{inside}");
+
+    m.wizard.set_dest(m.lib.clone());
+    let error = m
+        .wizard
+        .request_preview(std::slice::from_ref(&m.root), &m.data, None)
+        .unwrap_err();
+    assert_eq!(error, "Las fotos ya están en esa carpeta.");
+    assert_eq!(m.wizard.phase(), &ExportPhase::Choose);
+
+    // Sorting them into subfolders of the folder they are in is a move like any other.
+    m.wizard.set_layout(Layout::ByYear);
+    m.preview();
+}
+
+#[test]
+fn a_move_that_cannot_start_says_why_in_the_window() {
+    let mut m = Moving::new(1);
+    m.preview();
+    m.wizard.request_move_confirmation().unwrap();
+    // By the time «Mover» is pressed, the destination counts as app data.
+    let app_data = m.out.parent().unwrap().to_path_buf();
+    let roots = vec![LibraryRoot::new(&m.lib).unwrap()];
+
+    let error = m
+        .wizard
+        .start_export(None, m.db(), roots, app_data)
+        .unwrap_err();
+
+    assert_eq!(m.wizard.start_error(), Some(error.as_str()));
+    assert!(matches!(m.wizard.phase(), ExportPhase::ConfirmMove(_)));
+    m.wizard.back_to_preview();
+    assert_eq!(m.wizard.start_error(), None);
+}
+
+#[test]
+fn a_move_thread_that_dies_ends_in_an_error_and_lets_go() {
+    let mut m = Moving::new(2);
+    m.preview();
+    m.wizard.request_move_confirmation().unwrap();
+    let roots = vec![LibraryRoot::new(&m.lib).unwrap()];
+    let (db, data) = (m.db(), m.data.clone());
+    let crash: Notify = Arc::new(|| panic!("simulated crash of the move thread"));
+
+    m.wizard.start_export(Some(crash), db, roots, data).unwrap();
+    wait_until(&mut m.wizard, |p| matches!(p, ExportPhase::Error(_)));
+
+    assert!(!m.wizard.is_running() && !m.wizard.is_moving());
+    assert!(m.wizard.take_finished_move(), "the gallery is read again");
+    assert!(m.catalog().lock_moves().is_ok());
+}
+
+/// Escape on every frame closes the window in the very frame the move is found to be over.
+#[test]
+fn closing_the_window_as_a_move_ends_still_reports_it() {
+    let mut m = Moving::new(2);
+    m.preview();
+    m.wizard.request_move_confirmation().unwrap();
+    let deleted = m.lib.join("file_00.jpg");
+    fs::remove_file(&deleted).unwrap();
+    m.start().unwrap();
+
+    let ctx = egui::Context::default();
+    let mut slot = Some(std::mem::replace(
+        &mut m.wizard,
+        ExportWizard::from_items(Vec::new(), false, None),
+    ));
+    let (mut settings, mut banner) = (Settings::default(), None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the window never closed");
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = egui::RawInput {
+            events: vec![escape],
+            ..Default::default()
+        };
+        let mut outcome = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            outcome = Some(draw_window(
+                &ctx,
+                &DARK_PALETTE,
+                &mut slot,
+                &m.data,
+                &mut settings,
+                &mut banner,
+            ));
+        });
+        out.textures_delta.clear();
+        if slot.is_none() {
+            let outcome = outcome.unwrap();
+            assert!(outcome.finished_move);
+            assert_eq!(outcome.gone, [deleted]);
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A similarity view keeps its order after a reload, with each photo where it is now.
+#[test]
+fn shown_photos_follow_a_move_and_the_gone_ones_leave() {
+    let entry = |asset: i64, path: &str| Entry {
+        asset: catalog::AssetId(asset),
+        path: PathBuf::from(path),
+        sha256: asset.to_string(),
+        size: 1,
+        modified_ns: None,
+        width: None,
+        height: None,
+        format: None,
+        captured_at_ns: None,
+        media_type: catalog::MediaType::Image,
+        duration_ms: None,
+    };
+    // By similarity: 3, the two identical copies of 1, and 2.
+    let shown = [
+        entry(3, "c.jpg"),
+        entry(1, "a.jpg"),
+        entry(1, "copia.jpg"),
+        entry(2, "b.jpg"),
+    ];
+    // 3 left the libraries, one copy of 1 moved and 2 stayed.
+    let current = [
+        entry(1, "copia.jpg"),
+        entry(2, "b.jpg"),
+        entry(1, "ordenadas/a.jpg"),
+    ];
+
+    assert_eq!(
+        relocate_entries(&shown, &current),
+        [
+            entry(1, "ordenadas/a.jpg"),
+            entry(1, "copia.jpg"),
+            entry(2, "b.jpg"),
+        ]
+    );
+}
+
+#[test]
+fn cancelling_a_move_keeps_what_was_moved_undoable_and_leaves_the_rest() {
+    let mut m = Moving::new(40);
+    m.preview();
+    m.wizard.request_move_confirmation().unwrap();
+    // The moving thread waits after the first file until the cancel is in, so nothing is left to
+    // chance.
+    let (moved_one, first_moved) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel::<()>();
+    let resumed = Mutex::new(resumed);
+    let hold: Notify = Arc::new(move || {
+        let _ = moved_one.send(());
+        let _ = resumed.lock().unwrap().recv();
+    });
+    m.start_notifying(Some(hold)).unwrap();
+    first_moved
+        .recv_timeout(Duration::from_secs(10))
+        .expect("first progress");
+    m.wizard.cancel_export();
+    drop(resume);
+    wait_until(&mut m.wizard, |p| matches!(p, ExportPhase::Done(_)));
+    let ExportPhase::Done(summary) = m.wizard.phase().clone() else {
+        panic!("expected Done");
+    };
+
+    assert!(summary.stopped);
+    assert_eq!(summary.moved, 1);
+    assert_eq!(Moving::photos_in(&m.out), summary.moved);
+    assert_eq!(Moving::photos_in(&m.lib), 40 - summary.moved);
+    let cat = m.catalog();
+    let batch = cat.last_undoable_batch().unwrap().unwrap();
+    assert_eq!(batch.len(), summary.moved);
+
+    let roots = [LibraryRoot::new(&m.lib).unwrap()];
+    let context = export::MoveContext {
+        catalog: &cat,
+        roots: &roots,
+        retire: &no_recycle_bin,
+        force_cross_volume: false,
+        before_retire: None,
+    };
+    export::undo_last_move(&context, &m.data).unwrap().unwrap();
+    assert_eq!(Moving::photos_in(&m.lib), 40);
 }
 
 fn wait_until(wizard: &mut ExportWizard, pred: impl Fn(&ExportPhase) -> bool) {
@@ -114,6 +559,10 @@ fn validate_destination_refuses_library_overlap_with_spanish_messages() {
     fs::create_dir_all(&lib).unwrap();
     let root = LibraryRoot::new(&lib).unwrap();
     let roots = [root];
+    let data = tmp.path().join("data");
+    let validate_destination = |path: &Path, roots: &[LibraryRoot]| {
+        validate_destination(path, roots, Operation::Copy, &data)
+    };
 
     // Empty path
     let empty_err = validate_destination(Path::new(""), &roots).unwrap_err();
@@ -157,7 +606,8 @@ fn remember_export_dir_persists_last_export_dir_via_settings_api() {
 
     let mut cfg = Settings::default();
     cfg.add_library_root(&lib, &data).unwrap();
-    let dest = validate_destination(&export_dir, &cfg.valid_roots()).unwrap();
+    let dest =
+        validate_destination(&export_dir, &cfg.valid_roots(), Operation::Copy, &data).unwrap();
 
     remember_export_dir(&data, &mut cfg, &dest).unwrap();
     assert_eq!(cfg.last_export_dir.as_deref(), Some(dest.as_path()));
@@ -201,13 +651,13 @@ fn wizard_state_machine_transitions_choose_preview_running_done() {
     assert!(!wizard.from_selection());
     assert_eq!(wizard.dest_input(), export_dir.as_path());
     assert!(!wizard.can_start_export());
-    assert!(wizard.start_export(None).is_err());
+    assert!(start(&mut wizard).is_err());
     assert!(!export_dir.exists());
 
     // Pick ByCategory and request off-thread preview.
     wizard.set_layout(Layout::ByCategory);
     wizard
-        .request_preview(std::slice::from_ref(&root), None)
+        .request_preview(std::slice::from_ref(&root), &app_data(), None)
         .unwrap();
     assert!(matches!(
         wizard.phase(),
@@ -228,7 +678,7 @@ fn wizard_state_machine_transitions_choose_preview_running_done() {
     }
 
     // Explicit click on Exportar starts background export.
-    wizard.start_export(None).unwrap();
+    start(&mut wizard).unwrap();
     assert!(matches!(
         wizard.phase(),
         ExportPhase::Running { total: 2, .. }
@@ -300,7 +750,7 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
     assert!(wizard.from_selection());
 
     let err = wizard
-        .request_preview(std::slice::from_ref(&root), None)
+        .request_preview(std::slice::from_ref(&root), &app_data(), None)
         .unwrap_err();
     assert!(err.to_lowercase().contains("biblioteca"));
     assert_eq!(wizard.phase(), &ExportPhase::Choose);
@@ -310,7 +760,7 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
     wizard.set_dest(tmp.path().join("dest_ok"));
     assert!(wizard.validation_error().is_none());
     wizard
-        .request_preview(std::slice::from_ref(&root), None)
+        .request_preview(std::slice::from_ref(&root), &app_data(), None)
         .unwrap();
     wait_until(&mut wizard, |p| {
         matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
@@ -321,7 +771,7 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
     assert!(!wizard.can_start_export());
 
     wizard
-        .request_preview(std::slice::from_ref(&root), None)
+        .request_preview(std::slice::from_ref(&root), &app_data(), None)
         .unwrap();
     wait_until(&mut wizard, |p| {
         matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
@@ -330,7 +780,7 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
     assert_eq!(wizard.phase(), &ExportPhase::Choose);
 
     wizard
-        .request_preview(std::slice::from_ref(&root), None)
+        .request_preview(std::slice::from_ref(&root), &app_data(), None)
         .unwrap();
     wait_until(&mut wizard, |p| {
         matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
@@ -339,7 +789,7 @@ fn wizard_rejects_invalid_destination_and_invalidates_preview_on_changes() {
     assert_eq!(wizard.phase(), &ExportPhase::Choose);
 
     wizard
-        .request_preview(std::slice::from_ref(&root), None)
+        .request_preview(std::slice::from_ref(&root), &app_data(), None)
         .unwrap();
     wait_until(&mut wizard, |p| {
         matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
@@ -367,13 +817,13 @@ fn wizard_cancel_stops_background_export_and_writes_manifest() {
 
     let mut wizard = ExportWizard::from_items(items, false, Some(dest));
     wizard
-        .request_preview(std::slice::from_ref(&root), None)
+        .request_preview(std::slice::from_ref(&root), &app_data(), None)
         .unwrap();
     wait_until(&mut wizard, |p| {
         matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
     });
 
-    wizard.start_export(None).unwrap();
+    start(&mut wizard).unwrap();
     wizard.cancel_export();
     assert!(wizard.is_cancel_requested());
 

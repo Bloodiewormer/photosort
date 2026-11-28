@@ -12,6 +12,9 @@ use eframe::egui::{
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+/// Why «Copiar o mover…» is off for a moment.
+pub const UNDOING_EXPORT: &str = "Podrás copiar o mover cuando termine de deshacerse el movimiento";
+
 pub const SUGGESTIONS_BADGE_TOOLTIP: &str = "Tiene sugerencias pendientes";
 
 pub struct SimilarityView {
@@ -28,10 +31,22 @@ pub struct GalleryOutcome {
     pub open_viewer: bool,
     pub review_selected: bool,
     pub open_export: bool,
+    pub reload: bool,
+    pub undo_move: bool,
     pub open_photo_menu: Option<(usize, Pos2)>,
     pub thumbs_ready: bool,
     pub last_columns: usize,
     pub primary_cell_pos: Option<Pos2>,
+}
+
+/// What «Recargar» and «Deshacer último movimiento» can do right now.
+#[derive(Debug, Clone, Copy)]
+pub struct FolderActions {
+    /// The folders are being listed.
+    pub reloading: bool,
+    pub can_undo: bool,
+    /// An undo is moving files: copying or moving waits for it.
+    pub undoing: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -50,6 +65,7 @@ pub fn draw(
     thumb_pool: &ThumbPool,
     thumb_textures: &HashMap<String, TextureHandle>,
     thumb_failed: &HashSet<String>,
+    folder_actions: FolderActions,
 ) -> GalleryOutcome {
     let mut outcome = GalleryOutcome {
         last_columns: 1,
@@ -178,6 +194,30 @@ pub fn draw(
                     });
                 }
             });
+            ui.add_space(theme::SPACE_XS);
+            ui.horizontal_wrapped(|ui| {
+                let reload = if folder_actions.reloading {
+                    "Recargando…"
+                } else {
+                    "Recargar"
+                };
+                if ui
+                    .add_enabled(!folder_actions.reloading, egui::Button::new(reload))
+                    .on_hover_text("Vuelve a revisar las carpetas y quita lo que ya no está")
+                    .clicked()
+                {
+                    outcome.reload = true;
+                }
+                if ui
+                    .add_enabled(
+                        folder_actions.can_undo,
+                        egui::Button::new("Deshacer último movimiento"),
+                    )
+                    .clicked()
+                {
+                    outcome.undo_move = true;
+                }
+            });
             ui.add_space(theme::SPACE_SM);
 
             // Contextual selection bar (appears ONLY while something is selected)
@@ -215,8 +255,19 @@ pub fn draw(
                             {
                                 outcome.review_selected = true;
                             }
-                            if ui.button("Exportar…").clicked() {
+                            let export = ui.add_enabled(
+                                !folder_actions.undoing,
+                                egui::Button::new("Copiar o mover…"),
+                            );
+                            if export.on_disabled_hover_text(UNDOING_EXPORT).clicked() {
                                 outcome.open_export = true;
+                            }
+                            if folder_actions.undoing {
+                                ui.label(
+                                    RichText::new(UNDOING_EXPORT)
+                                        .size(theme::FONT_SMALL)
+                                        .color(palette.text_secondary.color32()),
+                                );
                             }
                             if ui.button("Quitar selección").clicked() {
                                 selection.clear();
@@ -761,7 +812,7 @@ mod tests {
                 }
                 ui.horizontal_wrapped(|ui| {
                     buttons.push(ui.label(selected_phrase(2)).rect);
-                    for text in ["Volver a revisar", "Exportar…", "Quitar selección"] {
+                    for text in ["Volver a revisar", "Copiar o mover…", "Quitar selección"] {
                         buttons.push(ui.button(text).rect);
                     }
                     hint = draw_menu_hint(ui, &theme::LIGHT_PALETTE).map(|r| r.rect);
@@ -775,7 +826,7 @@ mod tests {
     #[test]
     fn menu_hint_never_overlaps_the_selection_buttons() {
         for text_size in [theme::FONT_BODY, 20.0, 28.0] {
-            for width in [220.0, 300.0, 432.0, 520.0, 700.0, 1000.0] {
+            for width in [220.0, 300.0, 432.0, 460.0, 520.0, 700.0, 1000.0] {
                 let (buttons, hint) = bar(width, text_size);
                 if let Some(hint) = hint {
                     assert!(
@@ -794,8 +845,8 @@ mod tests {
             "a 1000 px debe caber"
         );
         assert!(
-            bar(432.0, theme::FONT_BODY).1.is_none(),
-            "a 432 px no cabe junto a los botones"
+            bar(520.0, theme::FONT_BODY).1.is_none(),
+            "a 520 px no cabe junto a los botones"
         );
     }
 }

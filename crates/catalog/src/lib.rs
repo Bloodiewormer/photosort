@@ -2,6 +2,7 @@ mod analysis;
 mod browse;
 mod dupes;
 mod labels;
+mod moves;
 mod ocr;
 mod persons;
 mod vision;
@@ -19,6 +20,7 @@ pub use labels::{
     AssetId, Assignment, Filter, LabelId, LabelKind, LabelNode, Orientation, RenameOutcome,
     ReviewItem, ReviewedFilter, Source, StageSpec, Status,
 };
+pub use moves::{MoveLock, MoveMethod, MoveRow, MoveState, NewMove};
 pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
     ocr_search_key,
@@ -265,6 +267,26 @@ CREATE INDEX IF NOT EXISTS asset_cover_asset ON asset_cover(asset_id);
 CREATE INDEX IF NOT EXISTS asset_cover_work ON asset_cover(work_id);
 ";
 
+/// Apart from [`SCHEMA`] because an older log is rebuilt with it.
+const MOVE_LOG: &str = "
+CREATE TABLE IF NOT EXISTS move_log (
+    id       INTEGER PRIMARY KEY,
+    batch    INTEGER NOT NULL,
+    src_path TEXT NOT NULL,
+    src_root TEXT NOT NULL,
+    dst_path TEXT NOT NULL,
+    -- The library that holds the destination, if any.
+    dst_root TEXT,
+    sha256   TEXT NOT NULL,
+    size     INTEGER NOT NULL,
+    mtime_ns INTEGER,
+    method   TEXT NOT NULL CHECK (method IN ('rename', 'copy_recycle')),
+    state    TEXT NOT NULL CHECK (state IN ('pending', 'done', 'kept_original', 'undone', 'lost')),
+    at_ns    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS move_log_state_batch ON move_log(state, batch);
+";
+
 #[derive(Debug)]
 pub enum CatalogError {
     Db(rusqlite::Error),
@@ -338,6 +360,7 @@ pub fn file_is_gone(path: &Path) -> bool {
 }
 
 /// The catalog never touches the library: it reads files and writes only to its own database.
+/// Moving originals is the export crate's job; here it is only logged.
 pub struct Catalog {
     conn: Connection,
 }
@@ -349,15 +372,18 @@ impl Catalog {
         // wait briefly when another connection (e.g. the indexing thread) is committing in WAL mode
         conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(MOVE_LOG)?;
         let mut cat = Self { conn };
         cat.migrate_label_parent()?;
         cat.migrate_asset_metadata()?;
         cat.migrate_proposed_work_group()?;
         cat.migrate_asset_cover()?;
         cat.migrate_faces_and_people()?;
+        cat.migrate_move_log()?;
         cat.seed_builtin_vision_rules()?;
         cat.calibrate_builtin_vision_rules()?;
         cat.recalibrate_builtin_vision_rules()?;
+        cat.resolve_pending_moves()?;
         Ok(cat)
     }
 
@@ -456,6 +482,43 @@ impl Catalog {
             if !now_existing.contains(col) {
                 tx.execute(&format!("ALTER TABLE asset ADD COLUMN {col} {ty}"), [])?;
             }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Brings an older move log up to date, keeping its rows: adds `dst_root`, and rebuilds the
+    /// table to accept the `lost` state, because SQLite cannot widen a CHECK.
+    fn migrate_move_log(&mut self) -> Result<(), CatalogError> {
+        let sql = |conn: &Connection| {
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'move_log'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        };
+        let current = |text: &str| text.contains("dst_root") && text.contains("'lost'");
+        if current(&sql(&self.conn)?) {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !sql(&tx)?.contains("dst_root") {
+            tx.execute_batch("ALTER TABLE move_log ADD COLUMN dst_root TEXT;")?;
+        }
+        if !current(&sql(&tx)?) {
+            const COLUMNS: &str = "id, batch, src_path, src_root, dst_path, dst_root, sha256, size,
+                                   mtime_ns, method, state, at_ns";
+            tx.execute_batch(
+                "ALTER TABLE move_log RENAME TO move_log_old;
+                 DROP INDEX IF EXISTS move_log_state_batch;",
+            )?;
+            tx.execute_batch(MOVE_LOG)?;
+            tx.execute_batch(&format!(
+                "INSERT INTO move_log ({COLUMNS}) SELECT {COLUMNS} FROM move_log_old;
+                 DROP TABLE move_log_old;"
+            ))?;
         }
         tx.commit()?;
         Ok(())

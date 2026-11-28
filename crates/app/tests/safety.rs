@@ -511,3 +511,153 @@ fn review_engine_and_folder_removal_leave_originals_untouched() {
 
     assert_eq!(before, snapshot(&library));
 }
+
+/// A synthetic library with two photos that share a name, indexed.
+struct TwoDisks {
+    _tmp: tempfile::TempDir,
+    library: PathBuf,
+    out: PathBuf,
+    bin: PathBuf,
+    data: PathBuf,
+    root: LibraryRoot,
+}
+
+impl TwoDisks {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
+        let library = base.join("library");
+        write_png(&library.join("a.png"), [255, 0, 0, 255]);
+        write_png(&library.join("sub").join("a.png"), [0, 255, 0, 255]);
+        write_png(&library.join("sub").join("b.png"), [0, 0, 255, 255]);
+        write_png(&library.join("sub").join("c.png"), [9, 9, 9, 255]);
+        let (out, bin, data) = (base.join("out"), base.join("papelera"), base.join("data"));
+        for dir in [&out, &bin, &data] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let root = LibraryRoot::new(&library).unwrap();
+        let this = Self {
+            _tmp: tmp,
+            library,
+            out,
+            bin,
+            data,
+            root,
+        };
+        this.catalog().index(&this.root).unwrap();
+        this
+    }
+
+    fn catalog(&self) -> Catalog {
+        let db = ensure_writable(
+            &self.data.join("catalog.sqlite"),
+            std::slice::from_ref(&self.root),
+        )
+        .unwrap();
+        Catalog::open(&db).unwrap()
+    }
+
+    fn items(&self) -> Vec<export::ExportItem> {
+        let entries = self
+            .catalog()
+            .entries(&Default::default(), catalog::Sort::PathAsc)
+            .unwrap();
+        entries
+            .into_iter()
+            .map(|e| export::ExportItem::new(e.path))
+            .collect()
+    }
+}
+
+/// The SHA-256 of every photo below `dirs` (manifests left out), sorted.
+fn photo_hashes(dirs: &[&Path]) -> Vec<String> {
+    let mut hashes: Vec<String> = dirs
+        .iter()
+        .flat_map(WalkDir::new)
+        .map(|e| e.unwrap())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
+        .map(|e| scanner::sha256_file(e.path()).unwrap())
+        .collect();
+    hashes.sort();
+    hashes
+}
+
+#[test]
+fn copy_mode_still_leaves_the_originals_untouched() {
+    use app::export_flow::{ExportPhase, ExportWizard, PreviewState};
+
+    let t = TwoDisks::new();
+    snapshot(&t.library);
+    let before = snapshot(&t.library);
+
+    let mut wizard = ExportWizard::from_items(t.items(), false, Some(t.out.clone()));
+    wizard
+        .request_preview(std::slice::from_ref(&t.root), &t.data, None)
+        .unwrap();
+    let wait = |wizard: &mut ExportWizard, done: fn(&ExportPhase) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !done(wizard.phase()) {
+            assert!(std::time::Instant::now() < deadline, "{:?}", wizard.phase());
+            wizard.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    wait(&mut wizard, |p| {
+        matches!(p, ExportPhase::Preview(PreviewState::Ready(_)))
+    });
+    let db = ensure_writable(&t.data.join("catalog.sqlite"), &[]).unwrap();
+    wizard
+        .start_export(None, db, Vec::new(), t.data.clone())
+        .unwrap();
+    wait(&mut wizard, |p| matches!(p, ExportPhase::Done(_)));
+
+    assert_eq!(before, snapshot(&t.library));
+    assert_eq!(photo_hashes(&[&t.out]), photo_hashes(&[&t.library]));
+}
+
+#[test]
+fn move_mode_only_moves_and_never_deletes() {
+    let t = TwoDisks::new();
+    let originals = photo_hashes(&[&t.library]);
+    assert_eq!(originals.len(), 4);
+    let items = t.items();
+    let cat = t.catalog();
+    let roots = [LibraryRoot::new(&t.library).unwrap()];
+    // The stand-in Recycle Bin: nothing here reaches the real one.
+    let to_bin = |file: &fsguard::MoveSource| {
+        let n = fs::read_dir(&t.bin)?.count();
+        fs::rename(file.as_path(), t.bin.join(format!("{n}.png")))?;
+        Ok(true)
+    };
+    let dest = fsguard::ensure_move_dir(&t.out, &t.data).unwrap();
+
+    // Half of them on the same disk, half as if the destination were another one.
+    for (half, force_cross_volume) in [(&items[..2], false), (&items[2..], true)] {
+        let context = export::MoveContext {
+            catalog: &cat,
+            roots: &roots,
+            retire: &to_bin,
+            force_cross_volume,
+            before_retire: None,
+        };
+        let report =
+            export::move_with_options(half, &dest, Default::default(), &context, &mut |_| {
+                export::Control::Continue
+            })
+            .unwrap();
+        assert!(
+            report
+                .outcomes
+                .iter()
+                .all(|(_, o)| matches!(o, export::Outcome::Moved(_))),
+            "{:?}",
+            report.outcomes
+        );
+    }
+
+    // Outside the bin there is exactly one of each; the bin only holds retired originals.
+    assert_eq!(photo_hashes(&[&t.library, &t.out]), originals);
+    let recycled = photo_hashes(&[&t.bin]);
+    assert_eq!(recycled.len(), 2);
+    assert!(recycled.iter().all(|h| originals.contains(h)));
+}

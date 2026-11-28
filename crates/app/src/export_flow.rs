@@ -1,12 +1,15 @@
-use crate::model::Selection;
+use crate::model::{Selection, count_phrase, plural_word};
 use crate::settings::{self, Settings, SettingsError};
 use crate::worker::Notify;
 use catalog::{AssetId, Assignment, Catalog, CatalogError, Entry};
 use export::{
-    Control, ExportItem, ExportOptions, ExportProgress, ExportReport, Layout, Outcome, Preview,
-    export_with_options, preview_with_options,
+    Control, ExportItem, ExportOptions, ExportProgress, ExportReport, Layout, MoveContext,
+    Operation, Outcome, Preview, UndoReport, export_with_options, move_with_options,
+    preview_with_options, undo_last_move,
 };
-use fsguard::{DestPath, GuardError, LibraryRoot, ensure_export_dir, io_reason};
+use fsguard::{
+    DestPath, GuardError, LibraryRoot, MoveSource, ensure_export_dir, ensure_move_dir, io_reason,
+};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -103,16 +106,25 @@ pub fn build_export_items(
     Ok(items)
 }
 
-/// Validates a destination folder with `fsguard::ensure_export_dir`, returning clear Spanish errors
-/// when the path is empty, invalid, inside a library, or contains a library.
-pub fn validate_destination(path: &Path, roots: &[LibraryRoot]) -> Result<DestPath, String> {
+/// Validates a destination folder, returning clear Spanish errors. Copies must go outside every
+/// library, with `fsguard::ensure_export_dir`; moves may sort inside them, but never into `app_data`.
+pub fn validate_destination(
+    path: &Path,
+    roots: &[LibraryRoot],
+    operation: Operation,
+    app_data: &Path,
+) -> Result<DestPath, String> {
     if path.as_os_str().is_empty() {
-        return Err("Elige una carpeta de destino para exportar.".into());
+        return Err("Elige una carpeta de destino.".into());
     }
-    match ensure_export_dir(path, roots) {
+    let checked = match operation {
+        Operation::Copy => ensure_export_dir(path, roots),
+        Operation::Move => ensure_move_dir(path, app_data),
+    };
+    match checked {
         Ok(dest) => Ok(dest),
         Err(GuardError::InsideLibrary { root, .. }) => Err(format!(
-            "No se puede exportar dentro de una biblioteca ({}). Elige una carpeta fuera de todas las bibliotecas.",
+            "No se puede copiar dentro de una biblioteca ({}). Elige una carpeta fuera de todas las bibliotecas.",
             root.display()
         )),
         Err(GuardError::ContainsLibrary { root, .. }) => Err(format!(
@@ -124,6 +136,37 @@ pub fn validate_destination(path: &Path, roots: &[LibraryRoot]) -> Result<DestPa
         }
         Err(e) => Err(format!("No se pudo validar la carpeta de destino: {e}")),
     }
+}
+
+/// What the second confirmation of a move says: `photos` leave their folders, and `recycled` of
+/// them go to another disk.
+pub fn move_confirmation_text(photos: usize, recycled: usize) -> String {
+    let bin = if recycled == 0 {
+        String::new()
+    } else {
+        format!(
+            " {recycled} {} a la Papelera después de copiarse y verificarse; si Windows fuera a \
+             borrar alguna para siempre, te preguntará antes. Las de memorias USB o de red \
+             conservan el original.",
+            plural_word(recycled, "irá", "irán"),
+        )
+    };
+    format!(
+        "{} {} fuera de {}.{bin} Puedes deshacerlo.",
+        plural_word(photos, "Se moverá", "Se moverán"),
+        count_phrase(photos, "foto", "fotos"),
+        plural_word(photos, "su carpeta", "sus carpetas"),
+    )
+}
+
+/// True when every photo is directly in `dir` already.
+fn all_in(items: &[ExportItem], dir: &Path) -> bool {
+    let dir = dir.to_string_lossy().to_lowercase();
+    items.iter().all(|item| {
+        item.source
+            .parent()
+            .is_some_and(|p| p.to_string_lossy().to_lowercase() == dir)
+    })
 }
 
 /// Remembers `last_export_dir` using the existing settings persistence API.
@@ -165,8 +208,12 @@ pub enum PreviewState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportSummary {
+    pub operation: Operation,
     pub dest: PathBuf,
     pub copied: usize,
+    pub moved: usize,
+    /// Copied by a move that left the original where it was, with the reason.
+    pub kept_original: Vec<(PathBuf, String)>,
     pub already_present: usize,
     /// Not exported because the guard refused to follow a link in the destination.
     pub blocked: Vec<(PathBuf, String)>,
@@ -181,6 +228,8 @@ pub struct ExportSummary {
 impl ExportSummary {
     pub fn from_report(dest: PathBuf, report: ExportReport) -> Self {
         let mut copied = 0usize;
+        let mut moved = 0usize;
+        let mut kept_original = Vec::new();
         let mut already_present = 0usize;
         let mut blocked = Vec::new();
         let mut failed = Vec::new();
@@ -190,11 +239,17 @@ impl ExportSummary {
                 Outcome::AlreadyPresent(_) => already_present += 1,
                 Outcome::Blocked(reason) => blocked.push((src, reason)),
                 Outcome::Failed(reason) => failed.push((src, reason)),
+                Outcome::Moved(_) => moved += 1,
+                Outcome::KeptOriginal { reason, .. } => kept_original.push((src, reason)),
             }
         }
         Self {
+            // A report does not say which it was: the wizard sets it after a move.
+            operation: Operation::Copy,
             dest,
             copied,
+            moved,
+            kept_original,
             already_present,
             blocked,
             failed,
@@ -224,7 +279,12 @@ fn file_name_or_full(path: &Path) -> String {
 pub enum ExportPhase {
     Choose,
     Preview(PreviewState),
-    Running { done: usize, total: usize },
+    /// The second confirmation a move asks for, with the preview it is about.
+    ConfirmMove(Preview),
+    Running {
+        done: usize,
+        total: usize,
+    },
     Done(ExportSummary),
     Error(String),
 }
@@ -245,6 +305,20 @@ enum ExportWorkerEvent {
     Failed(String),
 }
 
+/// `fsguard::recycle` outside tests.
+pub type Retire = fn(&MoveSource) -> io::Result<bool>;
+
+/// What the background thread does with the items.
+enum Job {
+    Copy,
+    /// Moving needs its own connection to the catalog and the libraries.
+    Move {
+        db: DestPath,
+        roots: Vec<LibraryRoot>,
+        retire: Retire,
+    },
+}
+
 struct ExportWorker {
     cancel: Arc<AtomicBool>,
     rx: mpsc::Receiver<ExportWorkerEvent>,
@@ -256,13 +330,14 @@ impl ExportWorker {
         items: Vec<ExportItem>,
         dest: DestPath,
         options: ExportOptions,
+        job: Job,
         notify: Option<Notify>,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_bg = Arc::clone(&cancel);
         let (tx, rx) = mpsc::channel();
         let join = thread::spawn(move || {
-            let res = export_with_options(&items, &dest, options, &mut |p| {
+            let mut progress = |p: &ExportProgress| {
                 let _ = tx.send(ExportWorkerEvent::Progress(*p));
                 if let Some(cb) = &notify {
                     cb();
@@ -272,7 +347,22 @@ impl ExportWorker {
                 } else {
                     Control::Continue
                 }
-            });
+            };
+            let res = match job {
+                Job::Copy => export_with_options(&items, &dest, options, &mut progress),
+                Job::Move { db, roots, retire } => Catalog::open(&db)
+                    .map_err(|e| io::Error::other(e.to_string()))
+                    .and_then(|catalog| {
+                        let context = MoveContext {
+                            catalog: &catalog,
+                            roots: &roots,
+                            retire: &retire,
+                            force_cross_volume: false,
+                            before_retire: None,
+                        };
+                        move_with_options(&items, &dest, options, &context, &mut progress)
+                    }),
+            };
             match res {
                 Ok(report) => {
                     let failed = report
@@ -301,8 +391,15 @@ impl ExportWorker {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// The next event. A thread that ended without saying how, as after a panic, has failed.
     fn try_recv(&self) -> Option<ExportWorkerEvent> {
-        self.rx.try_recv().ok()
+        match self.rx.try_recv() {
+            Ok(event) => Some(event),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(ExportWorkerEvent::Failed(
+                "se detuvo inesperadamente".into(),
+            )),
+        }
     }
 }
 
@@ -315,12 +412,118 @@ impl Drop for ExportWorker {
     }
 }
 
-/// State machine for the export wizard: `Choose -> Preview -> Running -> Done / Error`.
-/// Computing previews and copying files both happen on background threads; nothing is copied
-/// until [`Self::start_export`] is called explicitly from a ready preview that fits on disk.
+/// Brings the last move back on a background thread. Dropping it waits for it to finish.
+pub struct UndoWorker {
+    rx: mpsc::Receiver<Result<Option<UndoReport>, String>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl UndoWorker {
+    pub fn start(
+        db: DestPath,
+        roots: Vec<LibraryRoot>,
+        app_data: PathBuf,
+        retire: Retire,
+        notify: Option<Notify>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let result = Catalog::open(&db)
+                .map_err(|e| e.to_string())
+                .and_then(|catalog| {
+                    let context = MoveContext {
+                        catalog: &catalog,
+                        roots: &roots,
+                        retire: &retire,
+                        force_cross_volume: false,
+                        before_retire: None,
+                    };
+                    undo_last_move(&context, &app_data).map_err(|e| io_reason(&e))
+                });
+            let _ = tx.send(result);
+            if let Some(cb) = &notify {
+                cb();
+            }
+        });
+        Self {
+            rx,
+            join: Some(join),
+        }
+    }
+
+    /// The result, once the undo is over.
+    pub fn try_recv(&self) -> Option<Result<Option<UndoReport>, String>> {
+        match self.rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err("se detuvo inesperadamente".into())),
+        }
+    }
+}
+
+impl Drop for UndoWorker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// What to tell after an undo: how many came back and, apart, anything that needs attention.
+pub fn undo_messages(report: &UndoReport) -> (String, Option<String>) {
+    const SHOWN: usize = 3;
+    let n = report.restored.len();
+    let done = format!(
+        "{} {}",
+        plural_word(n, "Se restauró", "Se restauraron"),
+        count_phrase(n, "foto", "fotos")
+    );
+    let list = |files: &[(PathBuf, String)]| {
+        let mut text = files
+            .iter()
+            .take(SHOWN)
+            .map(|(path, why)| format!("{} ({why})", file_name_or_full(path)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if files.len() > SHOWN {
+            text.push_str(&format!(" y {} más", files.len() - SHOWN));
+        }
+        text
+    };
+    let mut problems = Vec::new();
+    if !report.skipped.is_empty() {
+        let k = report.skipped.len();
+        problems.push(format!(
+            "{k} no se {} restaurar: {}",
+            plural_word(k, "pudo", "pudieron"),
+            list(&report.skipped)
+        ));
+    }
+    if !report.lost.is_empty() {
+        let k = report.lost.len();
+        problems.push(format!(
+            "{k} ya no se {} deshacer: {}",
+            plural_word(k, "puede", "pueden"),
+            list(&report.lost)
+        ));
+    }
+    if !report.warnings.is_empty() {
+        problems.push(format!("Aviso: {}", list(&report.warnings)));
+    }
+    (done, (!problems.is_empty()).then(|| problems.join(". ")))
+}
+
+/// State machine for the «Copiar o mover» wizard: `Choose -> Preview -> Running -> Done / Error`,
+/// with `ConfirmMove` before `Running` when moving. Computing previews, copying and moving happen on
+/// background threads; nothing is touched until [`Self::start_export`] is called explicitly from a
+/// preview that fits on disk and, to move, after that second confirmation.
 pub struct ExportWizard {
     items: Vec<ExportItem>,
     from_selection: bool,
+    operation: Operation,
+    retire: Retire,
+    /// A move ran and the application has not reloaded the gallery yet.
+    finished_move: bool,
     dest_input: PathBuf,
     validated_dest: Option<DestPath>,
     layout: Layout,
@@ -328,6 +531,8 @@ pub struct ExportWizard {
     embed_jpeg_tags: bool,
     phase: ExportPhase,
     validation_error: Option<String>,
+    /// Why the confirmed copy or move did not start.
+    start_error: Option<String>,
     cancel_requested: bool,
     preview_gen: u64,
     preview_rx: Option<mpsc::Receiver<PreviewMessage>>,
@@ -371,6 +576,9 @@ impl ExportWizard {
         Self {
             items,
             from_selection,
+            operation: Operation::Copy,
+            retire: fsguard::recycle,
+            finished_move: false,
             dest_input: last_export_dir.unwrap_or_default(),
             validated_dest: None,
             layout: Layout::Flat,
@@ -378,12 +586,67 @@ impl ExportWizard {
             embed_jpeg_tags: false,
             phase: ExportPhase::Choose,
             validation_error: None,
+            start_error: None,
             cancel_requested: false,
             preview_gen: 0,
             preview_rx: None,
             gone: Vec::new(),
             export_worker: None,
             focus_dest: true,
+        }
+    }
+
+    pub fn operation(&self) -> Operation {
+        self.operation
+    }
+
+    pub fn set_operation(&mut self, operation: Operation) {
+        if self.is_running() || self.operation == operation {
+            return;
+        }
+        self.operation = operation;
+        if operation == Operation::Move {
+            // It would change the bytes of the only copy.
+            self.embed_jpeg_tags = false;
+        }
+        self.validation_error = None;
+        self.invalidate_preview();
+    }
+
+    /// Replaces the Recycle Bin. For tests: they must never reach the real one.
+    pub fn set_retire(&mut self, retire: Retire) {
+        self.retire = retire;
+    }
+
+    /// True once after each move ends, however it ended: the gallery has to be read again.
+    pub fn take_finished_move(&mut self) -> bool {
+        std::mem::take(&mut self.finished_move)
+    }
+
+    pub fn is_moving(&self) -> bool {
+        self.is_running() && self.operation == Operation::Move
+    }
+
+    pub fn can_confirm_move(&self) -> bool {
+        self.operation == Operation::Move
+            && matches!(self.phase, ExportPhase::Preview(PreviewState::Ready(ref p))
+                if p.fits() && p.files > 0)
+    }
+
+    pub fn request_move_confirmation(&mut self) -> Result<(), String> {
+        match &self.phase {
+            ExportPhase::Preview(PreviewState::Ready(p)) if self.can_confirm_move() => {
+                self.phase = ExportPhase::ConfirmMove(p.clone());
+                Ok(())
+            }
+            _ => Err("No hay nada que mover con esta vista previa.".into()),
+        }
+    }
+
+    pub fn back_to_preview(&mut self) {
+        self.start_error = None;
+        if let ExportPhase::ConfirmMove(p) = &self.phase {
+            self.phase = ExportPhase::Preview(PreviewState::Ready(p.clone()));
         }
     }
 
@@ -425,11 +688,21 @@ impl ExportWizard {
             layout: self.layout,
             write_xmp_sidecars: self.write_xmp,
             embed_jpeg_tags: self.embed_jpeg_tags,
+            operation: self.operation,
         }
     }
 
     pub fn validation_error(&self) -> Option<&str> {
         self.validation_error.as_deref()
+    }
+
+    /// Why pressing «Copiar» or «Mover» did nothing; the window shows it.
+    pub fn start_error(&self) -> Option<&str> {
+        self.start_error.as_deref()
+    }
+
+    pub(crate) fn set_start_error(&mut self, error: String) {
+        self.start_error = Some(error);
     }
 
     pub fn is_cancel_requested(&self) -> bool {
@@ -441,9 +714,18 @@ impl ExportWizard {
     }
 
     pub fn can_start_export(&self) -> bool {
-        matches!(self.phase, ExportPhase::Preview(PreviewState::Ready(ref p)) if p.fits())
+        self.confirmed_preview().is_some_and(Preview::fits)
             && self.validated_dest.is_some()
             && !self.items.is_empty()
+    }
+
+    /// The preview the user has said yes to: a ready one to copy, a confirmed one to move.
+    fn confirmed_preview(&self) -> Option<&Preview> {
+        match (&self.phase, self.operation) {
+            (ExportPhase::Preview(PreviewState::Ready(p)), Operation::Copy) => Some(p),
+            (ExportPhase::ConfirmMove(p), Operation::Move) => Some(p),
+            _ => None,
+        }
     }
 
     pub fn set_dest(&mut self, path: PathBuf) {
@@ -472,7 +754,7 @@ impl ExportWizard {
     }
 
     pub fn set_embed_jpeg_tags(&mut self, val: bool) {
-        if self.is_running() || self.embed_jpeg_tags == val {
+        if self.is_running() || self.operation == Operation::Move || self.embed_jpeg_tags == val {
             return;
         }
         self.embed_jpeg_tags = val;
@@ -490,6 +772,7 @@ impl ExportWizard {
         self.preview_gen = self.preview_gen.wrapping_add(1);
         self.preview_rx = None;
         self.validated_dest = None;
+        self.start_error = None;
         if !matches!(self.phase, ExportPhase::Choose) {
             self.phase = ExportPhase::Choose;
         }
@@ -499,17 +782,30 @@ impl ExportWizard {
     pub fn request_preview(
         &mut self,
         roots: &[LibraryRoot],
+        app_data: &Path,
         notify: Option<Notify>,
     ) -> Result<DestPath, String> {
         if self.is_running() {
-            return Err("Ya hay una exportación en curso.".into());
+            return Err("Ya hay una copia o un movimiento en curso.".into());
         }
         if self.items.is_empty() {
-            let msg = "No hay imágenes para exportar.".to_string();
+            let msg = "No hay imágenes seleccionadas.".to_string();
             self.validation_error = Some(msg.clone());
             return Err(msg);
         }
-        let dest = match validate_destination(&self.dest_input, roots) {
+        let checked = validate_destination(&self.dest_input, roots, self.operation, app_data)
+            .and_then(|dest| {
+                // With folders by category or year, moving within that folder still sorts them.
+                if self.operation == Operation::Move
+                    && self.layout == Layout::Flat
+                    && all_in(&self.items, dest.as_path())
+                {
+                    Err("Las fotos ya están en esa carpeta.".to_string())
+                } else {
+                    Ok(dest)
+                }
+            });
+        let dest = match checked {
             Ok(d) => d,
             Err(err) => {
                 self.validation_error = Some(err.clone());
@@ -545,21 +841,51 @@ impl ExportWizard {
         Ok(dest)
     }
 
-    /// Starts the actual copy on a background thread. Only succeeds after a ready preview that fits.
-    pub fn start_export(&mut self, notify: Option<Notify>) -> Result<(), String> {
-        let preview = match &self.phase {
-            ExportPhase::Preview(PreviewState::Ready(p)) => p,
-            _ => return Err("Calcula la vista previa antes de exportar.".into()),
+    /// Starts copying or moving on a background thread. Only succeeds after a ready preview that
+    /// fits and, to move, its second confirmation. `db`, `roots` and `app_data` are for moving.
+    pub fn start_export(
+        &mut self,
+        notify: Option<Notify>,
+        db: DestPath,
+        roots: Vec<LibraryRoot>,
+        app_data: PathBuf,
+    ) -> Result<(), String> {
+        let started = self.try_start(notify, db, roots, app_data);
+        self.start_error = started.as_ref().err().cloned();
+        started
+    }
+
+    fn try_start(
+        &mut self,
+        notify: Option<Notify>,
+        db: DestPath,
+        roots: Vec<LibraryRoot>,
+        app_data: PathBuf,
+    ) -> Result<(), String> {
+        let Some(preview) = self.confirmed_preview() else {
+            return Err("Calcula la vista previa y confírmala antes de empezar.".into());
         };
         if !preview.fits() {
             return Err("No hay espacio libre suficiente en la carpeta de destino.".into());
         }
-        let Some(dest) = self.validated_dest.clone() else {
-            return Err("Valida la carpeta de destino antes de exportar.".into());
+        let Some(mut dest) = self.validated_dest.clone() else {
+            return Err("Valida la carpeta de destino antes de empezar.".into());
         };
         if self.items.is_empty() {
-            return Err("No hay imágenes para exportar.".into());
+            return Err("No hay imágenes seleccionadas.".into());
         }
+        let job = match self.operation {
+            Operation::Copy => Job::Copy,
+            Operation::Move => {
+                // The folder may have become a link since the preview.
+                dest = validate_destination(dest.as_path(), &[], Operation::Move, &app_data)?;
+                Job::Move {
+                    db,
+                    roots,
+                    retire: self.retire,
+                }
+            }
+        };
 
         self.cancel_requested = false;
         let total = self.items.len();
@@ -567,6 +893,7 @@ impl ExportWizard {
             self.items.clone(),
             dest,
             self.options(),
+            job,
             notify,
         ));
         self.phase = ExportPhase::Running { done: 0, total };
@@ -630,18 +957,29 @@ impl ExportWizard {
                             .as_ref()
                             .map(|d| d.as_path().to_path_buf())
                             .unwrap_or_else(|| self.dest_input.clone());
-                        self.phase = ExportPhase::Done(ExportSummary::from_report(dest, report));
+                        let mut summary = ExportSummary::from_report(dest, report);
+                        summary.operation = self.operation;
+                        self.phase = ExportPhase::Done(summary);
                         finish_worker = true;
                     }
                     ExportWorkerEvent::Failed(e) => {
-                        self.phase =
-                            ExportPhase::Error(format!("Error durante la exportación: {e}"));
+                        let what = match self.operation {
+                            Operation::Copy => "la copia",
+                            Operation::Move => "el movimiento",
+                        };
+                        self.phase = ExportPhase::Error(format!("Error durante {what}: {e}"));
                         finish_worker = true;
                     }
+                }
+                // Once it has said how it ended, its closed channel says nothing more.
+                if finish_worker {
+                    break;
                 }
             }
         }
         if finish_worker {
+            // Even a failed move may have moved some files.
+            self.finished_move |= self.operation == Operation::Move;
             self.export_worker = None;
             self.cancel_requested = false;
         }

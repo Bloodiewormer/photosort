@@ -14,6 +14,7 @@ export = { version = "0.1.0", path = "../export" }
 fsguard = { path = "../fsguard" }
 image = "0.25.10"
 ocr = { path = "../ocr" }
+raw-window-handle = "0.6"
 rfd = "0.18.0"
 rules = { path = "../rules" }
 scanner = { path = "../scanner" }

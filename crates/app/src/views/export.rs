@@ -1,21 +1,32 @@
 use crate::export_flow::{
     ALL_LAYOUTS, ExportPhase, ExportSummary, ExportWizard, PreviewState, layout_description,
-    layout_label, open_in_explorer, remember_export_dir,
+    layout_label, move_confirmation_text, open_in_explorer, remember_export_dir,
 };
 use crate::model::{count_phrase, format_bytes, plural_word, truncate_middle};
-use crate::settings::Settings;
+use crate::settings::{self, Settings};
 use crate::theme::{self, Palette};
 use crate::worker::Notify;
 use eframe::egui::{
     self, Align, CornerRadius, Frame, Key, Layout, Margin, RichText, ScrollArea, Stroke,
 };
-use export::Preview;
+use export::{Operation, Preview};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const EXPORT_WINDOW_WIDTH: f32 = 520.0;
 
-/// Draws the export wizard window when open, polling background preview/copy workers each frame.
+/// What the application has to do after a frame of the window, even the one that closed it.
+#[derive(Debug, Default)]
+pub struct WindowOutcome {
+    /// The user asks to undo the move it just made.
+    pub undo_requested: bool,
+    /// A move just ended: the gallery has to be read again.
+    pub finished_move: bool,
+    /// Sources found to be gone, so the catalog can flag them.
+    pub gone: Vec<PathBuf>,
+}
+
+/// Draws the «Copiar o mover» window when open, polling its background workers each frame.
 pub fn draw_window(
     ctx: &egui::Context,
     palette: &Palette,
@@ -23,14 +34,15 @@ pub fn draw_window(
     data_dir: &Path,
     settings: &mut Settings,
     banner_error: &mut Option<String>,
-) {
+) -> WindowOutcome {
     let Some(wizard) = slot.as_mut() else {
-        return;
+        return WindowOutcome::default();
     };
 
     wizard.poll();
 
     let mut close_requested = false;
+    let mut undo_requested = false;
     if !wizard.is_running()
         && !ctx.egui_wants_keyboard_input()
         && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
@@ -39,7 +51,7 @@ pub fn draw_window(
     }
 
     let mut open_flag = true;
-    let mut window = egui::Window::new("Exportar copias")
+    let mut window = egui::Window::new("Copiar o mover")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -73,13 +85,32 @@ pub fn draw_window(
                 draw_preview_computing(ui, palette, wizard, &mut close_requested);
             }
             ExportPhase::Preview(PreviewState::Ready(preview)) => {
-                draw_preview_ready(ui, ctx, palette, wizard, &preview, &mut close_requested);
+                draw_preview_ready(
+                    ui,
+                    ctx,
+                    palette,
+                    wizard,
+                    &preview,
+                    data_dir,
+                    settings,
+                    &mut close_requested,
+                );
+            }
+            ExportPhase::ConfirmMove(preview) => {
+                draw_confirm_move(ui, ctx, palette, wizard, &preview, data_dir, settings);
             }
             ExportPhase::Running { done, total } => {
                 draw_running_step(ui, palette, wizard, done, total);
             }
             ExportPhase::Done(summary) => {
-                draw_done_step(ui, palette, &summary, banner_error, &mut close_requested);
+                draw_done_step(
+                    ui,
+                    palette,
+                    &summary,
+                    banner_error,
+                    &mut close_requested,
+                    &mut undo_requested,
+                );
             }
             ExportPhase::Error(message) => {
                 draw_error_step(ui, palette, wizard, &message, &mut close_requested);
@@ -87,9 +118,16 @@ pub fn draw_window(
         }
     });
 
-    if (!open_flag && !wizard.is_running()) || close_requested {
+    // Taken before the window may close: it can close in the very frame a move ends.
+    let outcome = WindowOutcome {
+        undo_requested,
+        finished_move: wizard.take_finished_move(),
+        gone: wizard.take_gone(),
+    };
+    if (!open_flag && !wizard.is_running()) || close_requested || undo_requested {
         *slot = None;
     }
+    outcome
 }
 
 fn draw_header(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
@@ -99,7 +137,16 @@ fn draw_header(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
         "de los resultados filtrados actuales"
     };
     let count = wizard.item_count();
-    let verb = plural_word(count, "exportará", "exportarán");
+    let (verb, promise) = match wizard.operation() {
+        Operation::Copy => (
+            plural_word(count, "copiará", "copiarán"),
+            "Solo se crean copias verificadas con SHA-256. Los originales no se modifican ni se mueven.",
+        ),
+        Operation::Move => (
+            plural_word(count, "moverá", "moverán"),
+            "Nada se borra, se sobrescribe ni se vuelve a codificar. Cada movimiento se puede deshacer.",
+        ),
+    };
     ui.label(
         RichText::new(format!(
             "Se {verb} {} ({origin}).",
@@ -109,11 +156,9 @@ fn draw_header(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
         .strong(),
     );
     ui.label(
-        RichText::new(
-            "Solo se crean copias verificadas con SHA-256. Los originales nunca se modifican ni se mueven.",
-        )
-        .size(theme::FONT_SMALL)
-        .color(palette.text_secondary.color32()),
+        RichText::new(promise)
+            .size(theme::FONT_SMALL)
+            .color(palette.text_secondary.color32()),
     );
 }
 
@@ -128,6 +173,18 @@ fn draw_choose_step(
     banner_error: &mut Option<String>,
     close_requested: &mut bool,
 ) {
+    ui.horizontal(|ui| {
+        for (operation, label) in [
+            (Operation::Copy, "Copiar"),
+            (Operation::Move, "Mover (cortar)"),
+        ] {
+            if ui.radio(wizard.operation() == operation, label).clicked() {
+                wizard.set_operation(operation);
+            }
+        }
+    });
+    ui.add_space(theme::SPACE_MD);
+    let moving = wizard.operation() == Operation::Move;
     ui.label(RichText::new("Carpeta de destino").strong());
     ui.add_space(theme::SPACE_XS);
 
@@ -141,7 +198,11 @@ fn draw_choose_step(
                     .desired_width(edit_w)
                     .hint_text(theme::hint_text(
                         palette,
-                        "Elige una carpeta fuera de tus bibliotecas…",
+                        if moving {
+                            "Elige la carpeta de salida…"
+                        } else {
+                            "Elige una carpeta fuera de tus bibliotecas…"
+                        },
                     )),
             ),
             "Carpeta de destino",
@@ -153,8 +214,7 @@ fn draw_choose_step(
             wizard.set_dest(PathBuf::from(path_text.trim()));
         }
         if ui.button("Elegir carpeta…").clicked() {
-            let mut dialog =
-                rfd::FileDialog::new().set_title("Elegir carpeta de destino para exportar");
+            let mut dialog = rfd::FileDialog::new().set_title("Elegir carpeta de destino");
             let current = wizard.dest_input();
             if !current.as_os_str().is_empty() && current.is_dir() {
                 dialog = dialog.set_directory(current);
@@ -206,7 +266,7 @@ fn draw_choose_step(
     if ui
         .checkbox(
             &mut write_xmp,
-            "Guardar etiquetas en un archivo XMP junto a cada copia",
+            "Guardar etiquetas en un archivo XMP junto a cada archivo del destino",
         )
         .changed()
     {
@@ -215,13 +275,23 @@ fn draw_choose_step(
 
     let mut embed_tags = wizard.embed_jpeg_tags();
     if ui
-        .checkbox(
-            &mut embed_tags,
-            "Incrustar etiquetas en las copias JPEG (cambia sus bytes; el original no se toca)",
+        .add_enabled(
+            !moving,
+            egui::Checkbox::new(
+                &mut embed_tags,
+                "Incrustar etiquetas en las copias JPEG (cambia sus bytes; el original no se toca)",
+            ),
         )
         .changed()
     {
         wizard.set_embed_jpeg_tags(embed_tags);
+    }
+    if moving {
+        ui.label(
+            RichText::new("Al mover no se incrustan etiquetas: cambiaría el único ejemplar")
+                .size(theme::FONT_SMALL)
+                .color(palette.text_secondary.color32()),
+        );
     }
 
     ui.add_space(theme::SPACE_LG);
@@ -241,11 +311,11 @@ fn draw_choose_step(
             if clicked || (can_preview && enter_pressed(ctx)) {
                 let roots = settings.valid_roots();
                 let notify = repaint_notify(ctx);
-                if let Ok(dest) = wizard.request_preview(&roots, Some(notify))
+                if let Ok(dest) = wizard.request_preview(&roots, data_dir, Some(notify))
                     && let Err(e) = remember_export_dir(data_dir, settings, &dest)
                 {
                     *banner_error = Some(format!(
-                        "No se pudo guardar la última carpeta de exportación: {e}"
+                        "No se pudo guardar la última carpeta de destino: {e}"
                     ));
                 }
             }
@@ -283,15 +353,19 @@ fn draw_preview_computing(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_preview_ready(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     palette: &Palette,
     wizard: &mut ExportWizard,
     preview: &Preview,
+    data_dir: &Path,
+    settings: &Settings,
     close_requested: &mut bool,
 ) {
-    ui.label(RichText::new("Vista previa de exportación").strong());
+    let moving = wizard.operation() == Operation::Move;
+    ui.label(RichText::new("Vista previa").strong());
     ui.add_space(theme::SPACE_XS);
 
     card_frame(palette).show(ui, |ui| {
@@ -305,7 +379,7 @@ fn draw_preview_ready(
         );
         info_row(ui, palette, "Estructura", layout_label(wizard.layout()));
         if wizard.write_xmp() {
-            info_row(ui, palette, "Archivo XMP", "Junto a cada copia");
+            info_row(ui, palette, "Archivo XMP", "Junto a cada archivo");
         }
         if wizard.embed_jpeg_tags() {
             info_row(ui, palette, "Etiquetas JPEG", "Incrustadas");
@@ -314,10 +388,20 @@ fn draw_preview_ready(
         info_row(
             ui,
             palette,
-            "Archivos a copiar",
+            if moving {
+                "Archivos a mover"
+            } else {
+                "Archivos a copiar"
+            },
             &count_phrase(preview.files, "archivo", "archivos"),
         );
         info_row(ui, palette, "Tamaño total", &format_bytes(preview.bytes));
+        if moving {
+            ui.label(format!(
+                "{} en el mismo disco (instantáneo) · {} a otro disco (copia y Papelera)",
+                preview.same_volume, preview.other_volume
+            ));
+        }
         let free_text = preview
             .free_bytes
             .map(format_bytes)
@@ -336,11 +420,12 @@ fn draw_preview_ready(
         info_row(
             ui,
             palette,
-            plural_word(
-                preview.already_present,
-                "Ya presente (se omitirá)",
-                "Ya presentes (se omitirán)",
-            ),
+            match (moving, preview.already_present) {
+                (false, 1) => "Ya presente (se omitirá)",
+                (false, _) => "Ya presentes (se omitirán)",
+                (true, 1) => "Ya presente (se conserva el original)",
+                (true, _) => "Ya presentes (se conservan los originales)",
+            },
             &count_phrase(preview.already_present, "archivo", "archivos"),
         );
         info_row(
@@ -354,8 +439,16 @@ fn draw_preview_ready(
             palette,
             plural_word(
                 preview.blocked,
-                "Bloqueado por un enlace",
-                "Bloqueados por un enlace",
+                if moving {
+                    "Bloqueado: enlace o no se puede mover"
+                } else {
+                    "Bloqueado por un enlace"
+                },
+                if moving {
+                    "Bloqueados: enlace o no se pueden mover"
+                } else {
+                    "Bloqueados por un enlace"
+                },
             ),
             &count_phrase(preview.blocked, "archivo", "archivos"),
         );
@@ -372,12 +465,17 @@ fn draw_preview_ready(
             palette,
             &format!(
                 "No hay espacio suficiente en el volumen de destino: se necesitan {} y solo hay {} disponibles. Libera espacio o elige otra carpeta.",
-                format_bytes(preview.bytes),
+                format_bytes(if moving {
+                    preview.bytes_other_volume
+                } else {
+                    preview.bytes
+                }),
                 free_text
             ),
         );
     }
 
+    draw_start_error(ui, palette, wizard);
     ui.add_space(theme::SPACE_LG);
     ui.separator();
     ui.add_space(theme::SPACE_SM);
@@ -390,16 +488,73 @@ fn draw_preview_ready(
             *close_requested = true;
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let can_export = wizard.can_start_export();
-            let clicked = ui
-                .add_enabled(can_export, egui::Button::new("Exportar"))
-                .clicked();
-            if clicked || (can_export && enter_pressed(ctx)) {
-                let notify = repaint_notify(ctx);
-                let _ = wizard.start_export(Some(notify));
+            let (label, ready) = if moving {
+                ("Mover…", wizard.can_confirm_move())
+            } else {
+                ("Copiar", wizard.can_start_export())
+            };
+            let clicked = ui.add_enabled(ready, egui::Button::new(label)).clicked();
+            if clicked || (ready && enter_pressed(ctx)) {
+                if moving {
+                    let _ = wizard.request_move_confirmation();
+                } else {
+                    start(ctx, wizard, data_dir, settings);
+                }
             }
         });
     });
+}
+
+/// The second question before moving. Enter does not answer it: only the button does.
+fn draw_confirm_move(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    palette: &Palette,
+    wizard: &mut ExportWizard,
+    preview: &Preview,
+    data_dir: &Path,
+    settings: &Settings,
+) {
+    ui.label(
+        RichText::new(move_confirmation_text(preview.files, preview.other_volume))
+            .color(palette.text_primary.color32()),
+    );
+    draw_start_error(ui, palette, wizard);
+    ui.add_space(theme::SPACE_LG);
+    ui.separator();
+    ui.add_space(theme::SPACE_SM);
+    ui.horizontal(|ui| {
+        if ui.button("Volver").clicked() {
+            wizard.back_to_preview();
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add_enabled(wizard.can_start_export(), egui::Button::new("Mover"))
+                .clicked()
+            {
+                start(ctx, wizard, data_dir, settings);
+            }
+        });
+    });
+}
+
+fn draw_start_error(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
+    if let Some(error) = wizard.start_error() {
+        ui.add_space(theme::SPACE_SM);
+        draw_alert_box(ui, palette, error);
+    }
+}
+
+fn start(ctx: &egui::Context, wizard: &mut ExportWizard, data_dir: &Path, settings: &Settings) {
+    let roots = settings.valid_roots();
+    match settings::db_dest_path(data_dir, &roots) {
+        Ok(db) => {
+            let notify = repaint_notify(ctx);
+            // A refusal stays in the wizard, which the window shows.
+            let _ = wizard.start_export(Some(notify), db, roots, data_dir.to_path_buf());
+        }
+        Err(e) => wizard.set_start_error(e.to_string()),
+    }
 }
 
 fn draw_running_step(
@@ -409,10 +564,13 @@ fn draw_running_step(
     done: usize,
     total: usize,
 ) {
-    let status = if wizard.is_cancel_requested() {
-        "Cancelando exportación (se conservarán las copias ya verificadas y el manifiesto)…"
-    } else {
-        "Copiando y verificando cada archivo con SHA-256…"
+    let status = match (wizard.operation(), wizard.is_cancel_requested()) {
+        (Operation::Copy, true) => {
+            "Cancelando la copia (se conservarán las copias ya verificadas y el manifiesto)…"
+        }
+        (Operation::Copy, false) => "Copiando y verificando cada archivo con SHA-256…",
+        (Operation::Move, true) => "Cancelando (lo ya movido se puede deshacer)…",
+        (Operation::Move, false) => "Moviendo; a otro disco, cada copia se verifica con SHA-256…",
     };
     ui.label(RichText::new(status).color(palette.text_secondary.color32()));
     ui.add_space(theme::SPACE_SM);
@@ -448,11 +606,14 @@ fn draw_done_step(
     summary: &ExportSummary,
     banner_error: &mut Option<String>,
     close_requested: &mut bool,
+    undo_requested: &mut bool,
 ) {
-    let title = if summary.stopped {
-        "Exportación detenida"
-    } else {
-        "Exportación completada"
+    let moving = summary.operation == Operation::Move;
+    let title = match (moving, summary.stopped) {
+        (false, true) => "Copia detenida",
+        (false, false) => "Copia completada",
+        (true, true) => "Movimiento detenido",
+        (true, false) => "Movimiento completado",
     };
     let title_color = if summary.stopped {
         palette.status_suggested_fg.color32()
@@ -468,16 +629,38 @@ fn draw_done_step(
     ui.add_space(theme::SPACE_XS);
 
     card_frame(palette).show(ui, |ui| {
+        let done = if moving {
+            summary.moved
+        } else {
+            summary.copied
+        };
         info_row(
             ui,
             palette,
-            plural_word(summary.copied, "Copiado", "Copiados"),
-            &count_phrase(summary.copied, "archivo", "archivos"),
+            match (moving, done) {
+                (false, 1) => "Copiado",
+                (false, _) => "Copiados",
+                (true, 1) => "Movido",
+                (true, _) => "Movidos",
+            },
+            &count_phrase(done, "archivo", "archivos"),
         );
+        if moving {
+            info_row(
+                ui,
+                palette,
+                "Copiados, original conservado",
+                &count_phrase(summary.kept_original.len(), "archivo", "archivos"),
+            );
+        }
         info_row(
             ui,
             palette,
-            plural_word(summary.already_present, "Ya presente", "Ya presentes"),
+            match (moving, summary.already_present) {
+                (false, 1) => "Ya presente",
+                (false, _) => "Ya presentes",
+                (true, _) => "Ya en el destino, original conservado",
+            },
             &count_phrase(summary.already_present, "archivo", "archivos"),
         );
         info_row(
@@ -507,6 +690,13 @@ fn draw_done_step(
         });
     });
 
+    draw_not_exported(
+        ui,
+        palette,
+        "Copiados, pero el original sigue en su sitio:",
+        "export_kept_list",
+        &summary.kept_original,
+    );
     draw_not_exported(
         ui,
         palette,
@@ -555,6 +745,9 @@ fn draw_done_step(
             && let Err(e) = open_in_explorer(&summary.dest)
         {
             *banner_error = Some(format!("No se pudo abrir la carpeta de destino: {e}"));
+        }
+        if moving && summary.moved > 0 && ui.button("Deshacer este movimiento").clicked() {
+            *undo_requested = true;
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.button("Cerrar").clicked() {

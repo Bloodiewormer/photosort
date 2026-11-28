@@ -230,6 +230,7 @@ dependencies = [
  "fsguard",
  "image",
  "ocr",
+ "raw-window-handle",
  "rfd",
  "rules",
  "scanner",
@@ -1531,6 +1532,7 @@ name = "export"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "dunce",
  "fsguard",
  "scanner",
  "serde_json",
@@ -1723,6 +1725,7 @@ version = "0.1.0"
 dependencies = [
  "dunce",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
