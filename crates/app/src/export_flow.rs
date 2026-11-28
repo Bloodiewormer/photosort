@@ -391,8 +391,15 @@ impl ExportWorker {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// The next event. A thread that ended without saying how, as after a panic, has failed.
     fn try_recv(&self) -> Option<ExportWorkerEvent> {
-        self.rx.try_recv().ok()
+        match self.rx.try_recv() {
+            Ok(event) => Some(event),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(ExportWorkerEvent::Failed(
+                "se detuvo inesperadamente".into(),
+            )),
+        }
     }
 }
 
@@ -524,6 +531,8 @@ pub struct ExportWizard {
     embed_jpeg_tags: bool,
     phase: ExportPhase,
     validation_error: Option<String>,
+    /// Why the confirmed copy or move did not start.
+    start_error: Option<String>,
     cancel_requested: bool,
     preview_gen: u64,
     preview_rx: Option<mpsc::Receiver<PreviewMessage>>,
@@ -577,6 +586,7 @@ impl ExportWizard {
             embed_jpeg_tags: false,
             phase: ExportPhase::Choose,
             validation_error: None,
+            start_error: None,
             cancel_requested: false,
             preview_gen: 0,
             preview_rx: None,
@@ -634,6 +644,7 @@ impl ExportWizard {
     }
 
     pub fn back_to_preview(&mut self) {
+        self.start_error = None;
         if let ExportPhase::ConfirmMove(p) = &self.phase {
             self.phase = ExportPhase::Preview(PreviewState::Ready(p.clone()));
         }
@@ -683,6 +694,15 @@ impl ExportWizard {
 
     pub fn validation_error(&self) -> Option<&str> {
         self.validation_error.as_deref()
+    }
+
+    /// Why pressing «Copiar» or «Mover» did nothing; the window shows it.
+    pub fn start_error(&self) -> Option<&str> {
+        self.start_error.as_deref()
+    }
+
+    pub(crate) fn set_start_error(&mut self, error: String) {
+        self.start_error = Some(error);
     }
 
     pub fn is_cancel_requested(&self) -> bool {
@@ -752,6 +772,7 @@ impl ExportWizard {
         self.preview_gen = self.preview_gen.wrapping_add(1);
         self.preview_rx = None;
         self.validated_dest = None;
+        self.start_error = None;
         if !matches!(self.phase, ExportPhase::Choose) {
             self.phase = ExportPhase::Choose;
         }
@@ -774,7 +795,11 @@ impl ExportWizard {
         }
         let checked = validate_destination(&self.dest_input, roots, self.operation, app_data)
             .and_then(|dest| {
-                if self.operation == Operation::Move && all_in(&self.items, dest.as_path()) {
+                // With folders by category or year, moving within that folder still sorts them.
+                if self.operation == Operation::Move
+                    && self.layout == Layout::Flat
+                    && all_in(&self.items, dest.as_path())
+                {
                     Err("Las fotos ya están en esa carpeta.".to_string())
                 } else {
                     Ok(dest)
@@ -819,6 +844,18 @@ impl ExportWizard {
     /// Starts copying or moving on a background thread. Only succeeds after a ready preview that
     /// fits and, to move, its second confirmation. `db`, `roots` and `app_data` are for moving.
     pub fn start_export(
+        &mut self,
+        notify: Option<Notify>,
+        db: DestPath,
+        roots: Vec<LibraryRoot>,
+        app_data: PathBuf,
+    ) -> Result<(), String> {
+        let started = self.try_start(notify, db, roots, app_data);
+        self.start_error = started.as_ref().err().cloned();
+        started
+    }
+
+    fn try_start(
         &mut self,
         notify: Option<Notify>,
         db: DestPath,
@@ -933,6 +970,10 @@ impl ExportWizard {
                         self.phase = ExportPhase::Error(format!("Error durante {what}: {e}"));
                         finish_worker = true;
                     }
+                }
+                // Once it has said how it ended, its closed channel says nothing more.
+                if finish_worker {
+                    break;
                 }
             }
         }

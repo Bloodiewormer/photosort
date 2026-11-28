@@ -7,7 +7,7 @@ pub use moves::{MoveContext, UndoReport, move_with_options, undo_last_move};
 pub use xmp::{XmpData, generate_xmp, xml_escape};
 
 use catalog::{AssetWork, Assignment, LabelKind, Status};
-use fsguard::{DestPath, GuardError, io_reason};
+use fsguard::{DestPath, GuardError, ensure_move_source, io_reason};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -1041,6 +1041,10 @@ pub fn preview_with_options(
             p.unreadable += 1;
             continue;
         };
+        if options.operation == Operation::Move && ensure_move_source(&item.source).is_err() {
+            p.blocked += 1;
+            continue;
+        }
         let Some(name) = item.source.file_name() else {
             p.unreadable += 1;
             continue;

@@ -669,6 +669,25 @@ fn a_move_never_embeds_tags_in_the_only_copy() {
 }
 
 #[test]
+fn the_move_preview_counts_as_blocked_what_will_not_be_moved() {
+    let s = setup();
+    // Readable, so it can be copied, but not a path a move accepts.
+    let odd = s.library.join("uno").join("..").join("a.jpg");
+    let items = [ExportItem::new(odd)];
+    let count = |operation| {
+        let options = ExportOptions {
+            operation,
+            ..Default::default()
+        };
+        let p = preview_with_options(&items, &s.dest(&s.outside), options).unwrap();
+        (p.files, p.blocked)
+    };
+
+    assert_eq!(count(Operation::Move), (0, 1));
+    assert_eq!(count(Operation::Copy), (1, 0));
+}
+
+#[test]
 fn the_preview_counts_what_stays_on_the_same_disk() {
     let s = setup();
     let preview = preview_with_options(

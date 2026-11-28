@@ -138,7 +138,7 @@ La vista **Duplicados** es de solo lectura: nunca borra, mueve ni renombra archi
 
 ### Deshacer un movimiento
 
-**Deshacer este movimiento**, en el resumen, o **Deshacer último movimiento**, en la barra de la galería, devuelven cada archivo a su ruta original; las veces siguientes, el movimiento anterior. Un archivo solo vuelve si el del destino no ha cambiado y la ruta original está libre. Si el del destino ya no está o cambió, o en la ruta original hay otro archivo, ese ya no se puede deshacer: se te dice dónde quedó, no se toca nada y no impide deshacer los movimientos anteriores. Si el problema es pasajero (una unidad desconectada o un archivo abierto en otro programa), se puede reintentar, y mientras tanto no se pasa al movimiento anterior. Si volvía desde otro disco, la copia del destino va a la Papelera. Una copia no se puede «deshacer», porque sería borrarla.
+**Deshacer este movimiento**, en el resumen, o **Deshacer último movimiento**, en la barra de la galería, devuelven cada archivo a su ruta original; las veces siguientes, el movimiento anterior. Un archivo solo vuelve si el del destino no ha cambiado y la ruta original está libre. Si el del destino ya no está o cambió, o en la ruta original hay otro archivo, ese ya no se puede deshacer: se te dice dónde quedó, no se toca nada y no impide deshacer los movimientos anteriores. Si el problema es pasajero (una unidad desconectada o un archivo abierto en otro programa), se puede reintentar, y mientras tanto no se pasa al movimiento anterior. Mientras se deshace, **Copiar o mover…** queda desactivado. Si volvía desde otro disco, la copia del destino va a la Papelera. Una copia no se puede «deshacer», porque sería borrarla.
 
 ## Recargar
 

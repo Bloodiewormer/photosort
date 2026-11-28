@@ -1,5 +1,5 @@
 use crate::face_group_worker::{FaceGroupEvent, FaceGroupWorker};
-use crate::model::{ChipMode, FilterState, MoveDir, Selection, count_phrase};
+use crate::model::{ChipMode, FilterState, MoveDir, Selection, count_phrase, relocate_entries};
 use crate::near_dupes_worker::{NearDupesEvent, NearDupesWorker};
 use crate::review_engine::{
     EnginePhase, EngineSnapshot, FolderRecheck, ReviewEngine, ReviewEngineEvent, StageKind,
@@ -462,7 +462,26 @@ impl PhotosortApp {
         } else if self.similarity_view.is_none() {
             self.reload_entries();
         } else {
-            self.sync_inspector(true);
+            self.refresh_shown_entries();
+        }
+    }
+
+    /// A similarity view keeps its photos and their order, but not where they were before a move.
+    fn refresh_shown_entries(&mut self) {
+        let Some(cat) = &self.catalog else {
+            return;
+        };
+        let stages = self.settings.enabled_stage_specs();
+        let everything =
+            FilterState::default().to_catalog_filter_scoped(&self.settings.library_roots, &stages);
+        match cat.entries(&everything, self.filter.sort) {
+            Ok(current) => {
+                let next = relocate_entries(&self.entries, &current);
+                self.selection.reconcile(&self.entries, &next);
+                self.entries = next;
+                self.sync_inspector(true);
+            }
+            Err(e) => self.banner_error = Some(format!("Error al actualizar las fotos: {e}")),
         }
     }
 
@@ -1530,6 +1549,10 @@ impl PhotosortApp {
 
     /// Opens «Copiar o mover» for the selection, or for what is shown when nothing is selected.
     fn open_export(&mut self) {
+        // An undo is moving files: nothing else may copy or move them meanwhile.
+        if self.undo_worker.is_some() {
+            return;
+        }
         if let Some(cat) = &self.catalog {
             let mut wizard = crate::export_flow::ExportWizard::open(
                 cat,
@@ -1608,7 +1631,7 @@ impl PhotosortApp {
     /// The «Copiar o mover» window, opened from the selection bar or the photo menu.
     fn draw_export_window(&mut self, ctx: &egui::Context, palette: &theme::Palette) {
         let moving_before = self.export_wizard.as_ref().is_some_and(|w| w.is_moving());
-        let undo_requested = views::export::draw_window(
+        let window = views::export::draw_window(
             ctx,
             palette,
             &mut self.export_wizard,
@@ -1621,16 +1644,17 @@ impl PhotosortApp {
             // The background review waits: it must not read files while they change place.
             self.sync_engine_yield();
         }
-        if self
-            .export_wizard
-            .as_mut()
-            .is_some_and(|w| w.take_finished_move())
-        {
+        if !window.gone.is_empty() {
+            let gone = window.gone.into_iter().map(|path| (path, None));
+            self.gone_photos.extend(gone);
+            ctx.request_repaint();
+        }
+        if window.finished_move {
             self.reload_catalog();
             self.refresh_can_undo();
             ctx.request_repaint();
         }
-        if undo_requested {
+        if window.undo_requested {
             self.start_undo(ctx);
         }
     }
@@ -1848,6 +1872,7 @@ impl PhotosortApp {
                     &self.thumb_textures,
                     &self.thumb_failed,
                     views::gallery::FolderActions {
+                        undoing: self.undo_worker.is_some(),
                         reloading: matches!(
                             self.engine_snapshot.phase,
                             EnginePhase::Indexing { .. }
@@ -2098,6 +2123,7 @@ impl PhotosortApp {
                         .and_then(|a| self.catalog.as_ref()?.asset_embedding(a).ok().flatten())
                         .is_some();
                     let menu_ctx = PhotoMenuContext {
+                        undoing: self.undo_worker.is_some(),
                         selected_count: self.selection.len().max(1),
                         all_reviewed,
                         has_ocr_text,

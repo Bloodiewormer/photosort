@@ -6,13 +6,18 @@ use app::export_flow::{
     build_export_items, layout_description, layout_label, move_confirmation_text,
     remember_export_dir, select_entries, undo_messages, validate_destination,
 };
-use app::model::Selection;
+use app::model::{Selection, relocate_entries};
 use app::settings::{self, Settings};
+use app::theme::DARK_PALETTE;
+use app::views::export::draw_window;
+use app::worker::Notify;
 use catalog::{Catalog, Entry, Filter, LabelKind, Sort, Source, Status};
+use eframe::egui;
 use export::{ExportItem, ExportReport, Layout, Operation, Outcome};
 use fsguard::{LibraryRoot, MoveSource, ensure_writable};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -276,6 +281,140 @@ fn moving_allows_a_library_but_not_the_app_data_or_the_folder_the_photos_are_in(
         .unwrap_err();
     assert_eq!(error, "Las fotos ya están en esa carpeta.");
     assert_eq!(m.wizard.phase(), &ExportPhase::Choose);
+
+    // Sorting them into subfolders of the folder they are in is a move like any other.
+    m.wizard.set_layout(Layout::ByYear);
+    m.preview();
+}
+
+#[test]
+fn a_move_that_cannot_start_says_why_in_the_window() {
+    let mut m = Moving::new(1);
+    m.preview();
+    m.wizard.request_move_confirmation().unwrap();
+    // By the time «Mover» is pressed, the destination counts as app data.
+    let app_data = m.out.parent().unwrap().to_path_buf();
+    let roots = vec![LibraryRoot::new(&m.lib).unwrap()];
+
+    let error = m
+        .wizard
+        .start_export(None, m.db(), roots, app_data)
+        .unwrap_err();
+
+    assert_eq!(m.wizard.start_error(), Some(error.as_str()));
+    assert!(matches!(m.wizard.phase(), ExportPhase::ConfirmMove(_)));
+    m.wizard.back_to_preview();
+    assert_eq!(m.wizard.start_error(), None);
+}
+
+#[test]
+fn a_move_thread_that_dies_ends_in_an_error_and_lets_go() {
+    let mut m = Moving::new(2);
+    m.preview();
+    m.wizard.request_move_confirmation().unwrap();
+    let roots = vec![LibraryRoot::new(&m.lib).unwrap()];
+    let (db, data) = (m.db(), m.data.clone());
+    let crash: Notify = Arc::new(|| panic!("simulated crash of the move thread"));
+
+    m.wizard.start_export(Some(crash), db, roots, data).unwrap();
+    wait_until(&mut m.wizard, |p| matches!(p, ExportPhase::Error(_)));
+
+    assert!(!m.wizard.is_running() && !m.wizard.is_moving());
+    assert!(m.wizard.take_finished_move(), "the gallery is read again");
+    assert!(m.catalog().lock_moves().is_ok());
+}
+
+/// Escape on every frame closes the window in the very frame the move is found to be over.
+#[test]
+fn closing_the_window_as_a_move_ends_still_reports_it() {
+    let mut m = Moving::new(2);
+    m.preview();
+    m.wizard.request_move_confirmation().unwrap();
+    let deleted = m.lib.join("file_00.jpg");
+    fs::remove_file(&deleted).unwrap();
+    m.start().unwrap();
+
+    let ctx = egui::Context::default();
+    let mut slot = Some(std::mem::replace(
+        &mut m.wizard,
+        ExportWizard::from_items(Vec::new(), false, None),
+    ));
+    let (mut settings, mut banner) = (Settings::default(), None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the window never closed");
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = egui::RawInput {
+            events: vec![escape],
+            ..Default::default()
+        };
+        let mut outcome = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            outcome = Some(draw_window(
+                &ctx,
+                &DARK_PALETTE,
+                &mut slot,
+                &m.data,
+                &mut settings,
+                &mut banner,
+            ));
+        });
+        out.textures_delta.clear();
+        if slot.is_none() {
+            let outcome = outcome.unwrap();
+            assert!(outcome.finished_move);
+            assert_eq!(outcome.gone, [deleted]);
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A similarity view keeps its order after a reload, with each photo where it is now.
+#[test]
+fn shown_photos_follow_a_move_and_the_gone_ones_leave() {
+    let entry = |asset: i64, path: &str| Entry {
+        asset: catalog::AssetId(asset),
+        path: PathBuf::from(path),
+        sha256: asset.to_string(),
+        size: 1,
+        modified_ns: None,
+        width: None,
+        height: None,
+        format: None,
+        captured_at_ns: None,
+        media_type: catalog::MediaType::Image,
+        duration_ms: None,
+    };
+    // By similarity: 3, the two identical copies of 1, and 2.
+    let shown = [
+        entry(3, "c.jpg"),
+        entry(1, "a.jpg"),
+        entry(1, "copia.jpg"),
+        entry(2, "b.jpg"),
+    ];
+    // 3 left the libraries, one copy of 1 moved and 2 stayed.
+    let current = [
+        entry(1, "copia.jpg"),
+        entry(2, "b.jpg"),
+        entry(1, "ordenadas/a.jpg"),
+    ];
+
+    assert_eq!(
+        relocate_entries(&shown, &current),
+        [
+            entry(1, "ordenadas/a.jpg"),
+            entry(1, "copia.jpg"),
+            entry(2, "b.jpg"),
+        ]
+    );
 }
 
 #[test]

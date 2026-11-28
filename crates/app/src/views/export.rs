@@ -15,8 +15,18 @@ use std::sync::Arc;
 
 const EXPORT_WINDOW_WIDTH: f32 = 520.0;
 
-/// Draws the «Copiar o mover» window when open, polling its background workers each frame. Returns
-/// true when the user asks to undo the move it just made.
+/// What the application has to do after a frame of the window, even the one that closed it.
+#[derive(Debug, Default)]
+pub struct WindowOutcome {
+    /// The user asks to undo the move it just made.
+    pub undo_requested: bool,
+    /// A move just ended: the gallery has to be read again.
+    pub finished_move: bool,
+    /// Sources found to be gone, so the catalog can flag them.
+    pub gone: Vec<PathBuf>,
+}
+
+/// Draws the «Copiar o mover» window when open, polling its background workers each frame.
 pub fn draw_window(
     ctx: &egui::Context,
     palette: &Palette,
@@ -24,9 +34,9 @@ pub fn draw_window(
     data_dir: &Path,
     settings: &mut Settings,
     banner_error: &mut Option<String>,
-) -> bool {
+) -> WindowOutcome {
     let Some(wizard) = slot.as_mut() else {
-        return false;
+        return WindowOutcome::default();
     };
 
     wizard.poll();
@@ -83,21 +93,11 @@ pub fn draw_window(
                     &preview,
                     data_dir,
                     settings,
-                    banner_error,
                     &mut close_requested,
                 );
             }
             ExportPhase::ConfirmMove(preview) => {
-                draw_confirm_move(
-                    ui,
-                    ctx,
-                    palette,
-                    wizard,
-                    &preview,
-                    data_dir,
-                    settings,
-                    banner_error,
-                );
+                draw_confirm_move(ui, ctx, palette, wizard, &preview, data_dir, settings);
             }
             ExportPhase::Running { done, total } => {
                 draw_running_step(ui, palette, wizard, done, total);
@@ -118,10 +118,16 @@ pub fn draw_window(
         }
     });
 
+    // Taken before the window may close: it can close in the very frame a move ends.
+    let outcome = WindowOutcome {
+        undo_requested,
+        finished_move: wizard.take_finished_move(),
+        gone: wizard.take_gone(),
+    };
     if (!open_flag && !wizard.is_running()) || close_requested || undo_requested {
         *slot = None;
     }
-    undo_requested
+    outcome
 }
 
 fn draw_header(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
@@ -356,7 +362,6 @@ fn draw_preview_ready(
     preview: &Preview,
     data_dir: &Path,
     settings: &Settings,
-    banner_error: &mut Option<String>,
     close_requested: &mut bool,
 ) {
     let moving = wizard.operation() == Operation::Move;
@@ -434,8 +439,16 @@ fn draw_preview_ready(
             palette,
             plural_word(
                 preview.blocked,
-                "Bloqueado por un enlace",
-                "Bloqueados por un enlace",
+                if moving {
+                    "Bloqueado: enlace o no se puede mover"
+                } else {
+                    "Bloqueado por un enlace"
+                },
+                if moving {
+                    "Bloqueados: enlace o no se pueden mover"
+                } else {
+                    "Bloqueados por un enlace"
+                },
             ),
             &count_phrase(preview.blocked, "archivo", "archivos"),
         );
@@ -462,6 +475,7 @@ fn draw_preview_ready(
         );
     }
 
+    draw_start_error(ui, palette, wizard);
     ui.add_space(theme::SPACE_LG);
     ui.separator();
     ui.add_space(theme::SPACE_SM);
@@ -484,7 +498,7 @@ fn draw_preview_ready(
                 if moving {
                     let _ = wizard.request_move_confirmation();
                 } else {
-                    start(ctx, wizard, data_dir, settings, banner_error);
+                    start(ctx, wizard, data_dir, settings);
                 }
             }
         });
@@ -492,7 +506,6 @@ fn draw_preview_ready(
 }
 
 /// The second question before moving. Enter does not answer it: only the button does.
-#[allow(clippy::too_many_arguments)]
 fn draw_confirm_move(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -501,12 +514,12 @@ fn draw_confirm_move(
     preview: &Preview,
     data_dir: &Path,
     settings: &Settings,
-    banner_error: &mut Option<String>,
 ) {
     ui.label(
         RichText::new(move_confirmation_text(preview.files, preview.other_volume))
             .color(palette.text_primary.color32()),
     );
+    draw_start_error(ui, palette, wizard);
     ui.add_space(theme::SPACE_LG);
     ui.separator();
     ui.add_space(theme::SPACE_SM);
@@ -519,28 +532,28 @@ fn draw_confirm_move(
                 .add_enabled(wizard.can_start_export(), egui::Button::new("Mover"))
                 .clicked()
             {
-                start(ctx, wizard, data_dir, settings, banner_error);
+                start(ctx, wizard, data_dir, settings);
             }
         });
     });
 }
 
-fn start(
-    ctx: &egui::Context,
-    wizard: &mut ExportWizard,
-    data_dir: &Path,
-    settings: &Settings,
-    banner_error: &mut Option<String>,
-) {
+fn draw_start_error(ui: &mut egui::Ui, palette: &Palette, wizard: &ExportWizard) {
+    if let Some(error) = wizard.start_error() {
+        ui.add_space(theme::SPACE_SM);
+        draw_alert_box(ui, palette, error);
+    }
+}
+
+fn start(ctx: &egui::Context, wizard: &mut ExportWizard, data_dir: &Path, settings: &Settings) {
     let roots = settings.valid_roots();
-    let started = settings::db_dest_path(data_dir, &roots)
-        .map_err(|e| e.to_string())
-        .and_then(|db| {
+    match settings::db_dest_path(data_dir, &roots) {
+        Ok(db) => {
             let notify = repaint_notify(ctx);
-            wizard.start_export(Some(notify), db, roots, data_dir.to_path_buf())
-        });
-    if let Err(e) = started {
-        *banner_error = Some(e);
+            // A refusal stays in the wizard, which the window shows.
+            let _ = wizard.start_export(Some(notify), db, roots, data_dir.to_path_buf());
+        }
+        Err(e) => wizard.set_start_error(e.to_string()),
     }
 }
 

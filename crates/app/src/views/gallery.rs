@@ -12,6 +12,9 @@ use eframe::egui::{
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+/// Why «Copiar o mover…» is off for a moment.
+pub const UNDOING_EXPORT: &str = "Podrás copiar o mover cuando termine de deshacerse el movimiento";
+
 pub const SUGGESTIONS_BADGE_TOOLTIP: &str = "Tiene sugerencias pendientes";
 
 pub struct SimilarityView {
@@ -42,6 +45,8 @@ pub struct FolderActions {
     /// The folders are being listed.
     pub reloading: bool,
     pub can_undo: bool,
+    /// An undo is moving files: copying or moving waits for it.
+    pub undoing: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -250,8 +255,19 @@ pub fn draw(
                             {
                                 outcome.review_selected = true;
                             }
-                            if ui.button("Copiar o mover…").clicked() {
+                            let export = ui.add_enabled(
+                                !folder_actions.undoing,
+                                egui::Button::new("Copiar o mover…"),
+                            );
+                            if export.on_disabled_hover_text(UNDOING_EXPORT).clicked() {
                                 outcome.open_export = true;
+                            }
+                            if folder_actions.undoing {
+                                ui.label(
+                                    RichText::new(UNDOING_EXPORT)
+                                        .size(theme::FONT_SMALL)
+                                        .color(palette.text_secondary.color32()),
+                                );
                             }
                             if ui.button("Quitar selección").clicked() {
                                 selection.clear();
