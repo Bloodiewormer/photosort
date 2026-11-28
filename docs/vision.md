@@ -18,7 +18,7 @@ Al crear un catálogo nuevo se generan una sola vez 16 reglas iniciales, control
 - **Tipo de página visual (independiente, categoría):** `Portada de manga`, restringida para sugerirse únicamente cuando el tipo ganador es `Manga` o `Ilustración`.
 - **Etiqueta independiente:** `persona` (con descripciones negativas para evitar personajes dibujados).
 
-Las descripciones iniciales están en inglés; el usuario puede editarlas o escribir nuevas en español o inglés. Los umbrales de tipo, `Anime` y `Portada de manga` están calibrados con 335 imágenes reales, y `Manhwa`, `Webtoon` y `Videojuegos` vienen desactivadas (ver [vision-evaluacion.md](vision-evaluacion.md#calibración-con-imágenes-reales)). El resto sigue sin calibrar.
+Las descripciones iniciales están en inglés; el usuario puede editarlas o escribir nuevas en español o inglés. Los umbrales y descripciones de tipo y de las categorías de contenido están calibrados con 335 y luego 1000 imágenes reales; `Manhwa` y `Webtoon` vienen desactivadas porque no hubo casos suficientes para medirlas (ver [vision-evaluacion.md](vision-evaluacion.md#calibración-con-imágenes-reales)). `persona`, `retrato` y `grupo de personas` siguen con su umbral inicial.
 
 ### Similitud coseno, no probabilidades
 

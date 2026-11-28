@@ -16,9 +16,9 @@ pub const EMBEDDING_BYTES: usize = EMBEDDING_DIM * 4;
 /// Foto, Meme or Capturas de pantalla.
 pub const YUNET_FACE_SCORE_THRESHOLD: f32 = 0.8;
 
-/// Threshold for built-in exclusive TYPE rules, calibrated on 335 real images (see
+/// Threshold for built-in exclusive TYPE rules, calibrated on 335 and then 1000 real images (see
 /// docs/vision-evaluacion.md). Users can tune each rule's threshold from the UI.
-pub const DEFAULT_TYPE_THRESHOLD: f32 = 0.06;
+pub const DEFAULT_TYPE_THRESHOLD: f32 = 0.05;
 
 /// UNCALIBRATED placeholder threshold for the built-in `"persona"` independent tag rule.
 pub const DEFAULT_PERSON_THRESHOLD: f32 = 0.10;
@@ -27,21 +27,116 @@ pub const DEFAULT_PERSON_THRESHOLD: f32 = 0.10;
 /// vision rules. Users should calibrate each rule using «Probar» on their own images.
 pub const DEFAULT_CATEGORY_THRESHOLD: f32 = 0.10;
 
-/// Calibrated on 335 real images: anime art scores lower than the generic category default.
-const ANIME_THRESHOLD: f32 = 0.085;
+/// Content thresholds calibrated on 1000 random images of the library (docs/vision-evaluacion.md).
+const ANIME_THRESHOLD: f32 = 0.095;
+const ANIMALS_THRESHOLD: f32 = 0.085;
+const HARDWARE_THRESHOLD: f32 = 0.11;
+const TECH_THRESHOLD: f32 = 0.115;
+const NATURE_THRESHOLD: f32 = 0.09;
+const VIDEOGAMES_THRESHOLD: f32 = 0.11;
 
 /// Calibrated on 335 real images: below this, lists of covers and promo pages match too.
 const MANGA_COVER_THRESHOLD: f32 = 0.16;
 
-/// No threshold separated these from the rest on 335 real images; the user can turn them on.
-const DISABLED_BY_DEFAULT: &[&str] = &[
-    BUILTIN_KEY_MANHWA,
-    BUILTIN_KEY_WEBTOON,
-    BUILTIN_KEY_VIDEOGAMES,
-];
+/// Too few real cases to calibrate them (1 manhwa and no webtoon in 1000 images); the user can
+/// turn them on.
+const DISABLED_BY_DEFAULT: &[&str] = &[BUILTIN_KEY_MANHWA, BUILTIN_KEY_WEBTOON];
 
 /// Marks catalogs whose untouched built-in rules already got the calibrated values.
 const META_BUILTINS_CALIBRATED: &str = "vision_builtins_calibrated:2026-11-27";
+/// Same, for the second calibration on 1000 images.
+const META_BUILTINS_CALIBRATED_2: &str = "vision_builtins_calibrated:2026-11-28";
+
+/// What each rule changed by the second calibration looked like before it, as
+/// `(key, earlier default thresholds, earlier enabled states, earlier positives and negatives)`.
+/// `None` texts mean they did not change. A rule matching none of these was edited by the user.
+type PreviousDefault = (
+    &'static str,
+    &'static [f32],
+    &'static [bool],
+    Option<(&'static [&'static str], &'static [&'static str])>,
+);
+const PREVIOUS_DEFAULTS_2: &[PreviousDefault] = &[
+    (BUILTIN_KEY_MANGA, &[0.06], &[true], None),
+    (BUILTIN_KEY_ILLUSTRATION, &[0.06], &[true], None),
+    (BUILTIN_KEY_PHOTO, &[0.06], &[true], None),
+    (BUILTIN_KEY_SCREENSHOT, &[0.06], &[true], None),
+    (BUILTIN_KEY_MEME, &[0.06], &[true], None),
+    (BUILTIN_KEY_DOCUMENT, &[0.06], &[true], None),
+    (
+        BUILTIN_KEY_ANIME,
+        &[0.085, 0.10],
+        &[true],
+        Some((
+            &[
+                "an anime screenshot or anime style artwork with Japanese animation characters",
+                "a Japanese anime television series frame or anime movie still",
+                "colorful anime character illustration with cel shading",
+            ],
+            &[
+                "a real life camera photograph of real people or scenery",
+                "a plain text document or chat screenshot without anime art",
+            ],
+        )),
+    ),
+    (
+        BUILTIN_KEY_ANIMALS,
+        &[0.10],
+        &[true],
+        Some((
+            &[
+                "a photograph or image of a real animal, pet, dog, cat, or bird",
+                "wildlife, domestic pets, or animals outdoors or indoors",
+                "a close up picture of a cat, dog, bird, or other animal",
+            ],
+            &["a text document, chat screenshot, or webpage without animals"],
+        )),
+    ),
+    (BUILTIN_KEY_COMPUTERS_HARDWARE, &[0.10], &[true], None),
+    (
+        BUILTIN_KEY_TECH_ELECTRONICS,
+        &[0.10],
+        &[true],
+        Some((
+            &[
+                "modern electronics, smartphone, tablet, headphones, gadgets, or circuit board",
+                "electronic devices, cables, game consoles, microcontrollers, or tech hardware",
+                "consumer technology products, screens, audio gear, or electronic equipment",
+            ],
+            &["natural outdoor scenery or hand-drawn comic without electronics"],
+        )),
+    ),
+    (
+        BUILTIN_KEY_NATURE_LANDSCAPES,
+        &[0.10],
+        &[true],
+        Some((
+            &[
+                "a natural landscape photograph of mountains, forest, beach, ocean, or sky",
+                "outdoor nature scenery with trees, sunset, lake, rivers, or flowers",
+                "scenic view of countryside, hills, clouds, or natural environment",
+            ],
+            &[
+                "a smartphone chat screenshot or printed text document",
+                "an indoor computer desk or comic page with speech bubbles",
+            ],
+        )),
+    ),
+    (
+        BUILTIN_KEY_VIDEOGAMES,
+        &[0.10],
+        // The first calibration turned it off, so off is also an untouched state.
+        &[true, false],
+        Some((
+            &[
+                "a video game screenshot showing 3D or 2D gameplay, HUD, health bar, or game menu",
+                "PC or console gaming screenshot with in-game characters, map, or interface",
+                "video game cover art, gameplay scene, or retro pixel art game screen",
+            ],
+            &["a plain text document, receipt, or chat messaging app screenshot"],
+        )),
+    ),
+];
 
 /// UNCALIBRATED placeholder threshold for newly created custom independent tag rules.
 pub const DEFAULT_CUSTOM_THRESHOLD: f32 = 0.10;
@@ -683,11 +778,11 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
             "an anime screenshot or anime style artwork with Japanese animation characters",
             "a Japanese anime television series frame or anime movie still",
             "colorful anime character illustration with cel shading",
+            "anime",
+            "an anime character",
         ],
-        negatives: &[
-            "a real life camera photograph of real people or scenery",
-            "a plain text document or chat screenshot without anime art",
-        ],
+        // A text negative also matched manga pages and scanlation promos, which carry text.
+        negatives: &["a real life camera photograph of real people or scenery"],
     },
     BuiltinSpec {
         key: BUILTIN_KEY_MANHWA,
@@ -726,20 +821,23 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
         kind: LabelKind::Category,
         name: CAT_ANIMALS,
         mode: RuleMode::Independent,
-        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        threshold: ANIMALS_THRESHOLD,
+        // Short descriptions score higher on real photos than long lists of animals.
         positives: &[
-            "a photograph or image of a real animal, pet, dog, cat, or bird",
-            "wildlife, domestic pets, or animals outdoors or indoors",
-            "a close up picture of a cat, dog, bird, or other animal",
+            "a photo of a dog",
+            "a photo of a cat",
+            "a photo of a pet animal",
+            "a picture of an animal",
+            "a photo of a bird or insect",
         ],
-        negatives: &["a text document, chat screenshot, or webpage without animals"],
+        negatives: &[],
     },
     BuiltinSpec {
         key: BUILTIN_KEY_COMPUTERS_HARDWARE,
         kind: LabelKind::Category,
         name: CAT_COMPUTERS_HARDWARE,
         mode: RuleMode::Independent,
-        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        threshold: HARDWARE_THRESHOLD,
         positives: &[
             "a desktop computer, PC case, graphics card, motherboard, or computer hardware",
             "a PC desk setup with monitor, mechanical keyboard, mouse, and computer tower",
@@ -752,24 +850,28 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
         kind: LabelKind::Category,
         name: CAT_TECH_ELECTRONICS,
         mode: RuleMode::Independent,
-        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        threshold: TECH_THRESHOLD,
         positives: &[
-            "modern electronics, smartphone, tablet, headphones, gadgets, or circuit board",
-            "electronic devices, cables, game consoles, microcontrollers, or tech hardware",
-            "consumer technology products, screens, audio gear, or electronic equipment",
+            "a photo of a smartphone",
+            "a photo of a computer screen",
+            "a photo of electronic devices",
+            "a photo of a laptop",
         ],
-        negatives: &["natural outdoor scenery or hand-drawn comic without electronics"],
+        negatives: &[],
     },
     BuiltinSpec {
         key: BUILTIN_KEY_NATURE_LANDSCAPES,
         kind: LabelKind::Category,
         name: CAT_NATURE_LANDSCAPES,
         mode: RuleMode::Independent,
-        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        threshold: NATURE_THRESHOLD,
         positives: &[
-            "a natural landscape photograph of mountains, forest, beach, ocean, or sky",
-            "outdoor nature scenery with trees, sunset, lake, rivers, or flowers",
-            "scenic view of countryside, hills, clouds, or natural environment",
+            "a photo of a beach",
+            "a photo of a forest",
+            "a landscape photo",
+            "a photo of the sea",
+            "a photo of plants and flowers",
+            "a photo of a waterfall or river",
         ],
         negatives: &[
             "a smartphone chat screenshot or printed text document",
@@ -781,11 +883,15 @@ const BUILTIN_RULES: &[BuiltinSpec] = &[
         kind: LabelKind::Category,
         name: CAT_VIDEOGAMES,
         mode: RuleMode::Independent,
-        threshold: DEFAULT_CATEGORY_THRESHOLD,
+        threshold: VIDEOGAMES_THRESHOLD,
         positives: &[
             "a video game screenshot showing 3D or 2D gameplay, HUD, health bar, or game menu",
             "PC or console gaming screenshot with in-game characters, map, or interface",
             "video game cover art, gameplay scene, or retro pixel art game screen",
+            "a screenshot of a video game",
+            "a video game",
+            "a photo of a game controller or video game console",
+            "a screenshot of Minecraft",
         ],
         negatives: &["a plain text document, receipt, or chat messaging app screenshot"],
     },
@@ -1014,6 +1120,58 @@ impl Catalog {
         tx.execute(
             "INSERT INTO catalog_meta (key, value) VALUES (?1, '1')",
             [META_BUILTINS_CALIBRATED],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Second pass on 1000 images: moves untouched built-in rules from their earlier defaults to
+    /// the current ones (threshold, state and descriptions). Runs once per catalog.
+    pub(crate) fn recalibrate_builtin_vision_rules(&mut self) -> Result<(), CatalogError> {
+        let done = |c: &rusqlite::Connection| -> Result<bool, CatalogError> {
+            Ok(c.prepare("SELECT 1 FROM catalog_meta WHERE key = ?1")?
+                .exists([META_BUILTINS_CALIBRATED_2])?)
+        };
+        if done(&self.conn)? {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if done(&tx)? {
+            return Ok(());
+        }
+        for &(key, thresholds, states, texts) in PREVIOUS_DEFAULTS_2 {
+            let spec = BUILTIN_RULES
+                .iter()
+                .find(|s| s.key == key)
+                .expect("every recalibrated key is a built-in rule");
+            let (old_pos, old_neg) = texts.unwrap_or((spec.positives, spec.negatives));
+            for &old in thresholds {
+                for &was_enabled in states {
+                    tx.execute(
+                        "UPDATE vision_rule
+                         SET threshold = ?2, enabled = ?3, positives = ?4, negatives = ?5
+                         WHERE builtin_key = ?1 AND enabled = ?6 AND abs(threshold - ?7) < 1e-6
+                           AND positives = ?8 AND negatives = ?9",
+                        params![
+                            key,
+                            f64::from(spec.threshold),
+                            !DISABLED_BY_DEFAULT.contains(&key),
+                            spec.positives.join("\n"),
+                            spec.negatives.join("\n"),
+                            was_enabled,
+                            f64::from(old),
+                            old_pos.join("\n"),
+                            old_neg.join("\n"),
+                        ],
+                    )?;
+                }
+            }
+        }
+        tx.execute(
+            "INSERT INTO catalog_meta (key, value) VALUES (?1, '1')",
+            [META_BUILTINS_CALIBRATED_2],
         )?;
         tx.commit()?;
         Ok(())
