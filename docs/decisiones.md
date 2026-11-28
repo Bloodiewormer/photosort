@@ -93,3 +93,7 @@ Formato: fecha · decisión · alternativas · porqué.
 - **2026-11-27 · La app puede mover fotos, nunca borrarlas** (opción A: copia verificada y Papelera entre discos). Alternativas: dejar el original oculto (no cumple que dejen de estar en D:) o retirarlo para siempre (sin vuelta atrás). Pedido por el usuario para separar y ordenar.
   - Mismo disco: `MoveFileExW` sin reemplazar. Entre discos: copia verificada, nueva comprobación del original y Papelera. Registro en `move_log` y deshacer.
   - Mientras hay un movimiento en curso, un candado en una base SQLite aparte impide que otra conexión que abra el catálogo resuelva sus filas pendientes.
+- **2026-11-28 · Ante la duda, al mover se conserva el original.**
+  - A la Papelera solo se envía desde un disco fijo y sin `FOF_NOCONFIRMATION` ni `FOF_NOERRORUI`, para que Windows pregunte antes de cualquier borrado definitivo. La alternativa, no preguntar nunca, respondía que sí en nombre del usuario. La Papelera no es duradera: la protección es la copia verificada.
+  - Una fila `pending` solo se resuelve si se ven la biblioteca de origen y la carpeta de destino, y pasa a `done` solo con el mismo SHA-256.
+  - Lo que ya no se puede deshacer queda en el estado `lost`, sin tocar archivos. La alternativa, reintentarlo siempre, impedía deshacer los movimientos anteriores. Un fallo pasajero (unidad desconectada, archivo bloqueado) sí se reintenta.
