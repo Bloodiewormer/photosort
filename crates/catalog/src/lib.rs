@@ -2,6 +2,7 @@ mod analysis;
 mod browse;
 mod dupes;
 mod labels;
+mod moves;
 mod ocr;
 mod persons;
 mod vision;
@@ -19,6 +20,7 @@ pub use labels::{
     AssetId, Assignment, Filter, LabelId, LabelKind, LabelNode, Orientation, RenameOutcome,
     ReviewItem, ReviewedFilter, Source, StageSpec, Status,
 };
+pub use moves::{MoveLock, MoveMethod, MoveRow, MoveState, NewMove};
 pub use ocr::{
     OCR_STAGE, OCR_VERSION, OcrLine, OcrRecognizer, SCREENSHOT_CATEGORY, is_top_strip,
     ocr_search_key,
@@ -263,6 +265,20 @@ CREATE TABLE IF NOT EXISTS asset_cover (
 );
 CREATE INDEX IF NOT EXISTS asset_cover_asset ON asset_cover(asset_id);
 CREATE INDEX IF NOT EXISTS asset_cover_work ON asset_cover(work_id);
+CREATE TABLE IF NOT EXISTS move_log (
+    id       INTEGER PRIMARY KEY,
+    batch    INTEGER NOT NULL,
+    src_path TEXT NOT NULL,
+    src_root TEXT NOT NULL,
+    dst_path TEXT NOT NULL,
+    sha256   TEXT NOT NULL,
+    size     INTEGER NOT NULL,
+    mtime_ns INTEGER,
+    method   TEXT NOT NULL CHECK (method IN ('rename', 'copy_recycle')),
+    state    TEXT NOT NULL CHECK (state IN ('pending', 'done', 'kept_original', 'undone')),
+    at_ns    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS move_log_state_batch ON move_log(state, batch);
 ";
 
 #[derive(Debug)]
@@ -338,6 +354,7 @@ pub fn file_is_gone(path: &Path) -> bool {
 }
 
 /// The catalog never touches the library: it reads files and writes only to its own database.
+/// Moving originals is the export crate's job; here it is only logged.
 pub struct Catalog {
     conn: Connection,
 }
@@ -358,6 +375,7 @@ impl Catalog {
         cat.seed_builtin_vision_rules()?;
         cat.calibrate_builtin_vision_rules()?;
         cat.recalibrate_builtin_vision_rules()?;
+        cat.resolve_pending_moves()?;
         Ok(cat)
     }
 
