@@ -357,6 +357,7 @@ impl Catalog {
         cat.migrate_faces_and_people()?;
         cat.seed_builtin_vision_rules()?;
         cat.calibrate_builtin_vision_rules()?;
+        cat.recalibrate_builtin_vision_rules()?;
         Ok(cat)
     }
 

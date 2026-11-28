@@ -708,9 +708,47 @@ fn calibrated_values_reach_untouched_rules_of_older_catalogs_only() {
     .unwrap();
     let rules = Catalog::open(&s.db).unwrap().list_vision_rules().unwrap();
     let rule = |name: &str| rules.iter().find(|r| r.name == name).unwrap();
-    assert!((rule(TYPE_MANGA).threshold - 0.06).abs() < 1e-6);
+    assert!((rule(TYPE_MANGA).threshold - 0.05).abs() < 1e-6);
     assert!((rule(TYPE_PHOTO).threshold - 0.2).abs() < 1e-6);
     assert!(!rule(CAT_WEBTOON).enabled);
+}
+
+#[test]
+fn the_second_calibration_reaches_rules_left_as_the_first_one_set_them() {
+    let s = setup(&[("a.jpg", b"aaa")]);
+    let raw = rusqlite::Connection::open(s.db.as_path()).unwrap();
+    // As the first calibration left them, plus one rule the user edited afterwards.
+    raw.execute_batch(
+        "UPDATE vision_rule SET threshold = 0.06 WHERE builtin_key LIKE 'type_%';
+         UPDATE vision_rule SET threshold = 0.085,
+           positives = 'an anime screenshot or anime style artwork with Japanese animation characters' || char(10) ||
+                       'a Japanese anime television series frame or anime movie still' || char(10) ||
+                       'colorful anime character illustration with cel shading',
+           negatives = 'a real life camera photograph of real people or scenery' || char(10) ||
+                       'a plain text document or chat screenshot without anime art'
+           WHERE builtin_key = 'cat_anime';
+         UPDATE vision_rule SET threshold = 0.10, enabled = 0,
+           positives = 'a video game screenshot showing 3D or 2D gameplay, HUD, health bar, or game menu' || char(10) ||
+                       'PC or console gaming screenshot with in-game characters, map, or interface' || char(10) ||
+                       'video game cover art, gameplay scene, or retro pixel art game screen'
+           WHERE builtin_key = 'cat_videogames';
+         UPDATE vision_rule SET threshold = 0.10 WHERE builtin_key = 'cat_computers_hardware';
+         UPDATE vision_rule SET threshold = 0.3 WHERE builtin_key = 'cat_animals';
+         DELETE FROM catalog_meta WHERE key = 'vision_builtins_calibrated:2026-11-28';",
+    )
+    .unwrap();
+    let rules = Catalog::open(&s.db).unwrap().list_vision_rules().unwrap();
+    let rule = |name: &str| rules.iter().find(|r| r.name == name).unwrap();
+    assert!((rule(TYPE_PHOTO).threshold - 0.05).abs() < 1e-6);
+    let anime = rule(CAT_ANIME);
+    assert!((anime.threshold - 0.095).abs() < 1e-6);
+    assert!(anime.positives.iter().any(|p| p == "anime"));
+    assert_eq!(anime.negatives.len(), 1);
+    let games = rule(CAT_VIDEOGAMES);
+    assert!(games.enabled);
+    assert!((games.threshold - 0.11).abs() < 1e-6);
+    assert!((rule(CAT_COMPUTERS_HARDWARE).threshold - 0.11).abs() < 1e-6);
+    assert!((rule(CAT_ANIMALS).threshold - 0.3).abs() < 1e-6);
 }
 
 #[test]

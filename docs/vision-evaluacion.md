@@ -201,6 +201,31 @@ Composición: 140 fotos (133 con personas), 43 capturas, 24 páginas de manga, 1
 
 Los catálogos existentes reciben estos valores una sola vez al abrirse, **solo en las reglas que el usuario no ha tocado** (umbral, estado y descripciones iguales a los anteriores por defecto).
 
+### Segunda calibración: 1000 imágenes al azar
+
+2026-11-28. Con autorización del usuario se eligieron al azar 1000 imágenes de tres carpetas de la biblioteca (966 de la más grande, 30 de manga y 4 de arte), copiadas byte a byte y verificadas con SHA-256 a una carpeta propia fuera de la biblioteca. Se etiquetaron a mano igual que la primera muestra y solo se anotan cifras agregadas.
+
+Composición: 585 fotos, 163 capturas, 82 memes, 36 documentos, 25 ilustraciones, 7 páginas de manga y 102 gráficos sin tipo claro. Contenido: 66 anime, 63 videojuegos, 48 naturaleza o paisaje, 29 animales, 25 tecnología, 17 hardware, 1 manhwa y ningún webtoon. A diferencia de la primera muestra, casi todo son fotos del teléfono, capturas y memes.
+
+Se probaron descripciones nuevas sin volver a pasar el modelo de imagen (`puntuar_textos`, abajo). Para cada regla se eligió el umbral con buen equilibrio y precisión cercana o superior al 80 %, y se comprobó en dos mitades de la muestra (pares e impares) con resultados parecidos.
+
+| Regla | Antes | Ahora | Antes en la muestra | Ahora en la muestra |
+|---|---|---|---|---|
+| Tipo (las seis) | 0,06 | **0,05** | 709 de 898 aciertos (79 %) | 740 de 898 (82 %), sobre todo fotos que quedaban sin tipo |
+| `Anime` | 0,085 | **0,095**, dos descripciones cortas más y sin la descripción negativa de texto | 10 de 66 aciertos, 6 falsos positivos | 50 de 66, 7 falsos positivos |
+| `Animales` | 0,10 | **0,085** con descripciones cortas («a photo of a dog»…) y sin negativa | 2 de 29, 1 falso positivo | 20 de 29, 5 falsos positivos |
+| `Computadoras y hardware` | 0,10 | **0,11** | 17 de 17, 11 falsos positivos | 15 de 17, 3 falsos positivos |
+| `Tecnología y electrónica` | 0,10 | **0,115** con descripciones cortas y sin negativa | 1 de 25, 6 falsos positivos | 11 de 25, 3 falsos positivos |
+| `Naturaleza y paisajes` | 0,10 | **0,09** con descripciones cortas | 2 de 48, ningún falso positivo | 22 de 48, 7 falsos positivos |
+| `Videojuegos` | desactivada | **activada, 0,11**, con cuatro descripciones cortas más | — | 24 de 63, 9 falsos positivos |
+| `Manhwa`, `Webtoon` | desactivadas | desactivadas | 1 y 0 casos: no se pueden medir | — |
+
+La descripción negativa «a plain text document or chat screenshot without anime art» dejaba fuera casi todo el anime de esta biblioteca, porque aparece en páginas de manga, capturas y promociones de scanlation con texto. Las descripciones largas con listas («a photograph or image of a real animal, pet, dog, cat, or bird») puntúan más bajo en fotos reales que las cortas.
+
+Los errores de tipo más comunes siguen siendo fotos de pantallas tomadas por capturas (38), capturas de aplicaciones de manga tomadas por `Manga` (15) y capturas tomadas por memes (14).
+
+Los catálogos existentes reciben estos valores una sola vez al abrirse, solo en las reglas que siguen como las dejó la calibración anterior o como venían de fábrica. Las sugerencias ya calculadas no cambian hasta pulsar **Aplicar a las imágenes analizadas** en Etiquetas.
+
 Para repetirlo con otra muestra:
 
 ```powershell
@@ -208,3 +233,11 @@ cargo run --release -p app --example calibrar -- <carpeta de muestra> <carpeta d
 ```
 
 Escribe `puntuaciones.csv` (coseno de cada regla por imagen) y hojas de contacto numeradas en la carpeta de salida.
+
+Para probar otras descripciones sin volver a pasar el modelo de imagen, con un archivo de texto con una descripción por línea:
+
+```powershell
+cargo run --release -p app --example puntuar_textos -- <carpeta de muestra> <carpeta de salida de calibrar> <carpeta de modelos> <archivo de descripciones>
+```
+
+Escribe `textos.csv` (coseno de cada descripción por imagen) en la carpeta de salida.
