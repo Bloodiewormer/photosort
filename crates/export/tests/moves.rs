@@ -417,6 +417,59 @@ fn undo_with_a_declined_recycle_restores_and_says_the_copy_stayed() {
     assert!(s.cat.last_undoable_batch().unwrap().is_none());
 }
 
+/// Nothing changed on disk, so nothing is left in the log to settle or undo.
+#[cfg(windows)]
+#[test]
+fn a_move_windows_refuses_leaves_no_row_in_the_log() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+    let s = setup();
+    let src = s.library.join("a.jpg");
+    // Another program has it open: it can be read, but not renamed.
+    let _held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&src)
+        .unwrap();
+
+    let report = run(
+        &s.items(&["a.jpg"]),
+        &s.dest(&s.outside),
+        &s.context(&never, false),
+    );
+
+    assert!(
+        matches!(report.outcomes[0].1, Outcome::Failed(_)),
+        "{:?}",
+        report.outcomes
+    );
+    assert!(src.exists() && !s.outside.join("a.jpg").exists());
+    assert_eq!(s.cat.next_move_batch().unwrap(), 1);
+}
+
+#[test]
+fn a_failed_copy_to_another_disk_leaves_no_row_in_the_log() {
+    let mut s = setup();
+    // A valid name that has no room left for the temporary copy's suffix.
+    let name = format!("{}.jpg", "n".repeat(248));
+    let src = write(&s.library.join(&name), b"long name");
+    s.cat.index(&s.roots[0]).unwrap();
+
+    let report = run(
+        &[ExportItem::new(src.clone())],
+        &s.dest(&s.outside),
+        &s.context(&never, true),
+    );
+
+    assert!(
+        matches!(report.outcomes[0].1, Outcome::Failed(_)),
+        "{:?}",
+        report.outcomes
+    );
+    assert!(src.exists() && !s.outside.join(&name).exists());
+    assert_eq!(s.cat.next_move_batch().unwrap(), 1);
+}
+
 #[cfg(windows)]
 #[test]
 fn moving_to_another_disk_keeps_the_read_only_attribute() {

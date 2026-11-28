@@ -48,6 +48,8 @@ pub struct NewMove<'a> {
     pub src_path: &'a Path,
     pub src_root: &'a Path,
     pub dst_path: &'a Path,
+    /// The library that holds the destination, if any.
+    pub dst_root: Option<&'a Path>,
     pub sha256: &'a str,
     pub size: u64,
     pub mtime_ns: Option<i64>,
@@ -61,6 +63,7 @@ pub struct MoveRow {
     pub src_path: PathBuf,
     pub src_root: PathBuf,
     pub dst_path: PathBuf,
+    pub dst_root: Option<PathBuf>,
     pub sha256: String,
     pub size: u64,
     pub mtime_ns: Option<i64>,
@@ -70,7 +73,8 @@ pub struct MoveRow {
 /// Held while originals are being moved or brought back. The system releases it if the app dies.
 pub struct MoveLock(#[allow(dead_code)] Connection);
 
-const ROW: &str = "SELECT id, batch, src_path, src_root, dst_path, sha256, size, mtime_ns, method
+const ROW: &str = "SELECT id, batch, src_path, src_root, dst_path, sha256, size, mtime_ns, method,
+            dst_root
      FROM move_log";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<MoveRow> {
@@ -81,6 +85,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<MoveRow> {
         src_path: path(2)?,
         src_root: path(3)?,
         dst_path: path(4)?,
+        dst_root: r.get::<_, Option<String>>(9)?.map(PathBuf::from),
         sha256: r.get(5)?,
         size: r.get::<_, i64>(6)?.max(0) as u64,
         mtime_ns: r.get(7)?,
@@ -202,8 +207,9 @@ impl Catalog {
             .map_or(0, |d| d.as_nanos() as i64);
         self.conn.execute(
             "INSERT INTO move_log
-                 (batch, src_path, src_root, dst_path, sha256, size, mtime_ns, method, state, at_ns)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+                 (batch, src_path, src_root, dst_path, sha256, size, mtime_ns, method, state, at_ns,
+                  dst_root)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)",
             params![
                 m.batch,
                 text(m.src_path),
@@ -213,7 +219,8 @@ impl Catalog {
                 m.size as i64,
                 m.mtime_ns,
                 m.method.as_str(),
-                at_ns
+                at_ns,
+                m.dst_root.map(text)
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -285,8 +292,17 @@ impl Catalog {
         Ok(tx.commit()?)
     }
 
+    /// Forgets a pending move that failed before anything on disk changed.
+    pub fn discard_move(&self, id: i64) -> Result<(), CatalogError> {
+        self.conn.execute(
+            "DELETE FROM move_log WHERE id = ?1 AND state = 'pending'",
+            [id],
+        )?;
+        Ok(())
+    }
+
     /// Moves cut short (a crash, a power cut) are settled by looking at the disk. Nothing on disk is
-    /// touched.
+    /// touched, and whatever cannot be told for sure stays pending.
     pub(crate) fn resolve_pending_moves(&self) -> Result<(), CatalogError> {
         const PENDING: &str = "state = 'pending'";
         let waiting: bool = self.conn.query_row(
@@ -301,23 +317,29 @@ impl Catalog {
         let Some(_lock) = self.try_lock_moves()? else {
             return Ok(());
         };
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let rows: Vec<MoveRow> = {
-            let mut stmt = tx.prepare(&format!("{ROW} WHERE {PENDING} ORDER BY id"))?;
+            let mut stmt = self
+                .conn
+                .prepare(&format!("{ROW} WHERE {PENDING} ORDER BY id"))?;
             stmt.query_map([], row)?.collect::<Result<_, _>>()?
         };
         for m in rows {
+            // An unplugged drive makes everything on it look gone.
+            if !m.src_root.is_dir() || !m.dst_path.parent().is_some_and(Path::is_dir) {
+                continue;
+            }
             match (file_is_gone(&m.src_path), file_is_gone(&m.dst_path)) {
-                // The library of the destination is not logged: the next folder review finds it.
-                (true, false) => finish(&tx, m.id, MoveState::Done, None)?,
-                (false, true) => {
-                    tx.execute("DELETE FROM move_log WHERE id = ?1", [m.id])?;
+                (true, false) => {
+                    // Only the very bytes that were being moved prove that it happened.
+                    if scanner::sha256_file(&m.dst_path).is_ok_and(|sha| sha == m.sha256) {
+                        self.finish_move(m.id, MoveState::Done, m.dst_root.as_deref())?;
+                    }
                 }
-                (false, false) => finish(&tx, m.id, MoveState::KeptOriginal, None)?,
-                // Neither is there, as with an unplugged drive: wait until one can be seen.
+                (false, true) => self.discard_move(m.id)?,
+                (false, false) => self.finish_move(m.id, MoveState::KeptOriginal, None)?,
                 (true, true) => {}
             }
         }
-        Ok(tx.commit()?)
+        Ok(())
     }
 }

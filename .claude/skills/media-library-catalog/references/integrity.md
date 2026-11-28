@@ -86,7 +86,8 @@ No se conservan entre discos los flujos alternativos (ADS), la ACL ni el propiet
 ### Registro y deshacer
 
 - **Antes** de tocar un archivo se escribe su fila en `move_log` en estado `pending`. Después pasa a `done` (o `kept_original`) en la misma transacción que actualiza `location`.
-- **Al abrir el catálogo**, cada fila `pending` se resuelve mirando el disco: destino presente y origen ausente → `done`; origen presente y destino ausente → se descarta; ambos presentes → `kept_original`, sin tocar nada. Un movimiento en curso mantiene un candado (una base SQLite aparte junto al catálogo, que el sistema libera aunque la app se cierre de golpe) y, mientras tanto, las filas pendientes no se tocan.
+- Si el movimiento falla antes de que cambie nada en el disco, la fila se descarta.
+- **Al abrir el catálogo**, cada fila `pending` se resuelve mirando el disco, solo si se ven la carpeta de la biblioteca de origen y la del destino (una unidad desconectada hace que todo parezca borrado): destino presente **con el mismo SHA-256** y origen ausente → `done` (con el `dst_root` guardado en la fila); origen presente y destino ausente → se descarta; ambos presentes → `kept_original`, sin tocar nada; cualquier otro caso sigue `pending`. Un movimiento en curso mantiene un candado (una base SQLite aparte junto al catálogo, que el sistema libera aunque la app se cierre de golpe) y, mientras tanto, las filas pendientes no se tocan.
 - **Deshacer** revierte, en orden inverso, el lote más reciente con filas `done`. El archivo del destino tiene que conservar el mismo SHA-256 y la ruta original tiene que estar libre; si no, se salta y se informa. Si la carpeta original no existe, se crea. `rename` vuelve con `MoveFileExW`; `copy_recycle` vuelve con el procedimiento entre discos (la copia del destino va a la Papelera). La fila pasa a `undone` y `location` vuelve a la ruta original.
 
 ## Pruebas de integridad obligatorias (`tests/safety.rs`)

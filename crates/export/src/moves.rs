@@ -97,6 +97,7 @@ pub(crate) fn move_one(
             src_path: source,
             src_root: &src_root,
             dst_path: &dst,
+            dst_root,
             sha256: sha,
             size: md.len(),
             mtime_ns: md
@@ -115,19 +116,28 @@ pub(crate) fn move_one(
             .map(|e| format!("el registro del movimiento se completará al volver a abrir: {e}"))
     };
 
+    // A failure that leaves the disk as it was leaves nothing in the log either. If the original is
+    // not in sight, or this fails, the row stays pending for the next time the catalog opens.
+    let discard = |e: io::Error| {
+        if fs::symlink_metadata(source).is_ok() {
+            let _ = ctx.catalog.discard_move(id);
+        }
+        e
+    };
     if !ctx.force_cross_volume {
         match move_no_replace(&original, place.target) {
             Ok(()) => return Ok((Outcome::Moved(dst), close(MoveState::Done))),
             Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(discard(e)),
         }
     }
-    // Written before anything else, so an undo after a cut knows the way back.
+    // The method is written first, so that an undo after a cut knows the way back.
     ctx.catalog
         .set_move_method(id, MoveMethod::CopyRecycle)
-        .map_err(db_error)?;
-    let part = part_of(place.dir, place.target)?;
-    write_verified(source, &part, place.target, sha, md)?;
+        .map_err(db_error)
+        .and_then(|()| part_of(place.dir, place.target))
+        .and_then(|part| write_verified(source, &part, place.target, sha, md))
+        .map_err(discard)?;
 
     // From here on the copy exists: anything that goes wrong keeps the original.
     let retired = keep_attributes(md, place.target).and_then(|()| {

@@ -101,16 +101,20 @@ Si algo falla, el original se queda donde estaba y solo se limpia el temporal de
 Tabla nueva `move_log` en el catálogo:
 
 ```
-id, batch, src_path, src_root, dst_path, sha256, size, mtime_ns,
+id, batch, src_path, src_root, dst_path, dst_root, sha256, size, mtime_ns,
 method ('rename' | 'copy_recycle'), state ('pending' | 'done' | 'kept_original' | 'undone'), at_ns
 ```
 
 - **Antes** de tocar un archivo se escribe la fila en `pending`. Después se cambia a `done` (o
   `kept_original`) en la misma transacción que actualiza `location`.
-- **Al abrir el catálogo**, cada fila `pending` se resuelve mirando el disco:
-  - destino presente y origen ausente → `done`;
+- **Al abrir el catálogo**, cada fila `pending` se resuelve mirando el disco, y solo cuando se ven la carpeta de
+  la biblioteca de origen y la carpeta del destino (una unidad desconectada hace que todo parezca borrado):
+  - destino presente con el mismo SHA-256 y origen ausente → `done`, con la biblioteca del destino (`dst_root`)
+    guardada en la fila;
   - origen presente y destino ausente → se descarta;
-  - ambos presentes (se cortó entre la copia y la Papelera) → `kept_original`. No se toca nada.
+  - ambos presentes (se cortó entre la copia y la Papelera) → `kept_original`. No se toca nada;
+  - en cualquier otro caso la fila sigue `pending`.
+- Si un movimiento falla antes de que cambie nada en el disco, su fila se descarta.
 - **Deshacer** revierte el lote más reciente que tenga filas `done`, en orden inverso. Por cada archivo:
   - el archivo del destino tiene que tener el mismo SHA-256 y la ruta original tiene que estar libre. Si no,
     se salta y se informa;

@@ -271,6 +271,8 @@ CREATE TABLE IF NOT EXISTS move_log (
     src_path TEXT NOT NULL,
     src_root TEXT NOT NULL,
     dst_path TEXT NOT NULL,
+    -- The library that holds the destination, if any.
+    dst_root TEXT,
     sha256   TEXT NOT NULL,
     size     INTEGER NOT NULL,
     mtime_ns INTEGER,
@@ -372,6 +374,7 @@ impl Catalog {
         cat.migrate_proposed_work_group()?;
         cat.migrate_asset_cover()?;
         cat.migrate_faces_and_people()?;
+        cat.migrate_move_log()?;
         cat.seed_builtin_vision_rules()?;
         cat.calibrate_builtin_vision_rules()?;
         cat.recalibrate_builtin_vision_rules()?;
@@ -474,6 +477,24 @@ impl Catalog {
             if !now_existing.contains(col) {
                 tx.execute(&format!("ALTER TABLE asset ADD COLUMN {col} {ty}"), [])?;
             }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds `dst_root` to a move log written without it. Rows already there keep it empty.
+    fn migrate_move_log(&mut self) -> Result<(), CatalogError> {
+        const HAS: &str =
+            "SELECT COUNT(*) FROM pragma_table_info('move_log') WHERE name = 'dst_root'";
+        let has = |conn: &Connection| conn.query_row(HAS, [], |r| r.get::<_, bool>(0));
+        if has(&self.conn)? {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !has(&tx)? {
+            tx.execute_batch("ALTER TABLE move_log ADD COLUMN dst_root TEXT;")?;
         }
         tx.commit()?;
         Ok(())

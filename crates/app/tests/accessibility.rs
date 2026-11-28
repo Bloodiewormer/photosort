@@ -615,6 +615,7 @@ fn reload_and_undo_have_names_and_are_reached_with_tab() {
             src_path: &nowhere,
             src_root: &nowhere,
             dst_path: &nowhere,
+            dst_root: None,
             sha256: "0",
             size: 0,
             mtime_ns: None,

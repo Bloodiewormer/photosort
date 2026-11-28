@@ -77,6 +77,7 @@ impl Setup {
                 src_path: &src,
                 src_root: self.root.as_path(),
                 dst_path: dst,
+                dst_root: dst.starts_with(&self.library).then(|| self.root.as_path()),
                 sha256: &sha,
                 size: fs::metadata(bytes_path).unwrap().len(),
                 mtime_ns: entry.1,
@@ -92,6 +93,16 @@ impl Setup {
             .into_iter()
             .map(|e| (e.path, e.modified_ns))
             .collect()
+    }
+
+    /// Every row of the log, oldest first.
+    fn log(&self) -> Vec<(i64, String)> {
+        let db = rusqlite::Connection::open(self.db.as_path()).unwrap();
+        let mut stmt = db
+            .prepare("SELECT id, state FROM move_log ORDER BY id")
+            .unwrap();
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        rows.map(Result::unwrap).collect()
     }
 
     fn paths(&self) -> Vec<PathBuf> {
@@ -214,7 +225,7 @@ fn pending_moves_are_resolved_when_the_catalog_opens() {
     s.begin(batch, "b.jpg", &s.outside.join("b.jpg"));
     // Both are there: cut between the copy and the Recycle Bin.
     let copied = s.outside.join("b copia.jpg");
-    s.begin(batch, "b.jpg", &copied);
+    let kept_id = s.begin(batch, "b.jpg", &copied);
     fs::copy(s.library.join("b.jpg"), &copied).unwrap();
 
     let reopened = Catalog::open(&s.db).unwrap();
@@ -229,9 +240,84 @@ fn pending_moves_are_resolved_when_the_catalog_opens() {
     assert_eq!(done, vec![moved_id]);
     assert_eq!(s.paths(), vec![s.library.join("b.jpg")]);
     assert!(s.library.join("b.jpg").exists() && copied.exists());
-    // The discarded row is gone, the kept one stays: a second open changes nothing.
-    let again = Catalog::open(&s.db).unwrap();
-    assert_eq!(again.next_move_batch().unwrap(), batch + 1);
+    // The discarded row is gone, the other two are settled: a second open changes nothing.
+    let settled = vec![
+        (moved_id, "done".to_string()),
+        (kept_id, "kept_original".to_string()),
+    ];
+    assert_eq!(s.log(), settled);
+    Catalog::open(&s.db).unwrap();
+    assert_eq!(s.log(), settled);
+}
+
+/// Without both places in sight, or without the very bytes at the destination, nothing is decided.
+#[test]
+fn a_pending_move_that_cannot_be_told_for_sure_stays_pending() {
+    let s = setup();
+    let dst = s.outside.join("a.jpg");
+    let id = s.begin(1, "a.jpg", &dst);
+    fs::rename(s.library.join("a.jpg"), &dst).unwrap();
+    let pending = vec![(id, "pending".to_string())];
+
+    // The library is unplugged: everything in it looks gone.
+    let unplugged = s.library.with_file_name("unplugged");
+    fs::rename(&s.library, &unplugged).unwrap();
+    Catalog::open(&s.db).unwrap();
+    assert_eq!(s.log(), pending);
+    fs::rename(&unplugged, &s.library).unwrap();
+
+    // So is the destination folder, with the original apparently still in its place.
+    let away = s.outside.with_file_name("away");
+    fs::rename(&s.outside, &away).unwrap();
+    fs::copy(away.join("a.jpg"), s.library.join("a.jpg")).unwrap();
+    Catalog::open(&s.db).unwrap();
+    assert_eq!(s.log(), pending);
+    fs::remove_file(s.library.join("a.jpg")).unwrap();
+    fs::rename(&away, &s.outside).unwrap();
+
+    // Something else is at the destination.
+    fs::write(&dst, b"photo z").unwrap();
+    Catalog::open(&s.db).unwrap();
+    assert_eq!(s.log(), pending);
+    assert_eq!(s.paths().len(), 2);
+
+    fs::write(&dst, b"photo a").unwrap();
+    Catalog::open(&s.db).unwrap();
+    assert_eq!(s.log(), vec![(id, "done".to_string())]);
+}
+
+#[test]
+fn a_pending_move_inside_a_library_keeps_the_photo_in_the_gallery() {
+    let s = setup();
+    let asset = s.asset("a.jpg");
+    let dst = s.library.join("sorted").join("a.jpg");
+    s.begin(1, "a.jpg", &dst);
+    fs::rename(s.library.join("a.jpg"), &dst).unwrap();
+
+    let reopened = Catalog::open(&s.db).unwrap();
+
+    assert_eq!(s.paths(), vec![s.library.join("b.jpg"), dst.clone()]);
+    assert_eq!(reopened.asset_of(&dst).unwrap(), Some(asset));
+}
+
+/// A log written before the destination's library was kept.
+#[test]
+fn an_older_move_log_is_upgraded_without_losing_rows() {
+    let s = setup();
+    let id = s.begin(1, "a.jpg", &s.outside.join("a.jpg"));
+    s.cat.finish_move(id, MoveState::Done, None).unwrap();
+    rusqlite::Connection::open(s.db.as_path())
+        .unwrap()
+        .execute_batch("ALTER TABLE move_log DROP COLUMN dst_root;")
+        .unwrap();
+
+    let rows = Catalog::open(&s.db)
+        .unwrap()
+        .last_undoable_batch()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!((rows[0].id, &rows[0].dst_root), (id, &None));
 }
 
 /// Other threads open the catalog while a move runs: its pending rows are not theirs to resolve.
