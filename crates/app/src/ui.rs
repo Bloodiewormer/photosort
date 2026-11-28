@@ -2142,7 +2142,6 @@ impl PhotosortApp {
                 }
             }
             ActiveView::Persons => {
-                self.request_face_thumbs(self.person_cards.thumbs.values());
                 let (outcome, catalog_mutated) = if let Some(cat) = &mut self.catalog {
                     let outcome = views::persons::draw(
                         ui,
@@ -2213,6 +2212,13 @@ impl PhotosortApp {
                 } else {
                     (views::persons::PersonsOutcome::default(), false)
                 };
+                let thumbs = &self.person_cards.thumbs;
+                self.request_face_thumbs(
+                    outcome
+                        .wanted_thumbs
+                        .iter()
+                        .filter_map(|asset| thumbs.get(asset)),
+                );
 
                 if let Some(pid) = outcome.open_in_gallery {
                     self.filter.clear_filters();

@@ -88,6 +88,9 @@ pub struct PersonsOutcome {
     pub ignored: Option<PersonId>,
     pub postponed: Option<PersonId>,
     pub removed_asset: Option<(PersonId, AssetId)>,
+    /// Photos whose face is on screen without its thumbnail yet: only these are asked for, since
+    /// asking for every person's at once outgrows the texture cache and makes the faces flicker.
+    pub wanted_thumbs: Vec<AssetId>,
 }
 
 /// Draws the non-intrusive Naming Card for an unnamed person appearing in >= 3 photos.
@@ -113,7 +116,9 @@ pub fn draw_naming_card(
             ui.horizontal(|ui| {
                 // Display sample face crops (up to 4)
                 for face in sample_faces {
-                    draw_face_chip(ui, palette, face, thumb_textures, thumbs, 44.0);
+                    if draw_face_chip(ui, palette, face, thumb_textures, thumbs, 44.0) {
+                        outcome.wanted_thumbs.push(face.asset_id);
+                    }
                 }
 
                 ui.add_space(theme::SPACE_SM);
@@ -210,6 +215,7 @@ pub fn draw_naming_card(
     outcome
 }
 
+/// Returns true when the chip is on screen but its thumbnail is not loaded yet.
 fn draw_face_chip(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -217,7 +223,7 @@ fn draw_face_chip(
     thumb_textures: &HashMap<String, TextureHandle>,
     thumbs: &HashMap<AssetId, ThumbRequest>,
     size_px: f32,
-) {
+) -> bool {
     let sha256 = thumbs.get(&face.asset_id).map(|t| &t.sha256);
     let texture = sha256.and_then(|sha| thumb_textures.get(sha));
 
@@ -272,6 +278,7 @@ fn draw_face_chip(
         );
         draw_silhouette(ui.painter(), rect, palette.text_hint.color32());
     }
+    texture.is_none() && ui.is_rect_visible(rect)
 }
 
 pub fn draw(
@@ -398,6 +405,7 @@ pub fn draw(
                     thumb_textures,
                     &cards.thumbs,
                 );
+                outcome.wanted_thumbs.extend(card_outcome.wanted_thumbs);
                 if card_outcome.renamed.is_some() {
                     outcome.renamed = card_outcome.renamed;
                 }
@@ -508,7 +516,9 @@ fn draw_person_card(
             ui.horizontal(|ui| {
                 // Representative face crop
                 if let Some(face) = cards.covers.get(&person.id) {
-                    draw_face_chip(ui, palette, face, thumb_textures, &cards.thumbs, 56.0);
+                    if draw_face_chip(ui, palette, face, thumb_textures, &cards.thumbs, 56.0) {
+                        outcome.wanted_thumbs.push(face.asset_id);
+                    }
                 } else {
                     let rect = ui
                         .allocate_exact_size(Vec2::splat(56.0), egui::Sense::hover())
