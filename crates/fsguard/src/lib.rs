@@ -4,7 +4,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::Arc;
 
-/// A directory the user registered as a photo library. Everything below it is read-only.
+/// A directory the user registered as a photo library. Nothing below it is ever deleted, rewritten or
+/// overwritten; files only move through [`move_no_replace`] and [`recycle`].
 #[derive(Debug)]
 pub struct LibraryRoot(PathBuf);
 
@@ -19,8 +20,8 @@ impl LibraryRoot {
     }
 }
 
-/// A path proven to lie outside every library root. It starts at [`ensure_writable`] and grows only
-/// through [`DestPath::join_name`].
+/// A path proven to lie outside every protected folder: the library roots for [`ensure_writable`], the
+/// app's own data for [`ensure_move_dir`]. It grows only through [`DestPath::join_name`].
 #[derive(Debug, Clone)]
 pub struct DestPath {
     path: PathBuf,
@@ -81,6 +82,12 @@ pub enum GuardError {
     },
     ParentDirComponent(PathBuf),
     InvalidName(OsString),
+    /// Only ordinary files are moved: not folders, links or other reparse points.
+    NotAMovableFile(PathBuf),
+    /// Photos are never moved into the app's own data.
+    InsideAppData {
+        path: PathBuf,
+    },
     /// A link below the destination points outside of it.
     LeavesDestination {
         path: PathBuf,
@@ -147,6 +154,14 @@ impl fmt::Display for GuardError {
                 short(path)
             ),
             Self::BrokenLink(path) => write!(f, "el enlace «{}» está roto", short(path)),
+            Self::NotAMovableFile(path) => write!(
+                f,
+                "«{}» no es un archivo normal; las carpetas y los enlaces no se mueven",
+                short(path)
+            ),
+            Self::InsideAppData { .. } => {
+                f.write_str("la carpeta está dentro de los datos de photosort; elige otra")
+            }
             Self::Io(e) => write!(f, "no se pudo comprobar la ruta: {}", io_reason(e)),
         }
     }
@@ -261,4 +276,188 @@ pub fn ensure_writable(path: &Path, roots: &[LibraryRoot]) -> Result<DestPath, G
         path: real,
         roots,
     })
+}
+
+/// A file that may be moved or sent to the Recycle Bin: an existing ordinary file, not a link. It only
+/// comes from [`ensure_move_source`].
+#[derive(Debug, Clone)]
+pub struct MoveSource(PathBuf);
+
+impl MoveSource {
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// True for symbolic links and, on Windows, for junctions and every other reparse point.
+fn is_link_or_reparse(md: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    md.file_type().is_symlink()
+}
+
+// shortcut: cloud placeholders (OneDrive files on demand) are reparse points too and stay where they
+// are; tell the tags apart if the user needs to move them.
+pub fn ensure_move_source(path: &Path) -> Result<MoveSource, GuardError> {
+    // First the checks every path gets: `..` and `name:stream` are refused here.
+    let real = resolve(path)?;
+    let md = std::fs::symlink_metadata(path)?;
+    if !md.is_file() || is_link_or_reparse(&md) {
+        return Err(GuardError::NotAMovableFile(path.to_path_buf()));
+    }
+    Ok(MoveSource(real))
+}
+
+/// The destination of a move: inside a library or outside all of them, never inside the app's data.
+pub fn ensure_move_dir(path: &Path, app_data: &Path) -> Result<DestPath, GuardError> {
+    let real = resolve(path)?;
+    let roots: Arc<[PathBuf]> = Arc::from([resolve(app_data)?]);
+    if refuse_inside(&real, &roots).is_err() {
+        return Err(GuardError::InsideAppData { path: real });
+    }
+    Ok(DestPath {
+        base: real.clone(),
+        path: real,
+        roots,
+    })
+}
+
+/// Moves an original within its volume without touching its bytes, dates or attributes, and never over
+/// an existing file. Another volume gives [`io::ErrorKind::CrossesDevices`] and a taken name
+/// [`io::ErrorKind::AlreadyExists`].
+pub fn move_no_replace(src: &MoveSource, dst: &DestPath) -> io::Result<()> {
+    dst.verify().map_err(io::Error::other)?;
+    rename_without_replacing(&src.0, &dst.path)
+}
+
+/// Gives a finished temporary file its final name inside a destination, never over an existing file.
+pub fn rename_no_replace(from: &DestPath, to: &DestPath) -> io::Result<()> {
+    from.verify().map_err(io::Error::other)?;
+    to.verify().map_err(io::Error::other)?;
+    rename_without_replacing(&from.path, &to.path)
+}
+
+/// The `\\?\` form, which has no length limit and keeps names exactly as written. Only the folder is
+/// resolved, so the last component itself is what gets renamed.
+#[cfg(windows)]
+fn verbatim_wide(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    };
+    let full = std::fs::canonicalize(parent)?.join(name);
+    Ok(full.as_os_str().encode_wide().chain([0]).collect())
+}
+
+#[cfg(windows)]
+fn rename_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let (from, to) = (verbatim_wide(from)?, verbatim_wide(to)?);
+    // SAFETY: both are null-terminated UTF-16. Flags 0: no replacing and no copying across volumes.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+// shortcut: comprobar y renombrar no es atómico fuera de Windows, solo afecta al CI de Linux
+#[cfg(not(windows))]
+#[allow(clippy::disallowed_methods)] // único lugar que mueve o manda a la Papelera un original; nunca borra
+fn rename_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    std::fs::rename(from, to)
+}
+
+/// `path` as the shell takes it, ending in two NULs, or `None` when it could read it as something else.
+/// The shell does not take the `\\?\` form, and without it Windows drops trailing dots and spaces,
+/// which could name another file. Network paths have no Recycle Bin.
+#[cfg(windows)]
+fn shell_path(path: &Path) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    const MAX_PATH: usize = 260;
+    let simple = dunce::simplified(path);
+    let local = matches!(
+        simple.components().next(),
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_))
+    );
+    let mut wide: Vec<u16> = simple.as_os_str().encode_wide().collect();
+    let wildcard = wide
+        .iter()
+        .any(|&c| c == u16::from(b'*') || c == u16::from(b'?'));
+    if !local || !simple.is_absolute() || wildcard || wide.len() >= MAX_PATH {
+        return None;
+    }
+    wide.extend([0, 0]);
+    Some(wide)
+}
+
+/// Sends an original to the Recycle Bin; callers do it only once a verified copy exists. Windows asks
+/// first if it would delete it for good. `Ok(true)` only when the file really left its place.
+#[cfg(windows)]
+pub fn recycle(file: &MoveSource) -> io::Result<bool> {
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+        FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
+    };
+    // It may have been replaced by a link or a folder since it was checked.
+    let file = ensure_move_source(&file.0).map_err(io::Error::other)?;
+    let Some(from) = shell_path(&file.0) else {
+        return Ok(false);
+    };
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        fFlags: (FOF_ALLOWUNDO
+            | FOF_NOCONFIRMATION
+            | FOF_SILENT
+            | FOF_NOERRORUI
+            | FOF_WANTNUKEWARNING) as u16,
+        ..Default::default()
+    };
+    // SAFETY: `from` ends in two NULs and outlives the call; the other pointers are null.
+    let code = unsafe { SHFileOperationW(&mut operation) };
+    if code != 0 {
+        return Err(io::Error::other(format!(
+            "la Papelera de Windows devolvió el error {code}"
+        )));
+    }
+    Ok(operation.fAnyOperationsAborted == 0
+        && matches!(std::fs::symlink_metadata(&file.0), Err(e) if e.kind() == io::ErrorKind::NotFound))
+}
+
+/// There is no Recycle Bin to rely on outside Windows, so nothing is ever retired.
+#[cfg(not(windows))]
+pub fn recycle(_file: &MoveSource) -> io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// The Recycle Bin itself is never called by tests: this is the part that decides what it receives.
+    #[test]
+    fn the_shell_only_gets_paths_it_cannot_misread() {
+        let text = |p: &str| shell_path(Path::new(p)).map(|w| String::from_utf16(&w).unwrap());
+        assert_eq!(
+            text(r"\\?\C:\fotos\a.jpg").as_deref(),
+            Some("C:\\fotos\\a.jpg\0\0")
+        );
+        // Without the prefix, Windows would take this for `a.jpg`, another file.
+        assert_eq!(text(r"\\?\C:\fotos\a.jpg "), None);
+        assert_eq!(text(r"\\?\C:\fotos\a.jpg."), None);
+        assert_eq!(text(r"\\?\UNC\servidor\fotos\a.jpg"), None);
+        assert_eq!(text(r"\\servidor\fotos\a.jpg"), None);
+        assert_eq!(text(r"C:\fotos\*.jpg"), None);
+        assert_eq!(text(r"a.jpg"), None);
+        assert_eq!(text(&format!(r"\\?\C:\{}\a.jpg", "x".repeat(300))), None);
+    }
 }
