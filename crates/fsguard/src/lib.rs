@@ -486,6 +486,32 @@ pub fn recycle(_file: &MoveSource) -> io::Result<bool> {
 mod tests {
     use super::*;
 
+    /// A junction needs no administrator rights, unlike a symbolic link to a file: it is the reparse
+    /// point that can always be made.
+    #[allow(clippy::disallowed_methods)] // fixtures in a temp folder
+    #[test]
+    fn a_reparse_point_is_told_apart_from_an_ordinary_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, folder, link) = (
+            tmp.path().join("a.jpg"),
+            tmp.path().join("fotos"),
+            tmp.path().join("enlace"),
+        );
+        std::fs::write(&file, b"a").unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&folder)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "could not create junction: {made:?}");
+        let check = |path: &Path| is_link_or_reparse(&std::fs::symlink_metadata(path).unwrap());
+        assert!(check(&link));
+        assert!(!check(&file));
+        assert!(!check(&folder));
+    }
+
     /// Only the question is tested: temp folders are on a fixed disk, here and in CI.
     #[test]
     fn a_temp_folder_is_on_a_fixed_disk() {

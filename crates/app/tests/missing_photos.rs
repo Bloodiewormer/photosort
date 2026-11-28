@@ -9,7 +9,7 @@ use app::review_engine::{
 use app::settings::{self, Settings};
 use app::thumb_provider::open_thumbnails;
 use app::ui::PhotosortApp;
-use app::worker::{ThumbPool, ThumbRequest};
+use app::worker::{ThumbPool, ThumbRequest, ThumbnailProvider};
 use catalog::{Catalog, DetectedFace, Entry, Filter, Sort};
 use eframe::App as _;
 use eframe::egui::accesskit::{Action, ActionRequest, Node, NodeId, Role, TreeId};
@@ -19,7 +19,9 @@ use fsguard::{DestPath, LibraryRoot, ensure_writable};
 use image::{ImageBuffer, Rgba};
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -289,8 +291,17 @@ struct Headless {
 
 impl Headless {
     fn open(library: &Library) -> Self {
+        Self::open_with(library, open_thumbnails)
+    }
+
+    fn open_with(
+        library: &Library,
+        thumbnails: impl FnOnce(&Path, &[LibraryRoot]) -> (Arc<dyn ThumbnailProvider>, Option<String>),
+    ) -> Self {
+        // Without background review, nothing lists the folders unless it is asked to.
         let settings = Settings {
             library_roots: vec![library.root.as_path().to_path_buf()],
+            background_review: false,
             ..Settings::default()
         };
         settings::save(&library.data, &settings).unwrap();
@@ -298,8 +309,7 @@ impl Headless {
         ctx.enable_accesskit();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         // Not the demo: the real folder review is what «Recargar» asks.
-        let mut app =
-            PhotosortApp::new_with_mode(&cc, library.data.clone(), false, open_thumbnails);
+        let mut app = PhotosortApp::new_with_mode(&cc, library.data.clone(), false, thumbnails);
         app.set_retire(|_| panic!("tests never reach the Recycle Bin"));
         let mut headless = Self {
             ctx,
@@ -358,10 +368,25 @@ impl Headless {
     }
 }
 
+/// Gives no thumbnail while the test runs: a thumbnail thread also notices missing files.
+struct HeldThumbnails(Mutex<mpsc::Receiver<()>>);
+
+impl ThumbnailProvider for HeldThumbnails {
+    fn get(&self, _source: &Path, _sha256: &str) -> io::Result<PathBuf> {
+        let _ = self.0.lock().unwrap_or_else(|e| e.into_inner()).recv();
+        Err(io::ErrorKind::NotFound.into())
+    }
+}
+
 #[test]
 fn reload_removes_photos_moved_outside_the_app() {
     let library = Library::new();
-    let mut app = Headless::open(&library);
+    let (gate, held) = mpsc::channel();
+    let mut app = Headless::open_with(&library, |_, _| {
+        (Arc::new(HeldThumbnails(Mutex::new(held))), None)
+    });
+    // Declared after the app, so it opens before the app waits for its threads.
+    let _gate = gate;
     assert!(app.shows("a.png") && app.shows("b.png"));
 
     fs::rename(
@@ -369,11 +394,28 @@ fn reload_removes_photos_moved_outside_the_app() {
         library.tmp.path().join("a.png"),
     )
     .unwrap();
+    for _ in 0..25 {
+        thread::sleep(Duration::from_millis(20));
+        app.run(Vec::new());
+    }
+    assert!(app.shows("a.png"), "only «Recargar» may notice");
+    assert_eq!(names(&library.entries()), ["a.png", "b.png"]);
+
+    // A big new file keeps the review of the folders busy long enough to see the button.
+    fs::File::create(library.root.as_path().join("grande.mp4"))
+        .unwrap()
+        .set_len(128 * 1024 * 1024)
+        .unwrap();
     app.click("Recargar");
 
+    app.wait_for("«Recargando…»", |app| {
+        app.button("Recargando…")
+            .is_some_and(|(_, button)| button.is_disabled())
+    });
     app.wait_for("a.png leaves the gallery", |app| !app.shows("a.png"));
     assert!(app.shows("b.png"));
-    assert_eq!(names(&library.entries()), ["b.png"]);
+    assert!(app.button("Recargar").is_some());
+    assert_eq!(names(&library.entries()), ["b.png", "grande.mp4"]);
 }
 
 #[test]

@@ -17,7 +17,7 @@ use export::{ExportItem, ExportReport, Layout, Operation, Outcome};
 use fsguard::{LibraryRoot, MoveSource, ensure_writable};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -103,9 +103,14 @@ impl Moving {
     }
 
     fn start(&mut self) -> Result<(), String> {
+        self.start_notifying(None)
+    }
+
+    /// `notify` runs on the moving thread, after each file.
+    fn start_notifying(&mut self, notify: Option<Notify>) -> Result<(), String> {
         let roots = vec![LibraryRoot::new(&self.lib).unwrap()];
         let (db, data) = (self.db(), self.data.clone());
-        self.wizard.start_export(None, db, roots, data)
+        self.wizard.start_export(notify, db, roots, data)
     }
 
     fn photos_in(dir: &Path) -> usize {
@@ -422,15 +427,28 @@ fn cancelling_a_move_keeps_what_was_moved_undoable_and_leaves_the_rest() {
     let mut m = Moving::new(40);
     m.preview();
     m.wizard.request_move_confirmation().unwrap();
-    m.start().unwrap();
+    // The moving thread waits after the first file until the cancel is in, so nothing is left to
+    // chance.
+    let (moved_one, first_moved) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel::<()>();
+    let resumed = Mutex::new(resumed);
+    let hold: Notify = Arc::new(move || {
+        let _ = moved_one.send(());
+        let _ = resumed.lock().unwrap().recv();
+    });
+    m.start_notifying(Some(hold)).unwrap();
+    first_moved
+        .recv_timeout(Duration::from_secs(10))
+        .expect("first progress");
     m.wizard.cancel_export();
+    drop(resume);
     wait_until(&mut m.wizard, |p| matches!(p, ExportPhase::Done(_)));
     let ExportPhase::Done(summary) = m.wizard.phase().clone() else {
         panic!("expected Done");
     };
 
     assert!(summary.stopped);
-    assert!((1..40).contains(&summary.moved), "{}", summary.moved);
+    assert_eq!(summary.moved, 1);
     assert_eq!(Moving::photos_in(&m.out), summary.moved);
     assert_eq!(Moving::photos_in(&m.lib), 40 - summary.moved);
     let cat = m.catalog();

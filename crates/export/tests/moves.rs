@@ -236,8 +236,13 @@ fn a_declined_recycle_keeps_the_original() {
 fn an_original_changed_during_the_copy_is_never_retired() {
     let s = setup();
     let src = s.library.join("a.jpg");
-    // Same size: only the content tells.
-    let edit = |original: &Path| fs::write(original, b"PHOTO A").unwrap();
+    // Same size and same dates: only the content tells.
+    let edit = |original: &Path| {
+        let before = dates(original);
+        fs::write(original, b"PHOTO A").unwrap();
+        set_dates(original);
+        assert_eq!(dates(original), before);
+    };
     let mut ctx = s.context(&never, true);
     ctx.before_retire = Some(&edit);
 

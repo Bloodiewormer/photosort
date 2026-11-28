@@ -58,6 +58,26 @@ fn move_source_refuses_folders_links_and_missing_files() {
     }
 }
 
+/// Making a symbolic link to a file needs developer mode or administrator rights: without them there
+/// is nothing to check here, and the unit test of the reparse flag still covers the rule.
+#[cfg(windows)]
+#[test]
+fn a_symbolic_link_to_a_file_is_not_a_move_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let photo = tmp.path().join("a.jpg");
+    fs::write(&photo, b"a").unwrap();
+    let link = tmp.path().join("enlace.jpg");
+    if let Err(e) = std::os::windows::fs::symlink_file(&photo, &link) {
+        eprintln!("omitido, no se pueden crear enlaces simbólicos: {e}");
+        return;
+    }
+
+    assert!(matches!(
+        ensure_move_source(&link),
+        Err(GuardError::NotAMovableFile(_))
+    ));
+}
+
 #[test]
 fn move_dir_allows_a_library_but_refuses_app_data() {
     let tmp = tempfile::tempdir().unwrap();
